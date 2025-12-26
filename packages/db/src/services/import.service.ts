@@ -4,6 +4,7 @@ import {
   TABLE_NAMES,
   ch,
   chInsertCSV,
+  chQuery,
   convertClickhouseDateToJs,
   formatClickhouseDate,
   getReplicatedTableName,
@@ -96,6 +97,39 @@ export async function generateSessionIds(
   importId: string,
   from: string,
 ): Promise<void> {
+  // Pre-check: Verify if session_ids need to be generated
+  // This prevents unnecessary ALTER TABLE operations on retry after crashes
+  // Solves: Import job hanging when retrying with session_ids already populated
+  const checkQuery = `
+    SELECT countIf(session_id = '' AND device != 'server') as empty_count
+    FROM events_imports
+    WHERE import_id = {importId:String}
+      ${from ? "AND toDate(created_at) = {from:String}" : ""}
+      AND import_status = 'pending'
+  `;
+
+  const checkResult = await chQuery<{ empty_count: string }>(checkQuery, {
+    importId,
+    from,
+  });
+
+  const emptyCount = Number.parseInt(checkResult[0]?.empty_count || '0', 10);
+
+  if (emptyCount === 0) {
+    console.log('Session IDs already generated, skipping ALTER TABLE', {
+      importId,
+      from,
+      reason: 'All non-server events already have session_ids populated',
+    });
+    return; // Skip ALTER TABLE - session_ids already exist
+  }
+
+  console.log('Generating session IDs via ALTER TABLE', {
+    importId,
+    from,
+    emptyCount,
+  });
+
   const rangeWhere = [
     'import_id = {importId:String}',
     "import_status = 'pending'",
@@ -129,6 +163,12 @@ export async function generateSessionIds(
       send_progress_in_http_headers: 1,
       http_headers_progress_interval_ms: '50000',
     },
+  });
+
+  console.log('Session IDs generated successfully', {
+    importId,
+    from,
+    rowsUpdated: emptyCount,
   });
 }
 
