@@ -83,42 +83,17 @@ export async function up() {
     console.log('========================================');
     console.log('');
 
-    // Use day-by-day batching to avoid timeouts
-    const backfillSqls = moveDataBetweenTables({
-      from: 'events',
-      to: isClustered ? 'events_daily_stats_replicated' : 'events_daily_stats',
-      columns: [
-        'project_id',
-        'name',
-        'toDate(created_at) as date',
-        'uniqState(profile_id) as unique_profiles_state',
-        'uniqState(session_id) as unique_sessions_state',
-        'count() as event_count',
-      ],
-      batch: {
-        startDate,
-        endDate,
-        column: 'toDate(created_at)',
-        interval: 'day',
-        transform: (date: Date) => {
-          const year = date.getFullYear();
-          const month = String(date.getMonth() + 1).padStart(2, '0');
-          const day = String(date.getDate()).padStart(2, '0');
-          return `${year}-${month}-${day}`;
-        },
-      },
-    });
+    // Generate day-by-day INSERT statements with proper GROUP BY
+    const targetTable = isClustered ? 'events_daily_stats_replicated' : 'events_daily_stats';
+    const backfillSqls: string[] = [];
 
-    // Wrap each INSERT with GROUP BY since we're selecting aggregates
-    const groupedBackfillSqls = backfillSqls.map((sql) => {
-      // Extract the WHERE clause and modify the query structure
-      const whereMatch = sql.match(/WHERE (.+)$/);
-      if (!whereMatch) return sql;
+    let currentDate = new Date(endDate);
+    currentDate.setDate(currentDate.getDate() - 1); // Start from the day before endDate
 
-      const whereClause = whereMatch[1];
-      const [insertPart] = sql.split('SELECT');
+    while (currentDate >= startDate) {
+      const dateStr = currentDate.toISOString().split('T')[0];
 
-      return `${insertPart}
+      const sql = `INSERT INTO ${targetTable}
       SELECT
         project_id,
         name,
@@ -127,11 +102,14 @@ export async function up() {
         uniqState(session_id) as unique_sessions_state,
         count() as event_count
       FROM events
-      WHERE ${whereClause}
+      WHERE toDate(created_at) = '${dateStr}'
       GROUP BY project_id, name, date`;
-    });
 
-    sqls.push(...groupedBackfillSqls);
+      backfillSqls.push(sql);
+      currentDate.setDate(currentDate.getDate() - 1);
+    }
+
+    sqls.push(...backfillSqls);
   } else {
     console.log('No data found in the specified date range, skipping backfill');
   }
