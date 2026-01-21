@@ -69,26 +69,25 @@ export async function up() {
   if (dataRange[0]?.min_date && dataRange[0]?.max_date) {
     const startDate = new Date(dataRange[0].min_date);
     const endDate = new Date(dataRange[0].max_date);
-    endDate.setDate(endDate.getDate() + 1); // Make it exclusive (next day)
 
     const totalEvents = Number(dataRange[0].total_events);
-    const daysDiff = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+    const daysDiff = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 
     console.log('========================================');
     console.log('📊 Backfill Plan:');
     console.log(`   Start Date: ${startDate.toISOString().split('T')[0]}`);
-    console.log(`   End Date:   ${dataRange[0].max_date}`);
+    console.log(`   End Date:   ${endDate.toISOString().split('T')[0]} (inclusive)`);
     console.log(`   Days:       ${daysDiff} days`);
     console.log(`   Events:     ${totalEvents.toLocaleString()} total events`);
     console.log('========================================');
     console.log('');
 
     // Generate day-by-day INSERT statements with proper GROUP BY
+    // Include today (endDate) in backfill to capture all historical data
     const targetTable = isClustered ? 'events_daily_stats_replicated' : 'events_daily_stats';
     const backfillSqls: string[] = [];
 
-    let currentDate = new Date(endDate);
-    currentDate.setDate(currentDate.getDate() - 1); // Start from the day before endDate
+    let currentDate = new Date(endDate); // Start from endDate (today)
 
     while (currentDate >= startDate) {
       const dateStr = currentDate.toISOString().split('T')[0];
