@@ -9,9 +9,8 @@ import type {
 } from '@openpanel/validation';
 import type { IChartEventFilter } from '@openpanel/validation';
 
-import { chQuery } from '../clickhouse-old';
-import { TABLE_NAMES } from '../clickhouse/client';
-import { db } from '../prisma';
+import { chQuery, TABLE_NAMES } from '../clickhouse/client';
+import { db } from '../prisma-client';
 import { getEventFiltersWhereClause } from './chart.service';
 
 /**
