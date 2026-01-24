@@ -259,12 +259,16 @@ function EventCriteriaItem({
         <div className="flex-1">
           <label className="mb-1 block text-sm font-medium">Event</label>
           <ComboboxAdvanced
-            items={eventNames}
+            items={eventNames.map(event => ({
+              value: event.name,
+              label: event.name,
+            }))}
             value={criteria.name ? [criteria.name] : []}
             onChange={(values) =>
               onChange({ ...criteria, name: values[0] || '' })
             }
             placeholder="Select event..."
+            searchable
             className="w-full"
           />
         </div>
