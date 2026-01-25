@@ -12,6 +12,105 @@ import { csvEscapeField, csvEscapeJson } from '../clickhouse/csv';
 import { type Prisma, db } from '../prisma-client';
 import type { IClickhouseEvent } from './event.service';
 
+/**
+ * Poll ClickHouse system.mutations table to check if mutation is complete
+ */
+async function waitForMutationComplete(
+  importId: string,
+  from: string,
+  operationName: string,
+  maxWaitMs = 1800000, // 30 minutes max
+  pollIntervalMs = 10000, // Check every 10 seconds
+): Promise<void> {
+  const startTime = Date.now();
+
+  while (true) {
+    const elapsed = Date.now() - startTime;
+
+    if (elapsed > maxWaitMs) {
+      throw new Error(
+        `Mutation timeout after ${elapsed}ms waiting for ${operationName}`,
+      );
+    }
+
+    const mutationsQuery = `
+      SELECT
+        mutation_id,
+        command,
+        create_time,
+        is_done,
+        latest_fail_reason
+      FROM system.mutations
+      WHERE database = currentDatabase()
+        AND table = 'events_imports'
+        AND is_done = 0
+      ORDER BY create_time DESC
+      LIMIT 10
+    `;
+
+    try {
+      const result = await ch.query({
+        query: mutationsQuery,
+        format: 'JSONEachRow',
+      });
+
+      const mutations = (await result.json()) as Array<{
+        mutation_id: string;
+        command: string;
+        create_time: string;
+        is_done: number;
+        latest_fail_reason: string;
+      }>;
+
+      if (mutations.length === 0) {
+        return;
+      }
+
+      let failedMutation = null;
+      for (let i = 0; i < mutations.length; i++) {
+        if (mutations[i].latest_fail_reason) {
+          failedMutation = mutations[i];
+          break;
+        }
+      }
+      if (failedMutation) {
+        throw new Error(
+          `Mutation failed: ${failedMutation.latest_fail_reason}`,
+        );
+      }
+
+      await sleep(pollIntervalMs);
+    } catch (error) {
+      if (error instanceof Error) {
+        // If it's a mutation failure or timeout, throw immediately
+        if (
+          error.message.indexOf('Mutation failed') !== -1 ||
+          error.message.indexOf('Mutation timeout') !== -1
+        ) {
+          throw error;
+        }
+        // For system.mutations query errors, assume mutation completed if we've waited long enough
+        if (elapsed > 60000) {
+          // After 1 minute of polling errors, assume it completed
+          console.warn(
+            `Cannot query system.mutations after ${Math.round(elapsed / 1000)}s, assuming mutation completed`,
+            { operationName, error: error.message },
+          );
+          return;
+        }
+      }
+      // Retry for network/transient errors
+      await sleep(pollIntervalMs);
+    }
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve: () => void) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 export interface ImportStageResult {
   importId: string;
   totalEvents: number;
@@ -99,12 +198,12 @@ export async function generateSessionIds(
   importId: string,
   from: string,
 ): Promise<void> {
-  console.log('ALTER TABLE session_id generation starting', {
+  console.log('ALTER TABLE session_id generation starting (async mode)', {
     importId,
     from,
     settings: {
-      mutations_sync: '2',
-      wait_end_of_query: 1,
+      mutations_sync: '1',
+      wait_end_of_query: 0,
     },
   });
 
@@ -139,22 +238,21 @@ export async function generateSessionIds(
       query: updateQuery,
       query_params: { importId, from },
       clickhouse_settings: {
-        wait_end_of_query: 1,
-        mutations_sync: '2', // Wait for mutation to complete on all replicas (critical!)
+        wait_end_of_query: 0,
+        mutations_sync: '1',
         send_progress_in_http_headers: 1,
         http_headers_progress_interval_ms: '50000',
       },
     });
 
-    const elapsed = Date.now() - startTime;
+    await waitForMutationComplete(importId, from, 'session_id generation');
 
+    const elapsed = Date.now() - startTime;
     console.log('ALTER TABLE session_id generation completed', {
       importId,
       from,
-      elapsedMs: elapsed,
       elapsedSec: Math.round(elapsed / 1000),
       elapsedMin: (elapsed / 60000).toFixed(2),
-      status: 'success',
     });
   } catch (error) {
     const elapsed = Date.now() - startTime;
@@ -652,7 +750,9 @@ export async function backfillSessionsToProduction(
  * Mark import as complete by updating status
  */
 export async function markImportComplete(importId: string): Promise<void> {
-  // In clustered mode, we must use the replicated table for mutations
+  console.log('Marking import as complete (async mode)', { importId });
+  const startTime = Date.now();
+
   const mutationTableName = getReplicatedTableName(TABLE_NAMES.events_imports);
   const updateQuery = `
     ALTER TABLE ${mutationTableName}
@@ -664,13 +764,19 @@ export async function markImportComplete(importId: string): Promise<void> {
     query: updateQuery,
     query_params: { importId },
     clickhouse_settings: {
-      wait_end_of_query: 1,
-      mutations_sync: '2', // Wait for mutation to complete
-      // Ask ClickHouse to periodically send query execution progress in HTTP headers, creating some activity in the connection.
+      wait_end_of_query: 0,
+      mutations_sync: '1',
       send_progress_in_http_headers: 1,
-      // The interval of sending these progress headers. Here it is less than 60s,
       http_headers_progress_interval_ms: '50000',
     },
+  });
+
+  await waitForMutationComplete(importId, '', 'mark import as processed');
+
+  const elapsed = Date.now() - startTime;
+  console.log('Mark import as complete completed', {
+    importId,
+    elapsedSec: Math.round(elapsed / 1000),
   });
 }
 
