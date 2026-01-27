@@ -99,6 +99,15 @@ export async function generateSessionIds(
   importId: string,
   from: string,
 ): Promise<void> {
+  console.log('ALTER TABLE session_id generation starting', {
+    importId,
+    from,
+    settings: {
+      mutations_sync: '1',
+      wait_end_of_query: 0,
+    },
+  });
+
   const startTime = Date.now();
 
   const rangeWhere = [
