@@ -197,8 +197,29 @@ export class MixpanelProvider extends BaseImportProvider<MixpanelRawEvent> {
   }
 
   validate(rawEvent: MixpanelRawEvent): boolean {
+    // Check event structure
     const res = zMixpanelRawEvent.safeParse(rawEvent);
-    return res.success;
+    if (!res.success) {
+      return false;
+    }
+
+    // list of events to exclude from import
+    const excludedEvents = [
+      'appOpen',
+      'touchEvent',
+      'reelOpen',
+      'reelFinish',
+      // Add more event names here to exclude them from import
+    ];
+
+    // Check if event should be excluded
+    const eventName = rawEvent.event;
+    if (excludedEvents.includes(eventName)) {
+      this.logger?.debug('Event excluded by filter', { eventName });
+      return false;
+    }
+
+    return true;
   }
 
   transformEvent(_rawEvent: MixpanelRawEvent): IClickhouseEvent {
