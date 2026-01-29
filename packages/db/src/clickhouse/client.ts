@@ -134,7 +134,7 @@ const cleanQuery = (query?: string) =>
 
 export async function withRetry<T>(
   operation: () => Promise<T>,
-  maxRetries = 5,
+  maxRetries = 3,
   baseDelay = 500,
 ): Promise<T> {
   let lastError: Error | undefined;
