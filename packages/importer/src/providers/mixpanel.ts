@@ -205,11 +205,16 @@ export class MixpanelProvider extends BaseImportProvider<MixpanelRawEvent> {
 
     // list of events to exclude from import
     const excludedEvents = [
-      'appOpen',
-      'touchEvent',
-      'reelOpen',
-      'reelFinish',
-      // Add more event names here to exclude them from import
+      'reelForegroundWatchTime',
+      'reelBackgroundWatchTime',
+      'firebaseRemoteConfigLoad',
+      'shorebirdInitialized',
+      'shorebirdUpdateCheck',
+      'logoScreenPaused',
+      'otpLessEvent',
+      'trialPromoVideoFinished',
+      'installReferrer',
+      'audioInterruption',
     ];
 
     // Check if event should be excluded
