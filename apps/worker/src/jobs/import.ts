@@ -173,6 +173,16 @@ export async function importJob(job: Job<ImportQueuePayload>) {
             ) => providerInstance!.transformEvent(event),
           );
 
+          // Calculate data size being inserted
+          const dataSizeBytes = Buffer.byteLength(JSON.stringify(transformedEvents), 'utf8');
+          const dataSizeMB = (dataSizeBytes / (1024 * 1024)).toFixed(2);
+
+          jobLogger.info('Inserting batch into ClickHouse', {
+            batchSize: transformedEvents.length,
+            dataSizeMB: dataSizeMB,
+            dataSizeBytes: dataSizeBytes,
+          });
+
           await insertImportBatch(transformedEvents, importId);
 
           processedEvents += eventBatch.length;
@@ -210,6 +220,16 @@ export async function importJob(job: Job<ImportQueuePayload>) {
             event,
           ) => providerInstance!.transformEvent(event),
         );
+
+        // Calculate data size being inserted
+        const dataSizeBytes = Buffer.byteLength(JSON.stringify(transformedEvents), 'utf8');
+        const dataSizeMB = (dataSizeBytes / (1024 * 1024)).toFixed(2);
+
+        jobLogger.info('Inserting final batch into ClickHouse', {
+          batchSize: transformedEvents.length,
+          dataSizeMB: dataSizeMB,
+          dataSizeBytes: dataSizeBytes,
+        });
 
         await insertImportBatch(transformedEvents, importId);
 
