@@ -16,6 +16,7 @@ export interface ImportStageResult {
   importId: string;
   totalEvents: number;
   insertedEvents: number;
+  csvDataSizeBytes?: number;
 }
 
 export interface ImportProgress {
@@ -78,6 +79,9 @@ export async function insertImportBatch(
     return fields.join(',');
   });
 
+  // Calculate actual CSV data size being sent to ClickHouse
+  const csvDataSize = csvRows.reduce((sum, row) => sum + row.length + 1, 0);
+
   await chInsertCSV(TABLE_NAMES.events_imports, csvRows);
 
   // Explicitly release memory
@@ -87,6 +91,7 @@ export async function insertImportBatch(
     importId,
     totalEvents: events.length,
     insertedEvents: events.length,
+    csvDataSizeBytes: csvDataSize,
   };
 }
 
