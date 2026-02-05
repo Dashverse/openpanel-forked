@@ -404,22 +404,22 @@ export async function getChartSql({
   timezone: string;
   customEvent?: { name: string; definition: ICustomEventDefinition };
 }) {
-  // Pre-fetch cohort metadata for all cohorts used in this query
-  const cohortIds: string[] = [];
+  // Pre-fetch cohort metadata for all cohorts used in this query (deduplicated)
+  const cohortIdsSet = new Set<string>();
 
   // Extract cohort IDs from breakdowns
   breakdowns?.forEach((b) => {
     if (b.cohortId) {
-      cohortIds.push(b.cohortId);
+      cohortIdsSet.add(b.cohortId);
     } else if (b.name.startsWith('cohort:')) {
-      cohortIds.push(b.name.split(':')[1]!);
+      cohortIdsSet.add(b.name.split(':')[1]!);
     }
   });
 
   // Extract cohort IDs from event filters
   event.filters?.forEach((filter) => {
     if (filter.cohortId) {
-      cohortIds.push(filter.cohortId);
+      cohortIdsSet.add(filter.cohortId);
     }
   });
 
@@ -427,10 +427,12 @@ export async function getChartSql({
   chartType?.forEach((chart) => {
     chart.filters?.forEach((filter) => {
       if (filter.cohortId) {
-        cohortIds.push(filter.cohortId);
+        cohortIdsSet.add(filter.cohortId);
       }
     });
   });
+
+  const cohortIds = Array.from(cohortIdsSet);
 
   // Fetch cohort metadata from Postgres (always fresh, no cache)
   const cohortMetadata = await fetchCohortsMetadata(cohortIds);

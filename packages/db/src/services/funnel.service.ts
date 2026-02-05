@@ -305,22 +305,24 @@ export class FunnelService {
       throw new Error('events are required');
     }
 
-    // Extract cohort IDs from breakdowns and event filters
-    const cohortIds: string[] = [];
+    // Extract cohort IDs from breakdowns and event filters (deduplicated)
+    const cohortIdsSet = new Set<string>();
     breakdowns?.forEach((b) => {
       if (b.cohortId) {
-        cohortIds.push(b.cohortId);
+        cohortIdsSet.add(b.cohortId);
       } else if (b.name.startsWith('cohort:')) {
-        cohortIds.push(b.name.split(':')[1]!);
+        cohortIdsSet.add(b.name.split(':')[1]!);
       }
     });
     eventSeries.forEach((event) => {
       event.filters?.forEach((filter) => {
         if (filter.cohortId) {
-          cohortIds.push(filter.cohortId);
+          cohortIdsSet.add(filter.cohortId);
         }
       });
     });
+
+    const cohortIds = Array.from(cohortIdsSet);
 
     // Fetch cohort metadata from Postgres (always fresh, no cache)
     const cohortMetadata = await fetchCohortsMetadata(cohortIds);
