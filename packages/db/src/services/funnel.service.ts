@@ -13,6 +13,9 @@ import { createSqlBuilder } from '../sql-builder';
 import {
   getEventFiltersWhereClause,
   getSelectPropertyKey,
+  fetchCohortsMetadata,
+  getCohortCteName,
+  buildCohortMembershipQuery,
 } from './chart.service';
 import { onlyReportEvents } from './reports.service';
 import {
@@ -302,6 +305,26 @@ export class FunnelService {
       throw new Error('events are required');
     }
 
+    // Extract cohort IDs from breakdowns and event filters
+    const cohortIds: string[] = [];
+    breakdowns?.forEach((b) => {
+      if (b.cohortId) {
+        cohortIds.push(b.cohortId);
+      } else if (b.name.startsWith('cohort:')) {
+        cohortIds.push(b.name.split(':')[1]!);
+      }
+    });
+    eventSeries.forEach((event) => {
+      event.filters?.forEach((filter) => {
+        if (filter.cohortId) {
+          cohortIds.push(filter.cohortId);
+        }
+      });
+    });
+
+    // Fetch cohort metadata from Postgres (always fresh, no cache)
+    const cohortMetadata = await fetchCohortsMetadata(cohortIds);
+
     const funnelWindowSeconds = funnelWindow * 3600;
     const funnelWindowMilliseconds = funnelWindowSeconds * 1000;
     const group = this.getFunnelGroup(funnelGroup);
@@ -361,6 +384,13 @@ export class FunnelService {
     for (const withClause of withClauses) {
       funnelQuery.with(withClause.name, withClause.query);
     }
+
+    // Add cohort CTEs (computed once per query, not per row)
+    cohortIds.forEach((cohortId) => {
+      const cohortMeta = cohortMetadata.get(cohortId);
+      const cohortQuery = buildCohortMembershipQuery(cohortId, projectId, cohortMeta);
+      funnelQuery.with(getCohortCteName(cohortId), cohortQuery);
+    });
 
     if (sessionsCte) {
       funnelCte.leftJoin('sessions s', 's.sid = events.session_id');
