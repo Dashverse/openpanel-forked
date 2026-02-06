@@ -537,6 +537,7 @@ export async function moveImportsToProduction(
   await ch.command({
     query: migrationQuery,
     query_params: { importId, from },
+    request_timeout: 600000, // 10 minutes for large migrations
     clickhouse_settings: {
       wait_end_of_query: 1,
       // Ask ClickHouse to periodically send query execution progress in HTTP headers, creating some activity in the connection.
