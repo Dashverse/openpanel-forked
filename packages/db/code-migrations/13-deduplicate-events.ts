@@ -5,36 +5,53 @@ import {
 import { getIsCluster } from './helpers';
 
 /**
- * Deduplication validation for November 14, 2025
+ * Deduplication validation for a single day
  *
- * This script validates the dedup logic on a single day before
- * running on the full November + December partitions.
- *
- * It does NOT replace any partition — production is untouched.
- * Use this to confirm dedup counts match expected numbers.
+ * Validates dedup logic on a single day before running on full partitions.
+ * Does NOT replace any partition — production is untouched.
  *
  * Usage:
- *   npm run migrate -- 13 --cluster --dry
- *   npm run migrate -- 13 --cluster
+ *   pnpm migrate:deploy:code -- 13 --cluster --dry --date=2025-11-14
+ *   pnpm migrate:deploy:code -- 13 --cluster --date=2025-11-14 --no-record
  */
 
-const TEST_DATE = '2025-11-14';
-const PARTITION = '202511';
-const TMP_TABLE = 'events_tmp';
 const DEDUP_KEY =
   'project_id, name, device_id, profile_id, session_id, created_at, path, properties';
 
+const TMP_TABLE = 'events_tmp';
+
+function parseArgs() {
+  const args = process.argv;
+  const dateArg = args.find((a: string) => a.startsWith('--date='));
+
+  if (!dateArg) {
+    console.error('❌ Missing required --date=YYYY-MM-DD argument');
+    console.error('   Example: pnpm migrate:deploy:code -- 13 --cluster --date=2025-11-14');
+    process.exit(1);
+  }
+
+  const date = dateArg!.split('=')[1]!;
+  const partition = date.replace(/-/g, '').slice(0, 6); // "2025-11-14" → "202511"
+
+  return {
+    date,
+    partition,
+    isCluster: getIsCluster(),
+    isDry: args.includes('--dry'),
+  };
+}
+
 export async function up() {
-  const isCluster = getIsCluster();
-  const isDry = process.argv.includes('--dry');
+  const { date, partition, isCluster, isDry } = parseArgs();
 
   console.log('='.repeat(60));
-  console.log('  DEDUP VALIDATION — Nov 14, 2025');
-  console.log(`  Mode: ${isDry ? 'DRY RUN' : 'EXECUTE'} | Cluster: ${isCluster}`);
+  console.log('  DEDUP VALIDATION');
+  console.log(`  Date:    ${date} (partition: ${partition})`);
+  console.log(`  Mode:    ${isDry ? 'DRY RUN' : 'EXECUTE'} | Cluster: ${isCluster}`);
   console.log('='.repeat(60));
 
-  // Step 0: Show current counts for Nov 14
-  console.log('\n[Step 0] Current counts for Nov 14:');
+  // Step 0: Show current counts for given date
+  console.log(`\n[Step 0] Current counts for ${date}:`);
   const beforeResult = await chMigrationClient.query({
     query: `
       SELECT
@@ -44,8 +61,8 @@ export async function up() {
         count() - uniq(${DEDUP_KEY}) as duplicates,
         round((count() - uniq(${DEDUP_KEY})) / count() * 100, 2) as dup_pct
       FROM events
-      WHERE toYYYYMM(created_at) = ${PARTITION}
-        AND toDate(created_at) = '${TEST_DATE}'
+      WHERE toYYYYMM(created_at) = ${partition}
+        AND toDate(created_at) = '${date}'
       GROUP BY name
       ORDER BY duplicates DESC`,
     format: 'JSONEachRow',
@@ -71,21 +88,21 @@ export async function up() {
     console.log(`
   INSERT INTO ${TMP_TABLE}
   SELECT * FROM events
-  WHERE toYYYYMM(created_at) = ${PARTITION}
-    AND toDate(created_at) = '${TEST_DATE}'
+  WHERE toYYYYMM(created_at) = ${partition}
+    AND toDate(created_at) = '${date}'
   ORDER BY imported_at ASC
   LIMIT 1 BY ${DEDUP_KEY};`);
     return;
   }
 
-  // Step 1: Insert deduplicated Nov 14 data
-  console.log(`\n[Step 1] Inserting deduplicated Nov 14 into ${TMP_TABLE}...`);
-  console.log('  (reads full 202511 partition, progress shown every 5s)');
+  // Step 1: Insert deduplicated data
+  console.log(`\n[Step 1] Inserting deduplicated ${date} into ${TMP_TABLE}...`);
+  console.log(`  (reads full ${partition} partition, progress shown every 5s)`);
   await runClickhouseMigrationCommands([
     `INSERT INTO ${TMP_TABLE}
      SELECT * FROM events
-     WHERE toYYYYMM(created_at) = ${PARTITION}
-       AND toDate(created_at) = '${TEST_DATE}'
+     WHERE toYYYYMM(created_at) = ${partition}
+       AND toDate(created_at) = '${date}'
      ORDER BY imported_at ASC
      LIMIT 1 BY ${DEDUP_KEY}
      SETTINGS
@@ -99,7 +116,7 @@ export async function up() {
     query: `
       SELECT name, count() as total
       FROM ${TMP_TABLE}
-      WHERE toDate(created_at) = '${TEST_DATE}'
+      WHERE toDate(created_at) = '${date}'
       GROUP BY name
       ORDER BY total DESC`,
     format: 'JSONEachRow',
@@ -121,7 +138,7 @@ export async function up() {
 
   console.log('\n' + '='.repeat(60));
   console.log('  VALIDATION COMPLETE');
-  console.log('  If counts look correct → run full month script');
+  console.log('  If counts look correct → run full month script (migration 14)');
   console.log('='.repeat(60));
 }
 
