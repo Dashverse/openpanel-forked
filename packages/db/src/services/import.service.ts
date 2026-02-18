@@ -473,7 +473,7 @@ export async function moveImportsToProduction(
   console.log('[Phase 4] WHERE clause:', whereClause);
 
   const migrationQuery = `
-    INSERT INTO ${TABLE_NAMES.events} (
+    INSERT INTO events_tmp (
       id,
       name,
       sdk_name,
@@ -518,7 +518,7 @@ export async function moveImportsToProduction(
       referrer_name,
       referrer_type,
       duration,
-      created_at,
+      addHours(created_at, 5.5) as created_at,
       country,
       city,
       region,
