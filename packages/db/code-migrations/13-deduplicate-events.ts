@@ -32,6 +32,11 @@ const COLUMNS = `id, name, sdk_name, sdk_version, device_id, profile_id, project
   duration, created_at, country, city, region, longitude, latitude,
   os, os_version, browser, browser_version, device, brand, model, imported_at`;
 
+const COLUMNS = `id, name, sdk_name, sdk_version, device_id, profile_id, project_id,
+  session_id, path, origin, referrer, referrer_name, referrer_type,
+  duration, created_at, country, city, region, longitude, latitude,
+  os, os_version, browser, browser_version, device, brand, model, imported_at`;
+
 function parseArgs() {
   const args = process.argv;
   const dateArg = args.find((a: string) => a.startsWith('--date='));
@@ -84,6 +89,8 @@ export async function up() {
       `  ${row.name.padEnd(25)} ${Number(row.total).toLocaleString().padStart(10)} ${Number(row.unique_events).toLocaleString().padStart(10)}`,
     );
   }
+  console.log('  ' + '-'.repeat(37));
+  console.log(`  ${'TOTAL'.padEnd(25)} ${totalLost.toLocaleString().padStart(10)}`);
 
   // Step 1: Check events_imports_v2 full counts for this date (source of truth)
   console.log(`\n[Step 1] events_imports_v2 vs events_tmp for UTC ${date}:`);
