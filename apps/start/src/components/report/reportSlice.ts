@@ -53,6 +53,7 @@ const initialState: InitialState = {
   criteria: 'on_or_after',
   funnelGroup: undefined,
   funnelWindow: undefined,
+  visibleSeries: undefined,
 };
 
 export const reportSlice = createSlice({
@@ -272,6 +273,13 @@ export const reportSlice = createSlice({
       state.dirty = true;
       state.funnelWindow = action.payload || undefined;
     },
+    changeVisibleSeries(
+      state,
+      action: PayloadAction<string[] | undefined>,
+    ) {
+      state.dirty = true;
+      state.visibleSeries = action.payload;
+    },
     reorderEvents(
       state,
       action: PayloadAction<{ fromIndex: number; toIndex: number }>,
@@ -312,6 +320,7 @@ export const {
   changeUnit,
   changeFunnelGroup,
   changeFunnelWindow,
+  changeVisibleSeries,
   reorderEvents,
 } = reportSlice.actions;
 

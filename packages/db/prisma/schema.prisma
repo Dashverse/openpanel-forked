@@ -321,8 +321,9 @@ model Report {
   project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
   previous     Boolean   @default(false)
   criteria     String?
-  funnelGroup  String?
-  funnelWindow Float?
+  funnelGroup   String?
+  funnelWindow  Float?
+  visibleSeries Json?
 
   dashboardId String
   dashboard   Dashboard     @relation(fields: [dashboardId], references: [id], onDelete: Cascade)

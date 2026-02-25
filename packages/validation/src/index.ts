@@ -235,6 +235,10 @@ export const zReportInput = zChartInputBase.extend({
     .describe(
       "Optional unit of measurement for the chart's Y-axis (e.g., $, %, users)",
     ),
+  visibleSeries: z
+    .array(z.string())
+    .optional()
+    .describe('IDs of series that are visible in the chart'),
 });
 
 export const zChartInputAI = zReportInput

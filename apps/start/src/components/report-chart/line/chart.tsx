@@ -1,6 +1,8 @@
 import { useRechartDataModel } from '@/hooks/use-rechart-data-model';
 import { useVisibleSeries } from '@/hooks/use-visible-series';
 import { useTRPC } from '@/integrations/trpc/react';
+import { changeVisibleSeries } from '@/components/report/reportSlice';
+import { useDispatch } from '@/redux';
 import { pushModal } from '@/modals';
 import type { IChartData } from '@/trpc/client';
 import { cn } from '@/utils/cn';
@@ -51,10 +53,12 @@ export function Chart({ data }: Props) {
       lineType,
       series: reportSeries,
       breakdowns,
+      visibleSeries: savedVisibleSeries,
     },
     isEditMode,
     options: { hideXAxis, hideYAxis, maxDomain },
   } = useReportChartContext();
+  const dispatch = useDispatch();
   const dataLength = data.series[0]?.data?.length || 0;
   const trpc = useTRPC();
   const references = useQuery(
@@ -68,7 +72,10 @@ export function Chart({ data }: Props) {
       {},
     ),
   );
-  const { series, setVisibleSeries } = useVisibleSeries(data);
+  const { series, setVisibleSeries } = useVisibleSeries(data, undefined, {
+    initialSeries: savedVisibleSeries,
+    onChange: (ids) => dispatch(changeVisibleSeries(ids)),
+  });
   const rechartData = useRechartDataModel(series);
 
   let dotIndex = undefined;
