@@ -87,6 +87,7 @@ export function transformReport(
     criteria: (report.criteria as ICriteria) ?? undefined,
     funnelGroup: report.funnelGroup ?? undefined,
     funnelWindow: report.funnelWindow ?? undefined,
+    visibleSeries: (report.visibleSeries as string[] | null) ?? undefined,
     layout: report.layout ?? undefined,
   };
 }
