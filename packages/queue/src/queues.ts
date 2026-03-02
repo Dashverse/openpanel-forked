@@ -111,18 +111,13 @@ export type CronQueuePayloadProject = {
   type: 'deleteProjects';
   payload: undefined;
 };
-export type CronQueuePayloadCustomAlerts = {
-  type: 'customAlerts';
-  payload: undefined;
-};
 export type CronQueuePayload =
   | CronQueuePayloadSalt
   | CronQueuePayloadFlushEvents
   | CronQueuePayloadFlushSessions
   | CronQueuePayloadFlushProfiles
   | CronQueuePayloadPing
-  | CronQueuePayloadProject
-  | CronQueuePayloadCustomAlerts;
+  | CronQueuePayloadProject;
 
 export type MiscQueuePayloadTrialEndingSoon = {
   type: 'trialEndingSoon';
