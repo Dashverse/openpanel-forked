@@ -65,7 +65,7 @@ export class ConversionService {
     const materializedColumns = await getMaterializedColumns('events');
     const materializedColumnNames = Object.values(materializedColumns);
     const materializedColumnsSelect = materializedColumnNames.length > 0
-      ? `, ${materializedColumnNames.join(', ')}`
+      ? `, ${materializedColumnNames.map(col => `\`${col}\``).join(', ')}`
       : '';
 
     // Check if this is a custom event
@@ -152,7 +152,7 @@ export class ConversionService {
     const materializedColumns = await getMaterializedColumns('events');
     const materializedColumnNames = Object.values(materializedColumns);
     const materializedColumnsSelect = materializedColumnNames.length > 0
-      ? `, ${materializedColumnNames.join(', ')}`
+      ? `, ${materializedColumnNames.map(col => `\`${col}\``).join(', ')}`
       : '';
 
     // Build CTEs for custom events
