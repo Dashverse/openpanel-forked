@@ -434,11 +434,14 @@ export class ConversionService {
 
     if (breakdownGroupBy.length > 0) {
       // top_breakdowns CTE: rank breakdowns — by fastest TTC when measuring time, else by rate
+      const ttcTopBreakdownCol = measuring === 'time_to_convert'
+        ? ', avg(ttc_avg) AS avg_ttc'
+        : '';
       const topBreakdownsOrderBy = measuring === 'time_to_convert'
-        ? 'avg(ttc_avg) ASC'
+        ? 'avg_ttc ASC'
         : 'avg_rate DESC';
       const topBreakdownsCte = `top_breakdowns AS (
-        SELECT ${breakdownGroupByStr}, avg(conversion_rate_percentage) AS avg_rate
+        SELECT ${breakdownGroupByStr}, avg(conversion_rate_percentage) AS avg_rate${ttcTopBreakdownCol}
         FROM agg
         GROUP BY ${breakdownGroupByStr}
         ORDER BY ${topBreakdownsOrderBy}
@@ -450,7 +453,7 @@ export class ConversionService {
         .join(' AND ');
 
       const orderBy = measuring === 'time_to_convert'
-        ? 'top_breakdowns.avg_rate ASC, agg.event_day ASC'
+        ? 'top_breakdowns.avg_ttc ASC, agg.event_day ASC'
         : 'top_breakdowns.avg_rate DESC, agg.event_day ASC';
 
       finalSql = `
