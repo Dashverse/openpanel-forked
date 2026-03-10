@@ -2,6 +2,7 @@ import { round } from '@/utils/math';
 import { isNil } from 'ramda';
 
 export function fancyMinutes(time: number) {
+  if (time < 0) time = 0;
   const minutes = Math.floor(time / 60);
   if (minutes > 1440) {
     const days = Math.floor(minutes / 1440);
