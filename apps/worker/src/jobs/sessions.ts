@@ -2,6 +2,7 @@ import type { Job } from 'bullmq';
 
 import type { SessionsQueuePayload } from '@openpanel/queue';
 
+import { invalidateSessionEndCache } from '@/utils/session-handler';
 import { logger } from '@/utils/logger';
 import {
   db,
@@ -12,9 +13,11 @@ import { cacheable } from '@openpanel/redis';
 import { createSessionEnd } from './events.create-session-end';
 
 export async function sessionsJob(job: Job<SessionsQueuePayload>) {
+  const { projectId, deviceId } = job.data.payload;
+  invalidateSessionEndCache(projectId, deviceId);
   const res = await createSessionEnd(job);
   try {
-    await updateEventsCount(job.data.payload.projectId);
+    await updateEventsCount(projectId);
   } catch (e) {
     logger.error('Failed to update events count', e);
   }

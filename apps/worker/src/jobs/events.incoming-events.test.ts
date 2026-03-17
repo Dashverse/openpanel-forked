@@ -13,6 +13,7 @@ import {
 } from '@openpanel/queue';
 import type { Job } from 'bullmq';
 import { type Mock, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearSessionEndCache } from '@/utils/session-handler';
 import { incomingEvent } from './events.incoming-event';
 
 vi.mock('@openpanel/queue');
@@ -66,6 +67,7 @@ const uaInfoServer: EventsQueuePayloadIncomingEvent['payload']['uaInfo'] = {
 describe('incomingEvent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearSessionEndCache();
   });
 
   it('should create a session start and an event', async () => {
@@ -428,5 +430,162 @@ describe('incomingEvent', () => {
     });
 
     expect(sessionsQueue.add).not.toHaveBeenCalled();
+  });
+
+  describe('session cache', () => {
+    it('should skip Redis lookup on cache hit (second event reuses cached session)', async () => {
+      const spySessionsQueueGetJob = vi.spyOn(sessionsQueue, 'getJob');
+      const changeDelay = vi.fn();
+      const updateData = vi.fn();
+      const timestamp = new Date();
+
+      // Mock sessionsQueue.add to return a proper job object (gets cached)
+      vi.spyOn(sessionsQueue, 'add').mockResolvedValueOnce({
+        changeDelay,
+        updateData,
+        data: {
+          type: 'createSessionEnd',
+          payload: {
+            sessionId: 'session-cached',
+            deviceId: currentDeviceId,
+            profileId: currentDeviceId,
+            projectId,
+          },
+        },
+      } as Partial<Job> as Job);
+
+      const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
+        geo,
+        event: {
+          name: 'first_event',
+          timestamp: timestamp.toISOString(),
+          properties: { __path: 'https://example.com/test' },
+          isTimestampFromThePast: false,
+        },
+        headers: {
+          'request-id': '123',
+          'user-agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'openpanel-sdk-name': 'web',
+          'openpanel-sdk-version': '1.0.0',
+        },
+        uaInfo,
+        projectId,
+        currentDeviceId,
+        previousDeviceId,
+      };
+
+      // First event — creates new session, caches the job
+      await incomingEvent(jobData);
+      expect(spySessionsQueueGetJob).toHaveBeenCalledTimes(2); // current + previous lookup
+
+      vi.clearAllMocks();
+      const spyGetJob2 = vi.spyOn(sessionsQueue, 'getJob');
+      const spyAdd2 = vi.spyOn(sessionsQueue, 'add');
+
+      // Second event — should use cache, NOT call getJob
+      const jobData2 = {
+        ...jobData,
+        event: {
+          ...jobData.event,
+          name: 'second_event',
+        },
+      };
+      await incomingEvent(jobData2);
+
+      // getJob should NOT be called — cache hit
+      expect(spyGetJob2).not.toHaveBeenCalled();
+      // No new session created
+      expect(spyAdd2).not.toHaveBeenCalled();
+      // changeDelay should still be called (timer reset)
+      expect(changeDelay).toHaveBeenCalledWith(SESSION_TIMEOUT);
+    });
+
+    it('should fall back to Redis on cache miss', async () => {
+      const spySessionsQueueGetJob = vi.spyOn(sessionsQueue, 'getJob');
+      const timestamp = new Date();
+
+      const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
+        geo,
+        event: {
+          name: 'test_event',
+          timestamp: timestamp.toISOString(),
+          properties: { __path: 'https://example.com/test' },
+          isTimestampFromThePast: false,
+        },
+        headers: {
+          'request-id': '123',
+          'user-agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'openpanel-sdk-name': 'web',
+          'openpanel-sdk-version': '1.0.0',
+        },
+        uaInfo,
+        projectId,
+        currentDeviceId,
+        previousDeviceId,
+      };
+
+      // Cache is empty — should go to Redis
+      await incomingEvent(jobData);
+
+      // Redis was called (cache miss → fallback)
+      expect(spySessionsQueueGetJob).toHaveBeenCalled();
+    });
+
+    it('should invalidate cache and create new session after clearSessionEndCache', async () => {
+      const changeDelay = vi.fn();
+      const timestamp = new Date();
+
+      // Mock add to return a proper job
+      vi.spyOn(sessionsQueue, 'add').mockResolvedValueOnce({
+        changeDelay,
+        updateData: vi.fn(),
+        data: {
+          type: 'createSessionEnd',
+          payload: {
+            sessionId: 'session-first',
+            deviceId: currentDeviceId,
+            profileId: currentDeviceId,
+            projectId,
+          },
+        },
+      } as Partial<Job> as Job);
+
+      const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
+        geo,
+        event: {
+          name: 'test_event',
+          timestamp: timestamp.toISOString(),
+          properties: { __path: 'https://example.com/test' },
+          isTimestampFromThePast: false,
+        },
+        headers: {
+          'request-id': '123',
+          'user-agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'openpanel-sdk-name': 'web',
+          'openpanel-sdk-version': '1.0.0',
+        },
+        uaInfo,
+        projectId,
+        currentDeviceId,
+        previousDeviceId,
+      };
+
+      // First event — creates session, caches it
+      await incomingEvent(jobData);
+      const addSpy = vi.spyOn(sessionsQueue, 'add');
+      expect(addSpy).toHaveBeenCalledTimes(0);
+
+      vi.clearAllMocks();
+
+      // Simulate session end — clear cache
+      clearSessionEndCache();
+
+      // Next event — cache is empty, should create new session
+      await incomingEvent(jobData);
+      expect(sessionsQueue.add).toHaveBeenCalledTimes(1);
+    });
   });
 });
