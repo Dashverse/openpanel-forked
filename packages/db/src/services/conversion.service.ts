@@ -108,7 +108,7 @@ export class ConversionService {
       // Minimal SELECT: only the columns actually needed downstream
       const baseColumns = ['profile_id', 'session_id', 'created_at'];
       const selectColumns = [...new Set([...baseColumns, ...extraColumns])];
-      const selectList = selectColumns.map(col => `\`${col}\``).join(', ');
+      const selectList = selectColumns.map(col => col.startsWith('`') ? col : `\`${col}\``).join(', ');
 
       return `${cteName} AS (
         SELECT ${selectList}
@@ -287,16 +287,14 @@ export class ConversionService {
         if (col.startsWith('profile.') || col.startsWith('if(')) return [];
         // Map access (not materialized) — need the whole properties map
         if (col.startsWith('properties[')) return ['properties'];
-        // Strip backticks — materializedColumnsCache values come pre-wrapped, buildSingleEventCte adds them again
-        return [col.replace(/^`|`$/g, '')];
+        return [col];
       });
 
     // Hold property constant: columns needed in both CTEs for the JOIN condition
     const holdExtraCols = holdProperties.flatMap(prop => {
       const col = getSelectPropertyKey(prop, projectId, undefined);
       if (col.startsWith('properties[')) return ['properties'];
-      // Strip backticks — same reason as above
-      return [col.replace(/^`|`$/g, '')];
+      return [col];
     });
 
     const startExtraCols = [...new Set([...breakdownExtraCols, ...holdExtraCols])];
