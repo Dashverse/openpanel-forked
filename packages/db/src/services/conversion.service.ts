@@ -287,14 +287,16 @@ export class ConversionService {
         if (col.startsWith('profile.') || col.startsWith('if(')) return [];
         // Map access (not materialized) — need the whole properties map
         if (col.startsWith('properties[')) return ['properties'];
-        return [col];
+        // Strip backticks — materializedColumnsCache values come pre-wrapped, buildSingleEventCte adds them again
+        return [col.replace(/^`|`$/g, '')];
       });
 
     // Hold property constant: columns needed in both CTEs for the JOIN condition
     const holdExtraCols = holdProperties.flatMap(prop => {
       const col = getSelectPropertyKey(prop, projectId, undefined);
       if (col.startsWith('properties[')) return ['properties'];
-      return [col];
+      // Strip backticks — same reason as above
+      return [col.replace(/^`|`$/g, '')];
     });
 
     const startExtraCols = [...new Set([...breakdownExtraCols, ...holdExtraCols])];
