@@ -11,6 +11,7 @@ import {
 } from '@openpanel/constants';
 import type {
   IChartBreakdown,
+  IChartEventFilter,
   IChartEventItem,
   IChartFormula,
   IChartLineType,
@@ -49,10 +50,14 @@ const initialState: InitialState = {
   formula: undefined,
   unit: undefined,
   metric: 'sum',
-  limit: 20,
+  limit: 50,
   criteria: 'on_or_after',
   funnelGroup: undefined,
   funnelWindow: undefined,
+  globalFilters: [],
+  holdProperties: [],
+  measuring: 'conversion_rate' as const,
+  cohortFilters: [],
 };
 
 export const reportSlice = createSlice({
@@ -272,6 +277,36 @@ export const reportSlice = createSlice({
       state.dirty = true;
       state.funnelWindow = action.payload || undefined;
     },
+    // Global Filters
+    addGlobalFilter: (
+      state,
+      action: PayloadAction<Omit<IChartEventFilter, 'id'>>,
+    ) => {
+      state.dirty = true;
+      state.globalFilters.push({
+        id: shortId(),
+        ...action.payload,
+      });
+    },
+    removeGlobalFilter: (
+      state,
+      action: PayloadAction<{ id: string }>,
+    ) => {
+      state.dirty = true;
+      state.globalFilters = state.globalFilters.filter(
+        (f) => f.id !== action.payload.id,
+      );
+    },
+    changeGlobalFilter: (
+      state,
+      action: PayloadAction<IChartEventFilter>,
+    ) => {
+      state.dirty = true;
+      state.globalFilters = state.globalFilters.map((f) =>
+        f.id === action.payload.id ? action.payload : f,
+      );
+    },
+
     reorderEvents(
       state,
       action: PayloadAction<{ fromIndex: number; toIndex: number }>,
@@ -282,6 +317,33 @@ export const reportSlice = createSlice({
       if (movedEvent) {
         state.series.splice(toIndex, 0, movedEvent);
       }
+    },
+
+    changeLimit(state, action: PayloadAction<number>) {
+      state.dirty = true;
+      state.limit = action.payload;
+    },
+
+    // Hold Properties (funnel)
+    addHoldProperty: (state, action: PayloadAction<string>) => {
+      state.dirty = true;
+      if (!state.holdProperties.includes(action.payload)) {
+        state.holdProperties.push(action.payload);
+      }
+    },
+    removeHoldProperty: (state, action: PayloadAction<string>) => {
+      state.dirty = true;
+      state.holdProperties = state.holdProperties.filter(
+        (prop) => prop !== action.payload,
+      );
+    },
+
+    changeMeasuring(
+      state,
+      action: PayloadAction<'conversion_rate' | 'time_to_convert'>,
+    ) {
+      state.dirty = true;
+      state.measuring = action.payload;
     },
   },
 });
@@ -312,7 +374,14 @@ export const {
   changeUnit,
   changeFunnelGroup,
   changeFunnelWindow,
+  addGlobalFilter,
+  removeGlobalFilter,
+  changeGlobalFilter,
   reorderEvents,
+  addHoldProperty,
+  removeHoldProperty,
+  changeLimit,
+  changeMeasuring,
 } = reportSlice.actions;
 
 export default reportSlice.reducer;

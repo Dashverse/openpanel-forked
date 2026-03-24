@@ -22,7 +22,7 @@ export async function bootCron() {
     {
       name: 'flush',
       type: 'flushEvents',
-      pattern: 1000 * 10,
+      pattern: 1000 * 5,
     },
     {
       name: 'flush',
@@ -34,6 +34,11 @@ export async function bootCron() {
       type: 'flushSessions',
       pattern: 1000 * 10,
     },
+    // {
+    //   name: 'customAlerts',
+    //   type: 'customAlerts',
+    //   pattern: '*/15 * * * *',
+    // },
   ];
 
   if (process.env.SELF_HOSTED && process.env.NODE_ENV === 'production') {

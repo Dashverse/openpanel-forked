@@ -2,8 +2,9 @@ import { useTRPC } from '@/integrations/trpc/react';
 import { pushModal, showConfirm } from '@/modals';
 import type { RouterOutputs } from '@/trpc/client';
 import type { NotificationRule } from '@openpanel/db';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
+import { useAppParams } from '@/hooks/use-app-params';
 import { FilterIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { ColorSquare } from '../color-square';
@@ -42,11 +43,31 @@ function EventBadge({
   );
 }
 
+function useReport(reportId: string | undefined) {
+  const { projectId } = useAppParams();
+  const trpc = useTRPC();
+  const { data } = useQuery(
+    trpc.report.listByProject.queryOptions({ projectId }),
+  );
+  if (!reportId || !data) return undefined;
+  const reports = (Array.isArray(data) ? data : []) as {
+    id: string;
+    name: string;
+    chartType: string;
+  }[];
+  return reports.find((r) => r.id === reportId);
+}
+
 export function RuleCard({
   rule,
 }: { rule: RouterOutputs['notification']['rules'][number] }) {
   const trpc = useTRPC();
   const client = useQueryClient();
+  const config = rule.config as { type: string; reportId?: string };
+  const report = useReport(config.reportId);
+  const reportName = report?.name ?? 'Unknown report';
+  const isPercentageChart =
+    report?.chartType === 'conversion' || report?.chartType === 'funnel';
   const deletion = useMutation(
     trpc.notification.deleteRule.mutationOptions({
       onSuccess() {
@@ -88,6 +109,37 @@ export function RuleCard({
             </div>
           </div>
         );
+      case 'threshold': {
+        const tc = rule.config as {
+          operator: string;
+          value: number;
+          frequency: string;
+        };
+        return (
+          <div className="row gap-2 items-baseline flex-wrap">
+            <div>Alert when</div>
+            <Badge variant="outline">{reportName}</Badge>
+            <div>
+              is {tc.operator} {tc.value}{isPercentageChart ? '%' : ''}
+            </div>
+            <Badge variant="secondary">{tc.frequency}</Badge>
+          </div>
+        );
+      }
+      case 'anomaly': {
+        const ac = rule.config as {
+          confidence: string;
+          frequency: string;
+        };
+        return (
+          <div className="row gap-2 items-baseline flex-wrap">
+            <div>Alert when</div>
+            <Badge variant="outline">{reportName}</Badge>
+            <div>is outside {ac.confidence}% confidence band</div>
+            <Badge variant="secondary">{ac.frequency}</Badge>
+          </div>
+        );
+      }
     }
   };
   return (

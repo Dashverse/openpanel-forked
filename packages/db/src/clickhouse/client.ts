@@ -58,10 +58,11 @@ export const TABLE_NAMES = {
   event_property_values_mv: 'event_property_values_mv',
   cohort_events_mv: 'cohort_events_mv',
   sessions: 'sessions',
-  events_imports: 'events_imports',
+  events_imports: 'events_imports_v2',
   cohort_members: 'cohort_members',
   cohort_metadata: 'cohort_metadata',
   profile_event_summary_mv: 'profile_event_summary_mv',
+  profile_event_property_summary_mv: 'profile_event_property_summary_mv',
 };
 
 /**
@@ -105,7 +106,7 @@ function getClickhouseSettings(): ClickHouseSettings {
 
 export const CLICKHOUSE_OPTIONS: NodeClickHouseClientConfigOptions = {
   max_open_connections: 30,
-  request_timeout: 300000,
+  request_timeout: parseInt(process.env.CLICKHOUSE_REQUEST_TIMEOUT || '3600000', 10),
   keep_alive: {
     enabled: true,
     idle_socket_ttl: 60000,
@@ -199,6 +200,13 @@ export const ch = new Proxy(originalCh, {
             ),
             ...args[0].clickhouse_settings,
           };
+          return value.apply(target, args);
+        });
+    }
+
+    if (property === 'query') {
+      return (...args: any[]) =>
+        withRetry(() => {
           return value.apply(target, args);
         });
     }

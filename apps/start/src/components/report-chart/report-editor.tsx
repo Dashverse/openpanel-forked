@@ -21,10 +21,12 @@ import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useDispatch, useSelector } from '@/redux';
 import { bind } from 'bind-event-listener';
-import { GanttChartSquareIcon } from 'lucide-react';
+import { BellPlusIcon, GanttChartSquareIcon } from 'lucide-react';
 import { useEffect } from 'react';
 
 import type { IServiceReport } from '@openpanel/db';
+import { useParams, useSearch } from '@tanstack/react-router';
+import { pushModal } from '@/modals';
 import EditReportName from '../report/edit-report-name';
 
 interface ReportEditorProps {
@@ -35,13 +37,20 @@ export default function ReportEditor({
   report: initialReport,
 }: ReportEditorProps) {
   const { projectId } = useAppParams();
+  const { reportId } = useParams({ strict: false });
+  const search = useSearch({ strict: false });
+  const rangeOverride = (search as { range?: string }).range;
   const dispatch = useDispatch();
   const report = useSelector((state) => state.report);
 
-  // Set report if reportId exists
+  // Set report if reportId exists, applying URL range override in one shot
   useEffect(() => {
     if (initialReport) {
-      dispatch(setReport(initialReport));
+      dispatch(setReport(
+        rangeOverride
+          ? { ...initialReport, range: rangeOverride as any }
+          : initialReport
+      ));
     } else {
       dispatch(ready());
     }
@@ -49,7 +58,7 @@ export default function ReportEditor({
     return () => {
       dispatch(reset());
     };
-  }, [initialReport, dispatch]);
+  }, [initialReport, dispatch, rangeOverride]);
 
   return (
     <Sheet>
@@ -97,7 +106,21 @@ export default function ReportEditor({
             />
             <ReportLineType className="min-w-0 flex-1" />
           </div>
-          <div className="col-start-2 row-start-1 text-right md:col-start-6">
+          <div className="col-start-2 row-start-1 text-right md:col-start-6 row gap-2 justify-end">
+            {reportId && (
+              <Button
+                icon={BellPlusIcon}
+                variant="outline"
+                onClick={() => {
+                  pushModal('AddNotificationRule', {
+                    reportId,
+                    projectId,
+                  });
+                }}
+              >
+                Add Alert
+              </Button>
+            )}
             <ReportSaveButton />
           </div>
         </div>

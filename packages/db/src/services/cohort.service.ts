@@ -31,10 +31,10 @@ function buildTimeConstraint(timeframe: Timeframe): string {
     const end = timeframe.end || 'now()';
 
     if (timeframe.end) {
-      return `created_at BETWEEN toDateTime('${start}') AND toDateTime('${end}')`;
+      return `created_at BETWEEN toDate('${start}') AND toDate('${end}')`;
     } else {
       // "Since date" - no end date
-      return `created_at >= toDateTime('${start}')`;
+      return `created_at >= toDate('${start}')`;
     }
   }
 }
@@ -58,7 +58,7 @@ function getFrequencyOperator(frequency: Frequency): string {
 /**
  * Build ClickHouse query for a single event criteria
  */
-function buildEventCriteriaQuery(
+export function buildEventCriteriaQuery(
   projectId: string,
   criteria: EventCriteria,
 ): string {
@@ -76,12 +76,68 @@ function buildEventCriteriaQuery(
     ? `AND ${filterClauses.join(' AND ')}`
     : '';
 
-  // Check if there are any property filters
-  // Materialized view doesn't have property columns, only events table has them
-  const hasPropertyFilters = filters.length > 0;
+  // Check if there are event property filters
+  const hasEventPropertyFilters = filters.some(
+    (f) => f.name.startsWith('properties.') && !f.name.startsWith('profile.properties.')
+  );
 
-  // Use materialized view for frequency checks ONLY if no property filters
-  if (frequency && !hasPropertyFilters) {
+  // Use property-aware MV for event property filters
+  if (hasEventPropertyFilters) {
+    const propertyFilters = filters.filter(
+      (f) => f.name.startsWith('properties.')
+    );
+
+    // Build WHERE conditions for property filters
+    const propertyConditions = propertyFilters.map((filter) => {
+      const propertyKey = filter.name.replace('properties.', '');
+      const { value, operator } = filter;
+
+      switch (operator) {
+        case 'is':
+          if (value.length === 1) {
+            return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value = ${sqlstring.escape(String(value[0]).trim())})`;
+          }
+          return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value IN (${value.map((val) => sqlstring.escape(String(val).trim())).join(', ')}))`;
+        case 'isNot':
+          if (value.length === 1) {
+            return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value != ${sqlstring.escape(String(value[0]).trim())})`;
+          }
+          return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value NOT IN (${value.map((val) => sqlstring.escape(String(val).trim())).join(', ')}))`;
+        case 'contains':
+          return `(property_key = ${sqlstring.escape(propertyKey)} AND (${value.map((val) => `property_value LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`).join(' OR ')}))`;
+        case 'doesNotContain':
+          return `(property_key = ${sqlstring.escape(propertyKey)} AND (${value.map((val) => `property_value NOT LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`).join(' AND ')}))`;
+        default:
+          return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value IN (${value.map((val) => sqlstring.escape(String(val).trim())).join(', ')}))`;
+      }
+    }).join(' OR ');
+
+    if (frequency) {
+      const frequencyOp = getFrequencyOperator(frequency);
+      return `
+        SELECT profile_id
+        FROM ${TABLE_NAMES.profile_event_property_summary_mv}
+        WHERE project_id = ${sqlstring.escape(projectId)}
+          AND name = ${sqlstring.escape(name)}
+          AND ${timeConstraint.replace('created_at', 'event_date')}
+          AND (${propertyConditions})
+        GROUP BY profile_id
+        HAVING countMerge(event_count) ${frequencyOp}
+      `;
+    }
+
+    return `
+      SELECT DISTINCT profile_id
+      FROM ${TABLE_NAMES.profile_event_property_summary_mv}
+      WHERE project_id = ${sqlstring.escape(projectId)}
+        AND name = ${sqlstring.escape(name)}
+        AND ${timeConstraint.replace('created_at', 'event_date')}
+        AND (${propertyConditions})
+    `;
+  }
+
+  // Use standard MV for queries without property filters
+  if (frequency) {
     const frequencyOp = getFrequencyOperator(frequency);
 
     return `
@@ -95,42 +151,55 @@ function buildEventCriteriaQuery(
     `;
   }
 
-  // For queries with property filters and frequency, use events table with GROUP BY
-  if (frequency) {
-    const frequencyOp = getFrequencyOperator(frequency);
-
-    return `
-      SELECT profile_id
-      FROM ${TABLE_NAMES.events}
-      WHERE project_id = ${sqlstring.escape(projectId)}
-        AND name = ${sqlstring.escape(name)}
-        AND profile_id != device_id
-        AND ${timeConstraint}
-        ${filterClause}
-      GROUP BY profile_id
-      HAVING count(*) ${frequencyOp}
-    `;
-  }
-
-  // For simple "did event" queries, use events table
+  // For simple "did event" queries
   return `
     SELECT DISTINCT profile_id
-    FROM ${TABLE_NAMES.events}
+    FROM ${TABLE_NAMES.profile_event_summary_mv}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND name = ${sqlstring.escape(name)}
-      AND profile_id != device_id
-      AND ${timeConstraint}
-      ${filterClause}
+      AND ${timeConstraint.replace('created_at', 'event_date')}
+  `;
+}
+
+/**
+ * Build ClickHouse query for property-based cohort
+ * Returns a SELECT query string that can be embedded as a subquery
+ */
+export function buildPropertyBasedCohortQuery(
+  projectId: string,
+  definition: PropertyBasedCohortDefinition,
+): string {
+  const { properties, operator } = definition.criteria;
+
+  // Build property filters
+  const filterWhere = getProfileFiltersWhereClause(properties);
+  const filterClauses = Object.values(filterWhere);
+
+  if (filterClauses.length === 0) {
+    return `SELECT id as profile_id FROM ${TABLE_NAMES.profiles} FINAL WHERE 1=0`; // Empty result
+  }
+
+  const filterClause = filterClauses.join(
+    operator === 'and' ? ' AND ' : ' OR ',
+  );
+
+  return `
+    SELECT id as profile_id
+    FROM ${TABLE_NAMES.profiles} FINAL
+    WHERE project_id = ${sqlstring.escape(projectId)}
+      AND (${filterClause})
   `;
 }
 
 /**
  * Compute event-based cohort membership
  * Returns array of profile IDs that match the criteria
+ * @param limit - Optional limit on number of profiles (default: no limit)
  */
 export async function computeEventBasedCohort(
   projectId: string,
   definition: EventBasedCohortDefinition,
+  limit?: number,
 ): Promise<string[]> {
   const { events, operator } = definition.criteria;
 
@@ -144,8 +213,37 @@ export async function computeEventBasedCohort(
       ? queries.join(' INTERSECT ')
       : queries.join(' UNION DISTINCT ');
 
-  const results = await chQuery<{ profile_id: string }>(combinedQuery);
+  // Apply limit in SQL query itself to prevent loading too much into memory
+  const finalQuery = limit ? `${combinedQuery} LIMIT ${limit}` : combinedQuery;
+
+  const results = await chQuery<{ profile_id: string }>(finalQuery);
   return results.map((r) => r.profile_id);
+}
+
+/**
+ * Count cohort members without loading into memory
+ * Used for dynamic cohorts and previews
+ */
+export async function countEventBasedCohort(
+  projectId: string,
+  definition: EventBasedCohortDefinition,
+): Promise<number> {
+  const { events, operator } = definition.criteria;
+
+  const queries = events.map((eventCriteria) => {
+    return buildEventCriteriaQuery(projectId, eventCriteria);
+  });
+
+  // Combine queries based on AND/OR operator
+  const combinedQuery =
+    operator === 'and'
+      ? queries.join(' INTERSECT ')
+      : queries.join(' UNION DISTINCT ');
+
+  // Use COUNT instead of loading all IDs - prevents OOM
+  const countQuery = `SELECT count() as count FROM (${combinedQuery})`;
+  const results = await chQuery<{ count: number }>(countQuery);
+  return results[0]?.count ?? 0;
 }
 
 /**
@@ -272,6 +370,7 @@ function getProfileFiltersWhereClause(
 export async function computePropertyBasedCohort(
   projectId: string,
   definition: PropertyBasedCohortDefinition,
+  limit?: number,
 ): Promise<string[]> {
   const { properties, operator } = definition.criteria;
 
@@ -292,10 +391,43 @@ export async function computePropertyBasedCohort(
     FROM ${TABLE_NAMES.profiles} FINAL
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND (${filterClause})
+    ${limit ? `LIMIT ${limit}` : ''}
   `;
 
   const results = await chQuery<{ profile_id: string }>(query);
   return results.map((r) => r.profile_id);
+}
+
+/**
+ * Count property-based cohort members without loading into memory
+ */
+export async function countPropertyBasedCohort(
+  projectId: string,
+  definition: PropertyBasedCohortDefinition,
+): Promise<number> {
+  const { properties, operator } = definition.criteria;
+
+  // Build property filters
+  const filterWhere = getProfileFiltersWhereClause(properties);
+  const filterClauses = Object.values(filterWhere);
+
+  if (filterClauses.length === 0) {
+    return 0;
+  }
+
+  const filterClause = filterClauses.join(
+    operator === 'and' ? ' AND ' : ' OR ',
+  );
+
+  const query = `
+    SELECT count() as count
+    FROM ${TABLE_NAMES.profiles} FINAL
+    WHERE project_id = ${sqlstring.escape(projectId)}
+      AND (${filterClause})
+  `;
+
+  const results = await chQuery<{ count: number }>(query);
+  return results[0]?.count ?? 0;
 }
 
 /**
@@ -425,10 +557,9 @@ export async function getCohortCount(
     return result[0]?.count || 0;
   }
 
-  // Compute on-demand
+  // Compute on-demand using COUNT query - don't load all profile IDs into memory
   const definition = cohort.definition as CohortDefinition;
-  const profileIds = await computeCohort(projectId, definition);
-  return profileIds.length;
+  return await countCohort(projectId, definition);
 }
 
 /**
@@ -437,13 +568,30 @@ export async function getCohortCount(
 export async function computeCohort(
   projectId: string,
   definition: CohortDefinition,
+  limit?: number,
 ): Promise<string[]> {
   if (definition.type === 'event') {
-    return computeEventBasedCohort(projectId, definition);
+    return computeEventBasedCohort(projectId, definition, limit);
   } else if (definition.type === 'property') {
-    return computePropertyBasedCohort(projectId, definition);
+    return computePropertyBasedCohort(projectId, definition, limit);
   }
   return [];
+}
+
+/**
+ * Count cohort members without loading into memory
+ * Works for both event and property-based cohorts
+ */
+export async function countCohort(
+  projectId: string,
+  definition: CohortDefinition,
+): Promise<number> {
+  if (definition.type === 'event') {
+    return countEventBasedCohort(projectId, definition);
+  } else if (definition.type === 'property') {
+    return countPropertyBasedCohort(projectId, definition);
+  }
+  return 0;
 }
 
 /**
@@ -459,7 +607,8 @@ export async function updateCohortMembership(
   }
 
   const definition = cohort.definition as CohortDefinition;
-  const profileIds = await computeCohort(cohort.projectId, definition);
+  // Limit static cohorts to 10K profiles to prevent OOM
+  const profileIds = await computeCohort(cohort.projectId, definition, 10000);
 
   // Increment version for ReplacingMergeTree
   const version = Date.now();

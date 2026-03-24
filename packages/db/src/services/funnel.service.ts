@@ -13,6 +13,11 @@ import { createSqlBuilder } from '../sql-builder';
 import {
   getEventFiltersWhereClause,
   getSelectPropertyKey,
+  fetchCohortsMetadata,
+  getCohortCteName,
+  getCohortAlias,
+  buildCohortMembershipQuery,
+  getMaterializedColumns,
 } from './chart.service';
 import { onlyReportEvents } from './reports.service';
 import {
@@ -53,6 +58,13 @@ export class FunnelService {
       };
     }
 
+    // Get materialized columns to ensure UNION compatibility (events table only)
+    const materializedColumns = await getMaterializedColumns('events');
+    const materializedColumnNames = Object.values(materializedColumns);
+    const materializedColumnsSelect = materializedColumnNames.length > 0
+      ? `, ${materializedColumnNames.map(col => `\`${col}\``).join(', ')}`
+      : '';
+
     // Build CTEs for custom events
     const withClauses: Array<{ name: string; query: any }> = [];
     const baseWhere = [
@@ -70,7 +82,7 @@ export class FunnelService {
       if (customEvent) {
         // Custom event - create CTE and reference it
         const cteName = `custom_event_${i}`;
-        const sql = expandCustomEventToSQL(
+        const sql = await expandCustomEventToSQL(
           {
             name: customEvent.name,
             projectId,
@@ -86,9 +98,9 @@ export class FunnelService {
 
         unionParts.push(`SELECT * FROM ${cteName}`);
       } else {
-        // Regular event - select directly
+        // Regular event - include materialized columns to match custom events
         unionParts.push(`
-          SELECT * FROM ${TABLE_NAMES.events}
+          SELECT *${materializedColumnsSelect} FROM ${TABLE_NAMES.events}
           WHERE project_id = '${projectId}'
             AND name = '${event.name}'
             AND created_at BETWEEN toDateTime('${startDate}') AND toDateTime('${endDate}')
@@ -109,16 +121,10 @@ export class FunnelService {
     };
   }
 
-  getFunnelGroup(group?: string): [string, string] {
-    return group === 'profile_id'
-      ? [`COALESCE(nullIf(s.pid, ''), profile_id)`, 'profile_id']
-      : ['session_id', 'session_id'];
-  }
-
-  getFunnelConditions(events: IChartEvent[] = []): string[] {
+  getFunnelConditions(events: IChartEvent[] = [], projectId?: string): string[] {
     return events.map((event) => {
       const { sb, getWhere } = createSqlBuilder();
-      sb.where = getEventFiltersWhereClause(event.filters);
+      sb.where = getEventFiltersWhereClause(event.filters, projectId);
       sb.where.name = `name = ${sqlstring.escape(event.name)}`;
       return getWhere().replace('WHERE ', '');
     });
@@ -149,7 +155,7 @@ export class FunnelService {
     fromClause: string;
     needsNameFilter: boolean;
   }) {
-    const funnels = this.getFunnelConditions(eventSeries);
+    const funnels = this.getFunnelConditions(eventSeries, projectId);
 
     const query = clix(this.client, timezone)
       .select([
@@ -286,9 +292,13 @@ export class FunnelService {
     startDate,
     endDate,
     series,
+    interval,
     funnelWindow = 24,
     funnelGroup,
     breakdowns = [],
+    holdProperties = [],
+    globalFilters = [],
+    measuring = 'conversion_rate',
     limit,
     timezone = 'UTC',
   }: IChartInput & { timezone: string; events?: IChartEvent[] }) {
@@ -296,15 +306,40 @@ export class FunnelService {
       throw new Error('startDate and endDate are required');
     }
 
-    const eventSeries = onlyReportEvents(series);
+    // Merge global filters into each event's filters (same as fetch.ts does for regular charts)
+    const eventSeries = onlyReportEvents(series).map(event => ({
+      ...event,
+      filters: [...(event.filters ?? []), ...globalFilters],
+    }));
 
     if (eventSeries.length === 0) {
       throw new Error('events are required');
     }
 
+    // Extract cohort IDs from breakdowns and event filters (deduplicated)
+    const cohortIdsSet = new Set<string>();
+    breakdowns?.forEach((b) => {
+      if (b.cohortId) {
+        cohortIdsSet.add(b.cohortId);
+      } else if (b.name.startsWith('cohort:')) {
+        cohortIdsSet.add(b.name.split(':')[1]!);
+      }
+    });
+    eventSeries.forEach((event) => {
+      event.filters?.forEach((filter) => {
+        if (filter.cohortId) {
+          cohortIdsSet.add(filter.cohortId);
+        }
+      });
+    });
+
+    const cohortIds = Array.from(cohortIdsSet);
+
+    // Fetch cohort metadata from Postgres (always fresh, no cache)
+    const cohortMetadata = await fetchCohortsMetadata(cohortIds);
+
     const funnelWindowSeconds = funnelWindow * 3600;
     const funnelWindowMilliseconds = funnelWindowSeconds * 1000;
-    const group = this.getFunnelGroup(funnelGroup);
     const profileFilters = this.getProfileFilters(eventSeries);
     const anyFilterOnProfile = profileFilters.length > 0;
     const anyBreakdownOnProfile = breakdowns.some((b) =>
@@ -315,11 +350,24 @@ export class FunnelService {
     const { fromClause, withClauses, needsNameFilter } =
       await this.buildEventsSource(eventSeries, projectId, startDate, endDate);
 
+    // Determine group column using the actual fromClause (not hardcoded table name)
+    const group = funnelGroup === 'profile_id'
+      ? [`COALESCE(nullIf(s.pid, ''), ${fromClause}.profile_id)`, 'profile_id'] as [string, string]
+      : [`${fromClause}.session_id`, 'session_id'] as [string, string];
+
     // Create the funnel CTE
     const breakdownSelects = breakdowns.map(
-      (b, index) => `${getSelectPropertyKey(b.name, projectId)} as b_${index}`,
+      (b, index) => `${getSelectPropertyKey(b.name, projectId, b.cohortId)} as b_${index}`,
     );
     const breakdownGroupBy = breakdowns.map((b, index) => `b_${index}`);
+
+    // Hold property constant: add to inner CTE GROUP BY so windowFunnel()
+    // evaluates per (profile_id, property_value), but NOT to outer query
+    // so results aggregate into a single funnel.
+    const holdPropertySelects = holdProperties.map(
+      (prop, i) => `${getSelectPropertyKey(prop, projectId)} as hp_${i}`,
+    );
+    const holdPropertyGroupBy = holdProperties.map((_, i) => `hp_${i}`);
 
     const funnelCte = this.buildFunnelCte({
       projectId,
@@ -329,19 +377,80 @@ export class FunnelService {
       funnelWindowMilliseconds,
       group,
       timezone,
-      additionalSelects: breakdownSelects,
-      additionalGroupBy: breakdownGroupBy,
+      additionalSelects: [...breakdownSelects, ...holdPropertySelects],
+      additionalGroupBy: [...breakdownGroupBy, ...holdPropertyGroupBy],
       fromClause,
       needsNameFilter,
     });
 
     if (anyFilterOnProfile || anyBreakdownOnProfile) {
+      const matCols = await getMaterializedColumns('profiles');
+
+      // Collect fields needed from profile table (from both filters and breakdowns)
+      const profileFieldsSet = new Set<string>(['id']);
+
+      // From event filters
+      for (const f of profileFilters) {
+        // f is like "properties.campaign" or "email" (already has "profile." stripped)
+        if (f.startsWith('properties.')) {
+          const fullKey = `profile.${f}`; // "profile.properties.campaign"
+          const cached = matCols[fullKey];
+          if (cached) {
+            profileFieldsSet.add(cached.replace('profile.', ''));
+          } else {
+            profileFieldsSet.add('properties');
+          }
+        } else {
+          profileFieldsSet.add(f.split('.')[0]!);
+        }
+      }
+
+      // From profile breakdowns
+      for (const b of breakdowns.filter((b) => b.name.startsWith('profile.'))) {
+        if (b.name.startsWith('profile.properties.')) {
+          const cached = matCols[b.name];
+          if (cached) {
+            profileFieldsSet.add(cached.replace('profile.', ''));
+          } else {
+            profileFieldsSet.add('properties');
+          }
+        } else {
+          const fieldName = b.name.replace('profile.', '').split('.')[0];
+          if (fieldName) {
+            profileFieldsSet.add(fieldName);
+          }
+        }
+      }
+
       funnelCte.leftJoin(
-        `(SELECT id, ${uniq(profileFilters.map((f) => f.split('.')[0]))} FROM ${TABLE_NAMES.profiles} FINAL
+        `(SELECT ${Array.from(profileFieldsSet).join(', ')} FROM ${TABLE_NAMES.profiles} FINAL
           WHERE project_id = ${sqlstring.escape(projectId)}) as profile`,
-        'profile.id = events.profile_id',
+        `profile.id = ${fromClause}.profile_id`,
       );
     }
+
+    // Add LEFT JOINs for all cohorts (much faster than IN subqueries)
+    cohortIds.forEach((cohortId) => {
+      const cohortAlias = getCohortAlias(cohortId);
+      const cohortCte = getCohortCteName(cohortId);
+      funnelCte.leftJoin(
+        `${cohortCte} AS ${cohortAlias}`,
+        `${cohortAlias}.profile_id = ${fromClause}.profile_id`,
+      );
+    });
+
+    // Apply cohort global filter WHERE clauses (inCohort / notInCohort)
+    eventSeries.forEach((event) => {
+      (event.filters ?? []).forEach((filter) => {
+        if (filter.operator === 'inCohort' && filter.cohortId) {
+          const alias = getCohortAlias(filter.cohortId);
+          funnelCte.where(`${alias}.profile_id`, '!=', '');
+        } else if (filter.operator === 'notInCohort' && filter.cohortId) {
+          const alias = getCohortAlias(filter.cohortId);
+          funnelCte.where(`${alias}.profile_id`, '=', '');
+        }
+      });
+    });
 
     // Create the sessions CTE if needed
     const sessionsCte =
@@ -362,8 +471,15 @@ export class FunnelService {
       funnelQuery.with(withClause.name, withClause.query);
     }
 
+    // Add cohort CTEs (computed once per query, not per row)
+    cohortIds.forEach((cohortId) => {
+      const cohortMeta = cohortMetadata.get(cohortId);
+      const cohortQuery = buildCohortMembershipQuery(cohortId, projectId, cohortMeta);
+      funnelQuery.with(getCohortCteName(cohortId), cohortQuery);
+    });
+
     if (sessionsCte) {
-      funnelCte.leftJoin('sessions s', 's.sid = events.session_id');
+      funnelCte.leftJoin('sessions s', `s.sid = ${fromClause}.session_id`);
       funnelQuery.with('sessions', sessionsCte);
     }
 
@@ -387,7 +503,7 @@ export class FunnelService {
     const funnelData = await funnelQuery.execute();
     const funnelSeries = this.toSeries(funnelData, breakdowns, limit);
 
-    return funnelSeries
+    const funnelResult = funnelSeries
       .map((data) => {
         const maxLevel = eventSeries.length;
         const filledFunnelRes = this.fillFunnel(
@@ -469,6 +585,111 @@ export class FunnelService {
         const bTotal = b.steps.reduce((acc, step) => acc + step.count, 0);
         return bTotal - aTotal;
       });
+
+    // Compute time-to-convert if requested
+    if (measuring === 'time_to_convert' && eventSeries.length >= 2) {
+      const endDateObj = new Date(endDate);
+      const extendedEndDateObj = new Date(endDateObj.getTime() + funnelWindowSeconds * 1000);
+      const extendedEndDate = formatClickhouseDate(extendedEndDateObj);
+
+      const firstEvent = eventSeries[0]!;
+      const lastEventItem = eventSeries[eventSeries.length - 1]!;
+
+      const firstEventFilters = firstEvent.filters && firstEvent.filters.length > 0
+        ? ' AND ' + Object.values(getEventFiltersWhereClause(firstEvent.filters, projectId)).join(' AND ')
+        : '';
+      const lastEventFilters = lastEventItem.filters && lastEventItem.filters.length > 0
+        ? ' AND ' + Object.values(getEventFiltersWhereClause(lastEventItem.filters, projectId)).join(' AND ')
+        : '';
+
+      const toStartOf = clix.toStartOf('fs.first_ts', interval || 'day');
+
+      const ttcQuery = `
+        WITH
+        first_step_events AS (
+          SELECT profile_id, min(created_at) AS first_ts
+          FROM ${TABLE_NAMES.events}
+          WHERE project_id = ${sqlstring.escape(projectId)}
+            AND name = ${sqlstring.escape(firstEvent.name)}
+            AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
+            AND created_at <= toDateTime('${formatClickhouseDate(endDate)}')${firstEventFilters}
+          GROUP BY profile_id
+        ),
+        last_step_events AS (
+          SELECT profile_id, min(created_at) AS last_ts
+          FROM ${TABLE_NAMES.events}
+          WHERE project_id = ${sqlstring.escape(projectId)}
+            AND name = ${sqlstring.escape(lastEventItem.name)}
+            AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
+            AND created_at <= toDateTime('${extendedEndDate}')${lastEventFilters}
+          GROUP BY profile_id
+        ),
+        matched AS (
+          SELECT
+            ${toStartOf} AS event_day,
+            dateDiff('second', fs.first_ts, ls.last_ts) AS time_diff_seconds
+          FROM first_step_events fs
+          JOIN last_step_events ls ON ls.profile_id = fs.profile_id
+            AND ls.last_ts >= fs.first_ts
+            AND ls.last_ts <= fs.first_ts + INTERVAL ${funnelWindowSeconds} SECOND
+        )
+        SELECT
+          event_day,
+          count() AS completed_count,
+          round(avg(time_diff_seconds)) AS ttc_avg,
+          round(quantile(0.5)(time_diff_seconds)) AS ttc_median,
+          min(time_diff_seconds) AS ttc_min,
+          max(time_diff_seconds) AS ttc_max,
+          round(quantile(0.25)(time_diff_seconds)) AS ttc_p25,
+          round(quantile(0.75)(time_diff_seconds)) AS ttc_p75,
+          round(quantile(0.9)(time_diff_seconds)) AS ttc_p90,
+          round(quantile(0.99)(time_diff_seconds)) AS ttc_p99
+        FROM matched
+        GROUP BY event_day
+        ORDER BY event_day ASC
+      `;
+
+      const ttcResult = await this.client.query({
+        query: ttcQuery,
+        clickhouse_settings: { session_timezone: timezone },
+      });
+      const ttcJson = await ttcResult.json() as {
+        data: {
+          event_day: string;
+          completed_count: number;
+          ttc_avg: number;
+          ttc_median: number;
+          ttc_min: number;
+          ttc_max: number;
+          ttc_p25: number;
+          ttc_p75: number;
+          ttc_p90: number;
+          ttc_p99: number;
+        }[];
+      };
+
+      const timeToConvert = ttcJson.data.map(d => ({
+        date: d.event_day,
+        completedCount: Number(d.completed_count),
+        ttc: {
+          avg: Number(d.ttc_avg),
+          median: Number(d.ttc_median),
+          min: Number(d.ttc_min),
+          max: Number(d.ttc_max),
+          p25: Number(d.ttc_p25),
+          p75: Number(d.ttc_p75),
+          p90: Number(d.ttc_p90),
+          p99: Number(d.ttc_p99),
+        },
+      }));
+
+      return funnelResult.map(item => ({
+        ...item,
+        timeToConvert,
+      }));
+    }
+
+    return funnelResult;
   }
 }
 

@@ -187,7 +187,7 @@ export const zChartInputBase = z.object({
   limit: z
     .number()
     .optional()
-    .default(20)
+    .default(50)
     .describe('Limit how many series should be returned'),
   offset: z
     .number()
@@ -216,6 +216,21 @@ export const zChartInputBase = z.object({
     .optional()
     .default([])
     .describe('Global cohort filters applied to the entire chart'),
+  globalFilters: z
+    .array(zChartEventFilter)
+    .optional()
+    .default([])
+    .describe('Global filters applied to all events in the chart'),
+  holdProperties: z
+    .array(z.string())
+    .optional()
+    .default([])
+    .describe('Properties to hold constant across all funnel steps'),
+  measuring: z
+    .enum(['conversion_rate', 'time_to_convert'])
+    .optional()
+    .default('conversion_rate')
+    .describe('What to measure: conversion rate or time to convert'),
 });
 
 export const zChartInput = z.preprocess((val) => {
@@ -418,9 +433,37 @@ export type INotificationRuleFunnelConfig = z.infer<
   typeof zNotificationRuleFunnelConfig
 >;
 
+export const zAlertFrequency = z.enum(['hour', 'day', 'week', 'month']);
+export type IAlertFrequency = z.infer<typeof zAlertFrequency>;
+
+export const zNotificationRuleThresholdConfig = z.object({
+  type: z.literal('threshold'),
+  reportId: z.string().uuid(),
+  operator: z.enum(['above', 'below']),
+  value: z.number(),
+  frequency: zAlertFrequency,
+});
+
+export type INotificationRuleThresholdConfig = z.infer<
+  typeof zNotificationRuleThresholdConfig
+>;
+
+export const zNotificationRuleAnomalyConfig = z.object({
+  type: z.literal('anomaly'),
+  reportId: z.string().uuid(),
+  confidence: z.enum(['95', '98', '99']),
+  frequency: zAlertFrequency,
+});
+
+export type INotificationRuleAnomalyConfig = z.infer<
+  typeof zNotificationRuleAnomalyConfig
+>;
+
 export const zNotificationRuleConfig = z.discriminatedUnion('type', [
   zNotificationRuleEventConfig,
   zNotificationRuleFunnelConfig,
+  zNotificationRuleThresholdConfig,
+  zNotificationRuleAnomalyConfig,
 ]);
 
 export type INotificationRuleConfig = z.infer<typeof zNotificationRuleConfig>;

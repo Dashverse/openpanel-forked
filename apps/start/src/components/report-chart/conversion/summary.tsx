@@ -2,7 +2,7 @@ import type { RouterOutputs } from '@/trpc/client';
 import React, { useMemo } from 'react';
 
 import { Stats, StatsCard } from '@/components/stats';
-import { useNumber } from '@/hooks/use-numer-formatter';
+import { fancyMinutes, useNumber } from '@/hooks/use-numer-formatter';
 import { formatDate } from '@/utils/date';
 import { average, getPreviousMetric, sum } from '@openpanel/common';
 import { ChevronRightIcon } from 'lucide-react';
@@ -16,6 +16,11 @@ interface Props {
 export function Summary({ data }: Props) {
   const number = useNumber();
   const { report } = useReportChartContext();
+  const isTtc = report.measuring === 'time_to_convert';
+
+  if (isTtc) {
+    return <TtcSummary data={data} />;
+  }
 
   const bestConversionRateMatch = useMemo(() => {
     return data.current.reduce(
@@ -224,6 +229,42 @@ export function Summary({ data }: Props) {
           value={getConversionRateNode(worstConversionRate)}
         />
       )}
+    </Stats>
+  );
+}
+
+function TtcSummary({ data }: Props) {
+  const { report } = useReportChartContext();
+
+  const avgTtcValues = data.current.flatMap((serie) =>
+    serie.data.filter((d) => d.ttc).map((d) => d.ttc!.avg),
+  );
+  const overallAvg =
+    avgTtcValues.length > 0
+      ? avgTtcValues.reduce((a, b) => a + b, 0) / avgTtcValues.length
+      : 0;
+
+  return (
+    <Stats className="my-4 grid grid-cols-1 md:grid-cols-2">
+      <StatsCard
+        title="Flow"
+        value={
+          <div className="row flex-wrap gap-1">
+            {report.series
+              .filter((item) => item.type === 'event')
+              .map((event, index) => (
+                <div key={event.id} className="row items-center gap-2">
+                  {index !== 0 && <ChevronRightIcon className="size-3" />}
+                  <span>{event.name}</span>
+                </div>
+              ))}
+          </div>
+        }
+      />
+      <StatsCard
+        title="Average time to convert"
+        value={fancyMinutes(overallAvg)}
+      />
     </Stats>
   );
 }

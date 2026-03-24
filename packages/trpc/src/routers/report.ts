@@ -18,6 +18,26 @@ export const reportRouter = createTRPCRouter({
     .query(async ({ input: { dashboardId, projectId }, ctx }) => {
       return getReportsByDashboardId(dashboardId);
     }),
+  listByProject: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.string(),
+      }),
+    )
+    .query(async ({ input: { projectId }, ctx }) => {
+      const access = await getProjectAccess({
+        userId: ctx.session.userId,
+        projectId,
+      });
+      if (!access) {
+        throw TRPCAccessError('You do not have access to this project');
+      }
+      return db.report.findMany({
+        where: { projectId },
+        select: { id: true, name: true, chartType: true },
+        orderBy: { name: 'asc' },
+      });
+    }),
   create: protectedProcedure
     .input(
       z.object({
@@ -57,8 +77,11 @@ export const reportRouter = createTRPCRouter({
           unit: report.unit,
           criteria: report.criteria,
           metric: report.metric === 'count' ? 'sum' : report.metric,
-          funnelGroup: report.funnelGroup,
-          funnelWindow: report.funnelWindow,
+          funnelGroup: report.funnelGroup ?? null,
+          funnelWindow: report.funnelWindow ?? null,
+          measuring: report.measuring ?? null,
+          globalFilters: report.globalFilters ?? [],
+          holdProperties: report.holdProperties ?? [],
         },
       });
     }),
@@ -102,8 +125,11 @@ export const reportRouter = createTRPCRouter({
           unit: report.unit,
           criteria: report.criteria,
           metric: report.metric === 'count' ? 'sum' : report.metric,
-          funnelGroup: report.funnelGroup,
-          funnelWindow: report.funnelWindow,
+          funnelGroup: report.funnelGroup ?? null,
+          funnelWindow: report.funnelWindow ?? null,
+          measuring: report.measuring ?? null,
+          globalFilters: report.globalFilters ?? [],
+          holdProperties: report.holdProperties ?? [],
         },
       });
     }),
@@ -175,6 +201,8 @@ export const reportRouter = createTRPCRouter({
           metric: report.metric,
           funnelGroup: report.funnelGroup,
           funnelWindow: report.funnelWindow,
+          globalFilters: report.globalFilters ?? [],
+          holdProperties: report.holdProperties ?? [],
         },
       });
     }),

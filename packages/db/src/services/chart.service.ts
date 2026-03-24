@@ -8,6 +8,7 @@ import type {
   IChartRange,
   IGetChartDataInput,
   ICustomEventDefinition,
+  CohortDefinition,
 } from '@openpanel/validation';
 
 import { TABLE_NAMES, formatClickhouseDate } from '../clickhouse/client';
@@ -17,37 +18,63 @@ import {
   expandCustomEventToSQL,
 } from './custom-event.service';
 import { db } from '../../index';
+import { buildEventCriteriaQuery, buildPropertyBasedCohortQuery } from './cohort.service';
 
 // Cache for materialized columns mapping
 let materializedColumnsCache: Record<string, string> | null = null;
 let cacheTimestamp = 0;
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
+function filterByTargetTable(
+  cache: Record<string, string>,
+  targetTable?: 'events' | 'profiles',
+): Record<string, string> {
+  if (!targetTable) return cache;
+  return Object.fromEntries(
+    Object.entries(cache).filter(([key]) =>
+      targetTable === 'profiles'
+        ? key.startsWith('profile.properties.')
+        : key.startsWith('properties.'),
+    ),
+  );
+}
+
 /**
- * Get materialized columns from database with caching
+ * Get materialized columns from database with caching.
+ * Pass targetTable to get only columns for that table:
+ *   'events'   → keys starting with "properties.*"
+ *   'profiles' → keys starting with "profile.properties.*"
+ *   (omit)     → all columns (used by getSelectPropertyKey)
  */
-async function getMaterializedColumns(): Promise<Record<string, string>> {
+export async function getMaterializedColumns(targetTable?: 'events' | 'profiles'): Promise<Record<string, string>> {
   const now = Date.now();
 
   // Return cached value if still valid
   if (materializedColumnsCache && (now - cacheTimestamp) < CACHE_TTL) {
-    return materializedColumnsCache;
+    return filterByTargetTable(materializedColumnsCache, targetTable);
   }
 
   try {
     const columns = await db.materializedColumn.findMany({
       where: { status: 'active' },
-      select: { propertyKey: true, columnName: true },
+      select: { propertyKey: true, columnName: true, targetTable: true },
     });
 
     const mapping: Record<string, string> = {};
     for (const col of columns) {
-      mapping[`properties.${col.propertyKey}`] = col.columnName;
+      const quotedColName = `\`${col.columnName}\``;
+      if (col.targetTable === 'profiles') {
+        // e.g. "profile.properties.campaign" -> "profile.`campaign`"
+        mapping[`profile.properties.${col.propertyKey}`] = `profile.${quotedColName}`;
+      } else {
+        // e.g. "properties.utm_source" -> "`utm_source`"
+        mapping[`properties.${col.propertyKey}`] = quotedColName;
+      }
     }
 
     materializedColumnsCache = mapping;
     cacheTimestamp = now;
-    return mapping;
+    return filterByTargetTable(mapping, targetTable);
   } catch (error) {
     // If database query fails, return empty mapping (fallback to properties['key'])
     console.warn('Failed to load materialized columns:', error);
@@ -76,6 +103,109 @@ getMaterializedColumns().catch(() => {
   // Ignore errors on initial load
 });
 
+// Cohort metadata type
+type CohortMetadata = {
+  id: string;
+  computeOnDemand: boolean;
+  definition: CohortDefinition;
+};
+
+/**
+ * Fetch metadata for multiple cohorts from Postgres (no cache - always fresh)
+ */
+export async function fetchCohortsMetadata(
+  cohortIds: string[],
+): Promise<Map<string, CohortMetadata>> {
+  if (cohortIds.length === 0) {
+    return new Map();
+  }
+
+  // Fetch all cohorts in one query
+  const cohorts = await db.cohort.findMany({
+    where: { id: { in: cohortIds } },
+    select: { id: true, computeOnDemand: true, definition: true },
+  });
+
+  return new Map(
+    cohorts.map((c) => [
+      c.id,
+      {
+        id: c.id,
+        computeOnDemand: c.computeOnDemand,
+        definition: c.definition as CohortDefinition,
+      },
+    ]),
+  );
+}
+
+/**
+ * Generate cohort membership query for CTE
+ * Returns the full SELECT query
+ */
+export function buildCohortMembershipQuery(
+  cohortId: string,
+  projectId: string,
+  cohortMeta?: CohortMetadata,
+): string {
+  // Pre-computed cohorts or missing metadata: read from stored membership
+  if (!cohortMeta || !cohortMeta.computeOnDemand) {
+    return `
+      SELECT profile_id
+      FROM ${TABLE_NAMES.cohort_members} FINAL
+      WHERE cohort_id = ${sqlstring.escape(cohortId)}
+        AND project_id = ${sqlstring.escape(projectId)}
+    `;
+  }
+
+  // Dynamic cohorts: build query from definition
+  const definition = cohortMeta.definition;
+
+  if (definition.type === 'event') {
+    const { events, operator } = definition.criteria;
+    const queries = events.map((eventCriteria) =>
+      buildEventCriteriaQuery(projectId, eventCriteria),
+    );
+
+    return operator === 'and'
+      ? queries.join(' INTERSECT ')
+      : queries.join(' UNION DISTINCT ');
+  } else if (definition.type === 'property') {
+    return buildPropertyBasedCohortQuery(projectId, definition);
+  }
+
+  throw new Error(`Unknown cohort type: ${(definition as any).type}`);
+}
+
+/**
+ * Get CTE name for a cohort (quoted with backticks)
+ */
+export function getCohortCteName(cohortId: string): string {
+  return `\`cohort-${cohortId}\``;
+}
+
+/**
+ * Get table alias for a cohort (used in JOINs)
+ */
+export function getCohortAlias(cohortId: string): string {
+  return `cohort_${cohortId.replace(/-/g, '_')}`;
+}
+
+/**
+ * Build inline cohort JOIN clause with subquery
+ * Used in CTEs where CTE references are not allowed by ClickHouse
+ */
+function buildInlineCohortJoin(
+  cohortId: string,
+  projectId: string,
+  tableAlias: string,
+  cohortMeta?: CohortMetadata,
+): string {
+  const cohortAlias = getCohortAlias(cohortId);
+  const cohortQuery = buildCohortMembershipQuery(cohortId, projectId, cohortMeta);
+  return `LEFT ANY JOIN (${cohortQuery}) AS ${cohortAlias} ON ${cohortAlias}.profile_id = ${tableAlias}.profile_id`;
+}
+
+
 export function transformPropertyKey(property: string) {
   const propertyPatterns = ['properties', 'profile.properties'];
   const match = propertyPatterns.find((pattern) =>
@@ -97,26 +227,30 @@ export function transformPropertyKey(property: string) {
   return `${match}['${property.replace(new RegExp(`^${match}.`), '')}']`;
 }
 
-export function getSelectPropertyKey(property: string, projectId?: string) {
+export function getSelectPropertyKey(
+  property: string,
+  projectId?: string,
+  cohortId?: string,
+) {
   // Handle cohort breakdown
-  if (property.startsWith('cohort:')) {
-    const cohortId = property.split(':')[1];
-    const projectFilter = projectId
-      ? `AND project_id = ${sqlstring.escape(projectId)}`
-      : '';
+  // Use cohortId parameter if provided, otherwise parse from property name (backwards compatibility)
+  const extractedCohortId = cohortId || (property.startsWith('cohort:') ? property.split(':')[1] : null);
+
+  if (extractedCohortId && projectId) {
+    // Use JOIN-based approach instead of IN subquery for better performance
+    const cohortAlias = getCohortAlias(extractedCohortId);
+    // Use notEmpty() to handle both join_use_nulls=0 (returns '') and join_use_nulls=1 (returns NULL)
+    // When join_use_nulls=0, ClickHouse returns empty string for unmatched LEFT JOIN rows instead of NULL
+    // notEmpty() correctly identifies both cases as "Not In Cohort"
     return `if(
-      profile_id IN (
-        SELECT profile_id FROM ${TABLE_NAMES.cohort_members} FINAL
-        WHERE cohort_id = ${sqlstring.escape(cohortId)}
-        ${projectFilter}
-      ),
+      notEmpty(${cohortAlias}.profile_id),
       'In Cohort',
       'Not In Cohort'
     )`;
   }
 
   if (property === 'has_profile') {
-    return `if(profile_id != device_id, 'true', 'false')`;
+    return `if(e.profile_id != e.device_id, 'true', 'false')`;
   }
 
   // Handle profile.created_at - it's stored as created_at in the profiles table
@@ -190,28 +324,32 @@ function getChartSqlFromMaterializedView({
   }
 
   // Date aggregation based on interval (use table alias)
+  // Use DateTime format to match the regular query output (toStartOfDay returns DateTime).
+  // This prevents date-format mismatches when mixing MV series with non-MV series
+  // (e.g. one series has filters → regular query returns "2026-02-24 00:00:00",
+  //  another has no filters → MV query previously returned bare "2026-02-24").
   if (interval === 'day') {
-    sb.select.date = 't.date';
-    sb.groupBy.date = 't.date';
-    sb.orderBy.date = 't.date ASC';
+    sb.select.date = 'toStartOfDay(toDateTime(t.date)) as date';
+    sb.groupBy.date = 'toStartOfDay(toDateTime(t.date))';
+    sb.orderBy.date = 'toStartOfDay(toDateTime(t.date)) ASC';
   } else if (interval === 'week') {
-    sb.select.date = 'toStartOfWeek(t.date, 1) as date';
-    sb.groupBy.date = 'toStartOfWeek(t.date, 1)';
-    sb.orderBy.date = 'toStartOfWeek(t.date, 1) ASC';
+    sb.select.date = 'toDateTime(toStartOfWeek(t.date, 1)) as date';
+    sb.groupBy.date = 'toDateTime(toStartOfWeek(t.date, 1))';
+    sb.orderBy.date = 'toDateTime(toStartOfWeek(t.date, 1)) ASC';
   } else if (interval === 'month') {
-    sb.select.date = 'toStartOfMonth(t.date) as date';
-    sb.groupBy.date = 'toStartOfMonth(t.date)';
-    sb.orderBy.date = 'toStartOfMonth(t.date) ASC';
+    sb.select.date = 'toDateTime(toStartOfMonth(t.date)) as date';
+    sb.groupBy.date = 'toDateTime(toStartOfMonth(t.date))';
+    sb.orderBy.date = 'toDateTime(toStartOfMonth(t.date)) ASC';
   }
 
-  // Build WITH FILL for date gaps
+  // Build WITH FILL for date gaps — use DateTime to match the regular query fill format
   let fillClause = '';
   if (interval === 'day') {
-    fillClause = `WITH FILL FROM toDate(${sqlstring.escape(startDate)}) TO toDate(${sqlstring.escape(endDate)}) STEP toIntervalDay(1)`;
+    fillClause = `WITH FILL FROM toStartOfDay(toDateTime(${sqlstring.escape(startDate)})) TO toStartOfDay(toDateTime(${sqlstring.escape(endDate)})) STEP toIntervalDay(1)`;
   } else if (interval === 'week') {
-    fillClause = `WITH FILL FROM toStartOfWeek(toDate(${sqlstring.escape(startDate)}), 1) TO toStartOfWeek(toDate(${sqlstring.escape(endDate)}), 1) STEP toIntervalWeek(1)`;
+    fillClause = `WITH FILL FROM toDateTime(toStartOfWeek(toDate(${sqlstring.escape(startDate)}), 1)) TO toDateTime(toStartOfWeek(toDate(${sqlstring.escape(endDate)}), 1)) STEP toIntervalWeek(1)`;
   } else if (interval === 'month') {
-    fillClause = `WITH FILL FROM toStartOfMonth(toDate(${sqlstring.escape(startDate)})) TO toStartOfMonth(toDate(${sqlstring.escape(endDate)})) STEP toIntervalMonth(1)`;
+    fillClause = `WITH FILL FROM toDateTime(toStartOfMonth(toDate(${sqlstring.escape(startDate)}))) TO toDateTime(toStartOfMonth(toDate(${sqlstring.escape(endDate)}))) STEP toIntervalMonth(1)`;
   }
 
   const sql = `${getSelect()} FROM ${sb.from} ${getWhere()} ${getGroupBy()} ${getOrderBy()} ${fillClause}`;
@@ -251,7 +389,7 @@ function canUseMaterializedView(
   );
 }
 
-export function getChartSql({
+export async function getChartSql({
   event,
   breakdowns,
   interval,
@@ -266,6 +404,30 @@ export function getChartSql({
   timezone: string;
   customEvent?: { name: string; definition: ICustomEventDefinition };
 }) {
+  // Pre-fetch cohort metadata for all cohorts used in this query (deduplicated)
+  const cohortIdsSet = new Set<string>();
+
+  // Extract cohort IDs from breakdowns
+  breakdowns?.forEach((b) => {
+    if (b.cohortId) {
+      cohortIdsSet.add(b.cohortId);
+    } else if (b.name.startsWith('cohort:')) {
+      cohortIdsSet.add(b.name.split(':')[1]!);
+    }
+  });
+
+  // Extract cohort IDs from event filters
+  event.filters?.forEach((filter) => {
+    if (filter.cohortId) {
+      cohortIdsSet.add(filter.cohortId);
+    }
+  });
+
+  const cohortIds = Array.from(cohortIdsSet);
+
+  // Fetch cohort metadata from Postgres (always fresh, no cache)
+  const cohortMetadata = await fetchCohortsMetadata(cohortIds);
+
   // Check if we can use materialized view for fast queries
   // Custom events cannot use materialized views (for now)
   if (!customEvent && canUseMaterializedView(event, breakdowns, interval)) {
@@ -293,6 +455,33 @@ export function getChartSql({
     with: addCte,
   } = createSqlBuilder();
 
+  // Determine if we can use profile_event_summary_mv instead of raw events table
+  // for cohort-only breakdown queries (no property breakdowns/filters, day+ interval)
+  const hasCohortBreakdown = breakdowns.some((b) => b.name.startsWith('cohort:') || b.cohortId);
+  const allBreakdownsAreCohort = breakdowns.every((b) => b.name.startsWith('cohort:') || b.cohortId);
+  const hasPropertyFilters = event.filters?.some((f) => f.name.startsWith('properties.') || f.name.startsWith('profile.'));
+  const useCohortMV =
+    !customEvent &&
+    hasCohortBreakdown &&
+    allBreakdownsAreCohort &&
+    !hasPropertyFilters &&
+    ['day', 'week', 'month'].includes(interval) &&
+    ['user', 'event', undefined].includes(event.segment ?? 'event') &&
+    event.segment !== 'one_event_per_user';
+
+  if (useCohortMV) {
+    sb.from = `${TABLE_NAMES.profile_event_summary_mv} e`;
+  }
+
+  // Create CTEs for all cohorts (used by main query only)
+  // NOTE: ClickHouse allows CTEs to be referenced in the main query's JOINs,
+  // but NOT in other CTEs' JOINs. For CTEs that need cohort data, we inline subqueries.
+  cohortIds.forEach((cohortId) => {
+    const cohortMeta = cohortMetadata.get(cohortId);
+    const cohortQuery = buildCohortMembershipQuery(cohortId, projectId, cohortMeta);
+    addCte(getCohortCteName(cohortId), cohortQuery);
+  });
+
   // Common setup
   sb.where = getEventFiltersWhereClause(event.filters, projectId);
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
@@ -303,7 +492,7 @@ export function getChartSql({
 
   // Setup data source: custom event CTE or regular events table
   if (customEvent) {
-    setupCustomEventCTE(sb, addCte, customEvent, projectId, startDate, endDate);
+    await setupCustomEventCTE(sb, addCte, customEvent, projectId, startDate, endDate);
   } else if (event.name !== '*') {
     sb.where.eventName = `name = ${sqlstring.escape(event.name)}`;
   }
@@ -327,41 +516,41 @@ export function getChartSql({
 
   // Collect all profile fields used in filters and breakdowns
   // Extract top-level field names (e.g., 'properties' from 'profile.properties.os')
+  // When a profile.properties.* key has a materialized column, select that column
+  // directly instead of the whole properties map.
   const getProfileFields = () => {
     const fields = new Set<string>();
 
     // Always need id for the join
     fields.add('id');
 
-    // Collect from filters
-    event.filters
-      .filter((f) => f.name.startsWith('profile.'))
-      .forEach((f) => {
-        const fieldName = f.name.replace('profile.', '').split('.')[0];
-        if (fieldName && fieldName === 'properties') {
-          fields.add('properties');
-        } else if (
-          fieldName &&
-          ['email', 'first_name', 'last_name', 'created_at'].includes(fieldName)
-        ) {
-          fields.add(fieldName);
-        }
-      });
+    const allProfileNames = [
+      ...event.filters.filter((f) => f.name.startsWith('profile.')).map((f) => f.name),
+      ...breakdowns.filter((b) => b.name.startsWith('profile.')).map((b) => b.name),
+    ];
 
-    // Collect from breakdowns
-    breakdowns
-      .filter((b) => b.name.startsWith('profile.'))
-      .forEach((b) => {
-        const fieldName = b.name.replace('profile.', '').split('.')[0];
-        if (fieldName && fieldName === 'properties') {
+    for (const propName of allProfileNames) {
+      if (propName.startsWith('profile.properties.')) {
+        // Check if there's a materialized column in the cache
+        if (materializedColumnsCache && materializedColumnsCache[propName]) {
+          // e.g. cache value is "profile.campaign" -> select "campaign"
+          const colName = materializedColumnsCache[propName]!.replace('profile.', '');
+          fields.add(colName);
+        } else {
+          // No materialized column: select the whole properties map
           fields.add('properties');
-        } else if (
+        }
+      } else {
+        // Direct profile field (email, first_name, etc.)
+        const fieldName = propName.replace('profile.', '').split('.')[0];
+        if (
           fieldName &&
           ['email', 'first_name', 'last_name', 'created_at'].includes(fieldName)
         ) {
           fields.add(fieldName);
         }
-      });
+      }
+    }
 
     return Array.from(fields);
   };
@@ -370,7 +559,13 @@ export function getChartSql({
   // Only select the fields that are actually used
   const profilesJoinRef =
     anyFilterOnProfile || anyBreakdownOnProfile
-      ? 'LEFT ANY JOIN profile ON profile.id = profile_id'
+      ? 'LEFT ANY JOIN profile ON profile.id = e.profile_id'
+      : '';
+
+  // Profile JOIN for CTEs that don't use 'e' alias (use table name directly)
+  const profilesJoinRefForCTE =
+    anyFilterOnProfile || anyBreakdownOnProfile
+      ? `LEFT ANY JOIN profile ON profile.id = ${TABLE_NAMES.events}.profile_id`
       : '';
 
   if (anyFilterOnProfile || anyBreakdownOnProfile) {
@@ -393,31 +588,43 @@ export function getChartSql({
     sb.joins.profiles = profilesJoinRef;
   }
 
-  sb.select.count = 'count(*) as count';
+  // Add LEFT JOINs for all cohorts (much faster than IN subqueries)
+  cohortIds.forEach((cohortId) => {
+    const cohortAlias = getCohortAlias(cohortId);
+    const cohortCte = getCohortCteName(cohortId);
+    sb.joins[`cohort_${cohortId}`] = `LEFT ANY JOIN ${cohortCte} AS ${cohortAlias} ON ${cohortAlias}.profile_id = e.profile_id`;
+  });
+
+  // When using cohort MV, swap column names and aggregate functions
+  const countExpr = useCohortMV ? 'countMerge(e.event_count)' : 'count(*)';
+  const dateExpr = useCohortMV ? 'toDateTime(e.event_date)' : 'created_at';
+
+  sb.select.count = `${countExpr} as count`;
+
   switch (interval) {
     case 'minute': {
       sb.fill = `FROM toStartOfMinute(toDateTime('${startDate}')) TO toStartOfMinute(toDateTime('${endDate}')) STEP toIntervalMinute(1)`;
-      sb.select.date = 'toStartOfMinute(created_at) as date';
+      sb.select.date = `toStartOfMinute(${dateExpr}) as date`;
       break;
     }
     case 'hour': {
       sb.fill = `FROM toStartOfHour(toDateTime('${startDate}')) TO toStartOfHour(toDateTime('${endDate}')) STEP toIntervalHour(1)`;
-      sb.select.date = 'toStartOfHour(created_at) as date';
+      sb.select.date = `toStartOfHour(${dateExpr}) as date`;
       break;
     }
     case 'day': {
       sb.fill = `FROM toStartOfDay(toDateTime('${startDate}')) TO toStartOfDay(toDateTime('${endDate}')) STEP toIntervalDay(1)`;
-      sb.select.date = 'toStartOfDay(created_at) as date';
+      sb.select.date = `toStartOfDay(${dateExpr}) as date`;
       break;
     }
     case 'week': {
       sb.fill = `FROM toStartOfWeek(toDateTime('${startDate}'), 1, '${timezone}') TO toStartOfWeek(toDateTime('${endDate}'), 1, '${timezone}') STEP toIntervalWeek(1)`;
-      sb.select.date = `toStartOfWeek(created_at, 1, '${timezone}') as date`;
+      sb.select.date = `toStartOfWeek(${dateExpr}, 1, '${timezone}') as date`;
       break;
     }
     case 'month': {
       sb.fill = `FROM toStartOfMonth(toDateTime('${startDate}'), '${timezone}') TO toStartOfMonth(toDateTime('${endDate}'), '${timezone}') STEP toIntervalMonth(1)`;
-      sb.select.date = `toStartOfMonth(created_at, '${timezone}') as date`;
+      sb.select.date = `toStartOfMonth(${dateExpr}, '${timezone}') as date`;
       break;
     }
   }
@@ -425,52 +632,69 @@ export function getChartSql({
   sb.orderBy.date = 'date ASC';
 
   if (startDate) {
-    sb.where.startDate = `created_at >= toDateTime('${formatClickhouseDate(startDate)}')`;
+    sb.where.startDate = useCohortMV
+      ? `event_date >= toDate('${formatClickhouseDate(startDate)}')`
+      : `created_at >= toDateTime('${formatClickhouseDate(startDate)}')`;
   }
 
   if (endDate) {
-    sb.where.endDate = `created_at <= toDateTime('${formatClickhouseDate(endDate)}')`;
+    sb.where.endDate = useCohortMV
+      ? `event_date <= toDate('${formatClickhouseDate(endDate)}')`
+      : `created_at <= toDateTime('${formatClickhouseDate(endDate)}')`;
   }
 
   // Use CTE to define top breakdown values once, then reference in WHERE clause
   if (breakdowns.length > 0 && limit) {
     const breakdownSelects = breakdowns
-      .map((b) => getSelectPropertyKey(b.name, projectId))
+      .map((b) => getSelectPropertyKey(b.name, projectId, b.cohortId))
       .join(', ');
+
+    // Build cohort JOINs for top_breakdowns CTE
+    // NOTE: ClickHouse CTEs cannot reference other CTEs in JOINs, so we inline the subquery
+    const cohortJoinsForTop = cohortIds.map((cohortId) => {
+      const cohortMeta = cohortMetadata.get(cohortId);
+      return buildInlineCohortJoin(cohortId, projectId, 'e', cohortMeta);
+    }).join(' ');
+
+    // Determine data source: use cohort MV, custom event CTE, or regular events table
+    const dataSource = useCohortMV
+      ? TABLE_NAMES.profile_event_summary_mv
+      : customEvent ? 'custom_event_data' : TABLE_NAMES.events;
+    const orderByCount = useCohortMV ? 'countMerge(e.event_count)' : 'count(*)';
 
     // Add top_breakdowns CTE using the builder
     addCte(
       'top_breakdowns',
       `SELECT ${breakdownSelects}
-      FROM ${TABLE_NAMES.events} e
-      ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${getWhereWithoutBar()}
+      FROM ${dataSource} AS e
+      ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${cohortJoinsForTop ? `${cohortJoinsForTop} ` : ''}${getWhereWithoutBar()}
       GROUP BY ${breakdownSelects}
-      ORDER BY count(*) DESC
+      ORDER BY ${orderByCount} DESC
       LIMIT ${limit}`,
     );
 
     // Filter main query to only include top breakdown values
-    sb.where.bar = `(${breakdowns.map((b) => getSelectPropertyKey(b.name, projectId)).join(',')}) IN (SELECT * FROM top_breakdowns)`;
+    sb.where.bar = `(${breakdowns.map((b) => getSelectPropertyKey(b.name, projectId, b.cohortId)).join(',')}) IN (SELECT * FROM top_breakdowns)`;
   }
 
   breakdowns.forEach((breakdown, index) => {
     // Breakdowns start at label_1 (label_0 is reserved for event name)
     const key = `label_${index + 1}`;
-    sb.select[key] = `${getSelectPropertyKey(breakdown.name, projectId)} as ${key}`;
+    sb.select[key] = `${getSelectPropertyKey(breakdown.name, projectId, breakdown.cohortId)} as ${key}`;
     sb.groupBy[key] = `${key}`;
   });
 
   if (event.segment === 'user') {
-    sb.select.count = 'uniq(profile_id) as count';
+    sb.select.count = 'uniq(e.profile_id) as count';
   }
 
   if (event.segment === 'session') {
-    sb.select.count = 'uniq(session_id) as count';
+    sb.select.count = 'uniq(e.session_id) as count';
   }
 
   if (event.segment === 'user_average') {
     sb.select.count =
-      'COUNT(*)::float / COUNT(DISTINCT profile_id)::float as count';
+      'COUNT(*)::float / COUNT(DISTINCT e.profile_id)::float as count';
   }
 
   const mathFunction = {
@@ -512,7 +736,7 @@ export function getChartSql({
   if (breakdowns.length > 0) {
     const breakdownSelects = breakdowns
       .map((b, index) => {
-        const propertyKey = getSelectPropertyKey(b.name, projectId);
+        const propertyKey = getSelectPropertyKey(b.name, projectId, b.cohortId);
         return `${propertyKey} as breakdown_${index + 1}`;
       })
       .join(', ');
@@ -523,19 +747,31 @@ export function getChartSql({
 
     const totalCountWhere = getWhereWithoutBar();
 
+    // Determine data source: use cohort MV, custom event CTE, or regular events table
+    const dataSourceForBreakdown = useCohortMV
+      ? TABLE_NAMES.profile_event_summary_mv
+      : customEvent ? 'custom_event_data' : TABLE_NAMES.events;
+
+    // Build cohort JOINs for breakdown_totals CTE
+    // NOTE: ClickHouse CTEs cannot reference other CTEs in JOINs, so we inline the subquery
+    const cohortJoinsForBreakdown = cohortIds.map((cohortId) => {
+      const cohortMeta = cohortMetadata.get(cohortId);
+      return buildInlineCohortJoin(cohortId, projectId, dataSourceForBreakdown, cohortMeta);
+    }).join(' ');
+
     addCte(
       'breakdown_totals',
       `SELECT
         ${breakdownSelects},
-        uniq(profile_id) as total_count
-       FROM ${TABLE_NAMES.events}
-       ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${totalCountWhere}
+        uniq(${dataSourceForBreakdown}.profile_id) as total_count
+       FROM ${dataSourceForBreakdown}
+       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForBreakdown ? `${cohortJoinsForBreakdown} ` : ''}${totalCountWhere}
        GROUP BY ${breakdownGroupBy}`,
     );
 
     const joinConditions = breakdowns
       .map((b, index) => {
-        const propertyKey = getSelectPropertyKey(b.name, projectId);
+        const propertyKey = getSelectPropertyKey(b.name, projectId, b.cohortId);
         return `breakdown_totals.breakdown_${index + 1} = ${propertyKey}`;
       })
       .join(' AND ');
@@ -545,11 +781,23 @@ export function getChartSql({
   } else {
     const totalCountWhere = getWhereWithoutBar();
 
+    // Determine data source: use cohort MV, custom event CTE, or regular events table
+    const dataSourceForTotal = useCohortMV
+      ? TABLE_NAMES.profile_event_summary_mv
+      : customEvent ? 'custom_event_data' : TABLE_NAMES.events;
+
+    // Build cohort JOINs for total_unique CTE
+    // NOTE: ClickHouse CTEs cannot reference other CTEs in JOINs, so we inline the subquery
+    const cohortJoinsForTotal = cohortIds.map((cohortId) => {
+      const cohortMeta = cohortMetadata.get(cohortId);
+      return buildInlineCohortJoin(cohortId, projectId, dataSourceForTotal, cohortMeta);
+    }).join(' ');
+
     addCte(
       'total_unique',
-      `SELECT uniq(profile_id) as total_count
-       FROM ${TABLE_NAMES.events}
-       ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${totalCountWhere}`,
+      `SELECT uniq(${dataSourceForTotal}.profile_id) as total_count
+       FROM ${dataSourceForTotal}
+       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForTotal ? `${cohortJoinsForTotal} ` : ''}${totalCountWhere}`,
     );
 
     sb.select.total_unique_count = `(SELECT total_count FROM total_unique) as total_count`;
@@ -571,7 +819,7 @@ function isNumericColumn(columnName: string): boolean {
  * Setup CTE for custom event expansion
  * Modifies the sql builder to use custom event data instead of events table
  */
-function setupCustomEventCTE(
+async function setupCustomEventCTE(
   sb: any,
   addCte: (name: string, query: string) => void,
   customEvent: { name: string; definition: ICustomEventDefinition },
@@ -587,7 +835,7 @@ function setupCustomEventCTE(
     baseWhere.push(`created_at <= toDateTime('${formatClickhouseDate(endDate)}')`);
   }
 
-  const customEventSQL = expandCustomEventToSQL(
+  const customEventSQL = await expandCustomEventToSQL(
     { ...customEvent, projectId },
     baseWhere,
   );
@@ -605,24 +853,16 @@ export function getEventFiltersWhereClause(
     const id = `f${index}`;
     const { name, value, operator, cohortId } = filter;
 
-    // Handle cohort operators
+    // Handle cohort operators - use JOIN-based approach
     if (operator === 'inCohort' && cohortId && projectId) {
-      where[id] = `profile_id IN (
-        SELECT profile_id
-        FROM ${TABLE_NAMES.cohort_members} FINAL
-        WHERE cohort_id = ${sqlstring.escape(cohortId)}
-          AND project_id = ${sqlstring.escape(projectId)}
-      )`;
+      const cohortAlias = getCohortAlias(cohortId);
+      where[id] = `notEmpty(${cohortAlias}.profile_id)`;
       return;
     }
 
     if (operator === 'notInCohort' && cohortId && projectId) {
-      where[id] = `profile_id NOT IN (
-        SELECT profile_id
-        FROM ${TABLE_NAMES.cohort_members} FINAL
-        WHERE cohort_id = ${sqlstring.escape(cohortId)}
-          AND project_id = ${sqlstring.escape(projectId)}
-      )`;
+      const cohortAlias = getCohortAlias(cohortId);
+      where[id] = `empty(${cohortAlias}.profile_id)`;
       return;
     }
 
@@ -636,9 +876,9 @@ export function getEventFiltersWhereClause(
 
     if (name === 'has_profile') {
       if (value.includes('true')) {
-        where[id] = 'profile_id != device_id';
+        where[id] = 'e.profile_id != e.device_id';
       } else {
-        where[id] = 'profile_id = device_id';
+        where[id] = 'e.profile_id = e.device_id';
       }
       return;
     }
@@ -1022,12 +1262,7 @@ export function getGlobalCohortFiltersWhereClause(
   }
 
   const conditions = cohortFilters.map((filter) => {
-    const subquery = `
-      SELECT profile_id
-      FROM ${TABLE_NAMES.cohort_members} FINAL
-      WHERE cohort_id = ${sqlstring.escape(filter.cohortId)}
-        AND project_id = ${sqlstring.escape(projectId)}
-    `;
+    const subquery = getCohortMembershipSubquery(filter.cohortId);
 
     return filter.operator === 'inCohort'
       ? `profile_id IN (${subquery})`
