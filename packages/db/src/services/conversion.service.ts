@@ -309,6 +309,9 @@ export class ConversionService {
     const startExtraCols = [...new Set([...breakdownExtraCols, ...holdExtraCols])];
     const endExtraCols = [...new Set(holdExtraCols)];
 
+    // Define group column (profile_id or session_id) — needed by CTE builders below
+    const groupCol = funnelGroup === 'profile_id' ? 'profile_id' : 'session_id';
+
     // Build CTEs for start and end events
     const ctes: string[] = [];
 
@@ -363,9 +366,6 @@ export class ConversionService {
       const cohortQuery = buildCohortMembershipQuery(cohortId, projectId, cohortMeta);
       ctes.push(`${getCohortCteName(cohortId)} AS (${cohortQuery})`);
     });
-
-    // Define group column (profile_id or session_id)
-    const groupCol = funnelGroup === 'profile_id' ? 'profile_id' : 'session_id';
 
     // Build breakdown columns (from start_events with 'se' alias)
     const breakdownColumns = breakdowns.map((b, index) => {
