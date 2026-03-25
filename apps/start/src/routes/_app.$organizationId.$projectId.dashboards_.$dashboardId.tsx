@@ -474,13 +474,13 @@ function Component() {
         className="mb-0"
         actions={
           <>
-            <div className="relative">
-              <SearchIcon className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+            <div className="relative flex items-center">
+              <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
               <Input
                 placeholder="Search reports..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-48 [&]:pl-8"
+                className="pl-8 w-48"
               />
             </div>
             <OverviewRange />
