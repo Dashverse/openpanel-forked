@@ -480,7 +480,8 @@ function Component() {
                 placeholder="Search reports..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-8 w-48"
+                className="w-48"
+                style={{ paddingLeft: '2rem' }}
               />
             </div>
             <OverviewRange />
