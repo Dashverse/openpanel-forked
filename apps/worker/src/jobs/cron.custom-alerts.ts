@@ -20,6 +20,17 @@ import {
 
 import { logger } from '../utils/logger';
 
+const CRON_QUERY_TIMEOUT_MS = 30_000; // 30 seconds
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Query timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 // Inline types — @openpanel/validation is not a direct worker dependency
 type INotificationRuleThresholdConfig = {
   type: 'threshold';
@@ -112,7 +123,7 @@ export async function customAlerts() {
       let message = '';
 
       if (config.type === 'threshold') {
-        const result = await evaluateThreshold(report, config);
+        const result = await withTimeout(evaluateThreshold(report, config), CRON_QUERY_TIMEOUT_MS);
         shouldAlert = result.shouldAlert;
         title = result.title;
         message = result.message;
@@ -121,7 +132,7 @@ export async function customAlerts() {
           `[custom-alerts] Rule "${rule.name}" (${rule.id}): threshold ${config.operator} ${config.value} — current: ${result.currentValue} — ${shouldAlert ? 'TRIGGERED' : 'not crossed'}`,
         );
       } else if (config.type === 'anomaly') {
-        const result = await evaluateAnomaly(report, config);
+        const result = await withTimeout(evaluateAnomaly(report, config), CRON_QUERY_TIMEOUT_MS);
         shouldAlert = result.shouldAlert;
         title = result.title;
         message = result.message;
