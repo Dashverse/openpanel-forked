@@ -18,6 +18,8 @@ import {
   getSettingsForProject,
 } from '@openpanel/db';
 
+import { getLock } from '@openpanel/redis';
+
 import { logger } from '../utils/logger';
 
 const CRON_QUERY_TIMEOUT_MS = 30_000; // 30 seconds
@@ -52,6 +54,12 @@ type INotificationRuleAnomalyConfig = {
  * Runs every 15 minutes, evaluates all threshold and anomaly rules
  */
 export async function customAlerts() {
+  const lock = await getLock('customAlerts:lock', '1', 14 * 60 * 1000); // 14 min TTL
+  if (!lock) {
+    logger.info('[custom-alerts] Skipping — another instance is already running');
+    return;
+  }
+
   const rules = await db.notificationRule.findMany({
     where: {
       config: {
