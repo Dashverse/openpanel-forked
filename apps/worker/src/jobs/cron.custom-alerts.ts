@@ -283,10 +283,6 @@ async function evaluateThreshold(
     // Use second-to-last point — last point is the incomplete/partial period
     const lastPoint = data.length >= 2 ? data[data.length - 2] : data[data.length - 1];
     const currentValue = lastPoint?.rate ?? 0;
-    const total = lastPoint?.total ?? 0;
-    if (total < 10) {
-      return { shouldAlert: false, currentValue, title: '', message: '' };
-    }
 
     const crossed =
       config.operator === 'above'
@@ -419,7 +415,6 @@ async function evaluateAnomaly(
       cohortFilters: report.cohortFilters,
     });
 
-    const MIN_SAMPLE_SIZE = 10;
     const zScore = CONFIDENCE_Z_SCORES[config.confidence] ?? 1.96;
     const anomalies: string[] = [];
     let firstTriggered = { currentValue: 0, lowerBound: 0, upperBound: 0 };
@@ -430,7 +425,7 @@ async function evaluateAnomaly(
       if (data.length < 4) continue;
 
       const lastCompleted = data[data.length - 2];
-      if (!lastCompleted || lastCompleted.total < MIN_SAMPLE_SIZE) continue;
+      if (!lastCompleted) continue;
 
       const dataPoints = data.map((d) => d.rate);
       const historicalRates = dataPoints.slice(0, Math.min(dataPoints.length - 2, ANOMALY_HISTORY_COUNT));
@@ -454,6 +449,7 @@ async function evaluateAnomaly(
     }
 
     const shouldAlert = anomalies.length > 0;
+    const hasBreakdowns = report.breakdowns && report.breakdowns.length > 0;
     return {
       shouldAlert,
       currentValue: firstTriggered.currentValue,
@@ -461,7 +457,9 @@ async function evaluateAnomaly(
       upperBound: firstTriggered.upperBound,
       title: `Alert: ${report.name}`,
       message: shouldAlert
-        ? `Anomaly detected on ${report.name}:\n${anomalies.join('\n')}`
+        ? hasBreakdowns
+          ? `The current value for ${report.name} is ${firstTriggered.currentValue.toFixed(2)}%. Triggered when the current value is not within forecasted range [${firstTriggered.lowerBound.toFixed(2)}%, ${firstTriggered.upperBound.toFixed(2)}%].\n\n${anomalies.join('\n')}`
+          : `The current value for ${report.name} is ${firstTriggered.currentValue.toFixed(2)}%. Triggered when the current value is not within forecasted range [${firstTriggered.lowerBound.toFixed(2)}%, ${firstTriggered.upperBound.toFixed(2)}%].`
         : '',
     };
   }
