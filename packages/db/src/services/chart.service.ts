@@ -106,6 +106,7 @@ getMaterializedColumns().catch(() => {
 // Cohort metadata type
 type CohortMetadata = {
   id: string;
+  name: string;
   computeOnDemand: boolean;
   definition: CohortDefinition;
 };
@@ -123,7 +124,7 @@ export async function fetchCohortsMetadata(
   // Fetch all cohorts in one query
   const cohorts = await db.cohort.findMany({
     where: { id: { in: cohortIds } },
-    select: { id: true, computeOnDemand: true, definition: true },
+    select: { id: true, name: true, computeOnDemand: true, definition: true },
   });
 
   return new Map(
@@ -131,6 +132,7 @@ export async function fetchCohortsMetadata(
       c.id,
       {
         id: c.id,
+        name: c.name,
         computeOnDemand: c.computeOnDemand,
         definition: c.definition as CohortDefinition,
       },
@@ -231,6 +233,7 @@ export function getSelectPropertyKey(
   property: string,
   projectId?: string,
   cohortId?: string,
+  cohortName?: string,
 ) {
   // Handle cohort breakdown
   // Use cohortId parameter if provided, otherwise parse from property name (backwards compatibility)
@@ -239,13 +242,15 @@ export function getSelectPropertyKey(
   if (extractedCohortId && projectId) {
     // Use JOIN-based approach instead of IN subquery for better performance
     const cohortAlias = getCohortAlias(extractedCohortId);
+    const inLabel = cohortName ? sqlstring.escape(cohortName) : "'In Cohort'";
+    const notInLabel = cohortName ? sqlstring.escape(`Not ${cohortName}`) : "'Not In Cohort'";
     // Use notEmpty() to handle both join_use_nulls=0 (returns '') and join_use_nulls=1 (returns NULL)
     // When join_use_nulls=0, ClickHouse returns empty string for unmatched LEFT JOIN rows instead of NULL
     // notEmpty() correctly identifies both cases as "Not In Cohort"
     return `if(
       notEmpty(${cohortAlias}.profile_id),
-      'In Cohort',
-      'Not In Cohort'
+      ${inLabel},
+      ${notInLabel}
     )`;
   }
 
@@ -729,7 +734,7 @@ export async function getChartSql({
 
   // Helper: get the SELECT expression for a breakdown column
   const getBreakdownPropertyExpr = (b: typeof breakdowns[0], index: number) => {
-    if (!usePropertyMV) return getSelectPropertyKey(b.name, projectId, b.cohortId);
+    if (!usePropertyMV) return getSelectPropertyKey(b.name, projectId, b.cohortId, b.cohortId ? cohortMetadata.get(b.cohortId)?.name : undefined);
     const alias = propertyMVBreakdownAliases[index] || `e_bd${index}`;
     return `${alias}.property_value`;
   };
