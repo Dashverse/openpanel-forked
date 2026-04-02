@@ -1,11 +1,12 @@
 import { z } from 'zod';
 
-import { BASE_INTEGRATIONS, db } from '@openpanel/db';
+import { BASE_INTEGRATIONS, db, fbValidateToken } from '@openpanel/db';
 
 import { getSlackInstallUrl } from '@openpanel/integrations/src/slack';
 import {
   type ISlackConfig,
   zCreateDiscordIntegration,
+  zCreateFacebookAdsIntegration,
   zCreateSlackIntegration,
   zCreateWebhookIntegration,
 } from '@openpanel/validation';
@@ -90,6 +91,31 @@ export const integrationRouter = createTRPCRouter({
         }),
       };
     }),
+  createOrUpdateFacebookAds: protectedProcedure
+    .input(zCreateFacebookAdsIntegration)
+    .mutation(async ({ input }) => {
+      const validation = await fbValidateToken(input.config.accessToken);
+      if (!validation.valid) {
+        throw new Error(
+          'Invalid Facebook access token. Please check the token and try again.',
+        );
+      }
+
+      if (input.id) {
+        return db.integration.update({
+          where: { id: input.id, organizationId: input.organizationId },
+          data: { name: input.name, config: input.config },
+        });
+      }
+      return db.integration.create({
+        data: {
+          name: input.name,
+          organizationId: input.organizationId,
+          config: input.config,
+        },
+      });
+    }),
+
   createOrUpdate: protectedProcedure
     .input(z.union([zCreateDiscordIntegration, zCreateWebhookIntegration]))
     .mutation(async ({ input }) => {

@@ -12,6 +12,18 @@ export const INTEGRATIONS: {
   icon: React.ReactNode;
 }[] = [
   {
+    type: 'facebook_ads',
+    name: 'Facebook Ads',
+    description:
+      'Sync cohorts to Facebook Custom Audiences and use them for ad targeting.',
+    icon: (
+      <IntegrationCardLogoImage
+        src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Facebook_Logo_%282019%29.png/1200px-Facebook_Logo_%282019%29.png"
+        backgroundColor="#1877F2"
+      />
+    ),
+  },
+  {
     type: 'slack',
     name: 'Slack',
     description:

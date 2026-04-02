@@ -11,6 +11,7 @@ import AddDashboard from './add-dashboard';
 import AddImport from './add-import';
 import AddIntegration from './add-integration';
 import AddNotificationRule from './add-notification-rule';
+import SyncCohortToFacebook from './sync-cohort-to-facebook';
 import AddProject from './add-project';
 import AddReference from './add-reference';
 import BillingSuccess from './billing-success';
@@ -68,6 +69,7 @@ const modals = {
   OverviewChartDetails: OverviewChartDetails,
   AddIntegration: AddIntegration,
   AddNotificationRule: AddNotificationRule,
+  SyncCohortToFacebook: SyncCohortToFacebook,
   OverviewFilters: OverviewFilters,
   CreateInvite: CreateInvite,
   SelectBillingPlan: SelectBillingPlan,

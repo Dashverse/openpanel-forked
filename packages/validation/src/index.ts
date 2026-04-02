@@ -393,18 +393,32 @@ export const zEmailConfig = z.object({
 });
 export type IEmailConfig = z.infer<typeof zEmailConfig>;
 
+export const zFacebookAdsConfig = z.object({
+  type: z.literal('facebook_ads'),
+  accessToken: z.string().min(1),
+  adAccountId: z.string().min(1),
+});
+export type IFacebookAdsConfig = z.infer<typeof zFacebookAdsConfig>;
+
 export type IIntegrationConfig =
   | ISlackConfig
   | IDiscordConfig
   | IWebhookConfig
   | IAppConfig
-  | IEmailConfig;
+  | IEmailConfig
+  | IFacebookAdsConfig;
 
 const zCreateIntegration = z.object({
   id: z.string().optional(),
   name: z.string().min(1),
   organizationId: z.string().min(1),
 });
+
+export const zCreateFacebookAdsIntegration = zCreateIntegration.merge(
+  z.object({
+    config: zFacebookAdsConfig,
+  }),
+);
 
 export const zCreateSlackIntegration = zCreateIntegration;
 

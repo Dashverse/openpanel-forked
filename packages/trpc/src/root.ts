@@ -1,4 +1,5 @@
 import { authRouter } from './routers/auth';
+import { facebookAdsRouter } from './routers/facebook-ads';
 import { chartRouter } from './routers/chart';
 import { chatRouter } from './routers/chat';
 import { clientRouter } from './routers/client';
@@ -51,6 +52,7 @@ export const appRouter = createTRPCRouter({
   overview: overviewRouter,
   realtime: realtimeRouter,
   chat: chatRouter,
+  facebookAds: facebookAdsRouter,
 });
 
 // export type definition of API
