@@ -519,7 +519,7 @@ async function evaluateAnomaly(
     return { shouldAlert: false, currentValue: 0, lowerBound: 0, upperBound: 0, title: '', message: '' };
   }
 
-  const skipLast = freq === 'hour' ? 2 : 1;
+  const skipLast = getSkipLast(freq);
   const dataPoints = series.data.map((d) => d.count);
   if (dataPoints.length < skipLast + 2) {
     return { shouldAlert: false, currentValue: 0, lowerBound: 0, upperBound: 0, title: '', message: '' };
