@@ -50,6 +50,15 @@ type INotificationRuleAnomalyConfig = {
 };
 
 /**
+ * Get the offset from the end of data points to use as "current" value.
+ * Hourly: skip last point (partial/incomplete hour) → use second-to-last
+ * Daily/Weekly/Monthly: use last point (previous period is already complete)
+ */
+function getSkipLast(freq: AlertFrequency): number {
+  return freq === 'hour' ? 2 : 1;
+}
+
+/**
  * Main custom alerts cron job
  * Runs every 15 minutes, evaluates all threshold and anomaly rules
  */
@@ -280,8 +289,9 @@ async function evaluateThreshold(
     });
 
     const data = series[0]?.data ?? [];
-    // Use second-to-last point — last point is the incomplete/partial period
-    const lastPoint = data.length >= 2 ? data[data.length - 2] : data[data.length - 1];
+    // For hourly: skip last point (partial hour), for daily+: use last point (complete)
+    const skipLast = getSkipLast(freq);
+    const lastPoint = data.length >= skipLast + 1 ? data[data.length - skipLast] : data[data.length - 1];
     const currentValue = lastPoint?.rate ?? 0;
 
     const crossed =
@@ -422,15 +432,17 @@ async function evaluateAnomaly(
 
     for (const serie of seriesResult) {
       const data = serie.data ?? [];
-      // Use second-to-last point as "current" — last point is the incomplete/partial period
-      if (data.length < 4) continue;
+      // For hourly: skip last point (partial/incomplete hour), use second-to-last
+      // For daily/weekly/monthly: use last point (previous day is already complete)
+      const skipLast = getSkipLast(freq);
+      if (data.length < skipLast + 2) continue;
 
-      const lastCompleted = data[data.length - 2];
+      const lastCompleted = data[data.length - skipLast];
       if (!lastCompleted) continue;
 
       const dataPoints = data.map((d) => d.rate);
-      const historicalRates = dataPoints.slice(0, Math.min(dataPoints.length - 2, ANOMALY_HISTORY_COUNT));
-      const currentValue = dataPoints[dataPoints.length - 2] ?? 0;
+      const historicalRates = dataPoints.slice(0, Math.min(dataPoints.length - skipLast, ANOMALY_HISTORY_COUNT));
+      const currentValue = dataPoints[dataPoints.length - skipLast] ?? 0;
 
       if (historicalRates.length < 3) continue;
 
@@ -507,16 +519,16 @@ async function evaluateAnomaly(
     return { shouldAlert: false, currentValue: 0, lowerBound: 0, upperBound: 0, title: '', message: '' };
   }
 
-  // Use second-to-last point as "current" — last point is the incomplete/partial period
+  const skipLast = freq === 'hour' ? 2 : 1;
   const dataPoints = series.data.map((d) => d.count);
-  if (dataPoints.length < 4) {
+  if (dataPoints.length < skipLast + 2) {
     return { shouldAlert: false, currentValue: 0, lowerBound: 0, upperBound: 0, title: '', message: '' };
   }
   const historicalValues = dataPoints.slice(
     0,
-    Math.min(dataPoints.length - 2, ANOMALY_HISTORY_COUNT),
+    Math.min(dataPoints.length - skipLast, ANOMALY_HISTORY_COUNT),
   );
-  const currentValue = dataPoints[dataPoints.length - 2] ?? 0;
+  const currentValue = dataPoints[dataPoints.length - skipLast] ?? 0;
 
   if (historicalValues.length < 3) {
     return { shouldAlert: false, currentValue: 0, lowerBound: 0, upperBound: 0, title: '', message: '' };
