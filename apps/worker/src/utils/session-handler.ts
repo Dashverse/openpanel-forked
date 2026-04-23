@@ -9,6 +9,41 @@ import { logger } from './logger';
 
 export const SESSION_TIMEOUT = 1000 * 60 * 30;
 
+// Local cache for BullMQ session-end Job objects.
+// GroupMQ guarantees same deviceId always routes to the same worker pod
+// (deterministic SHA1 sharding + static StatefulSet shard ownership),
+// so this cache is safe and avoids 2-3 Redis calls per event on cache hit.
+const SESSION_CACHE_TTL = 35 * 60 * 1000; // 35 min (session timeout + 5 min buffer)
+const SESSION_CACHE_MAX_SIZE = 50_000;
+
+const sessionEndCache = new Map<
+  string,
+  {
+    job: Job<EventsQueuePayloadCreateSessionEnd>;
+    deviceId: string;
+    expiresAt: number;
+  }
+>();
+
+// Sweep expired entries every 60s
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of sessionEndCache) {
+    if (entry.expiresAt <= now) sessionEndCache.delete(key);
+  }
+}, 60_000).unref();
+
+export function invalidateSessionEndCache(
+  projectId: string,
+  deviceId: string,
+) {
+  sessionEndCache.delete(getSessionEndJobId(projectId, deviceId));
+}
+
+export function clearSessionEndCache() {
+  sessionEndCache.clear();
+}
+
 const getSessionEndJobId = (projectId: string, deviceId: string) =>
   `sessionEnd:${projectId}:${deviceId}`;
 
@@ -29,7 +64,7 @@ export async function createSessionEndJob({
 }: {
   payload: IServiceCreateEventPayload;
 }) {
-  return sessionsQueue.add(
+  const job = await sessionsQueue.add(
     'session',
     {
       type: 'createSessionEnd',
@@ -45,6 +80,18 @@ export async function createSessionEndJob({
       },
     },
   );
+
+  // Cache locally to avoid Redis lookups on subsequent events
+  const jobId = getSessionEndJobId(payload.projectId, payload.deviceId);
+  if (sessionEndCache.size < SESSION_CACHE_MAX_SIZE) {
+    sessionEndCache.set(jobId, {
+      job,
+      deviceId: payload.deviceId,
+      expiresAt: Date.now() + SESSION_CACHE_TTL,
+    });
+  }
+
+  return job;
 }
 
 export async function getSessionEnd({
@@ -104,6 +151,20 @@ export async function getSessionEndJob(args: {
     throw new Error('Failed to get session end');
   }
 
+  // Check local cache first (avoids Redis HGETALL + getState per event)
+  const cachedCurrentKey = getSessionEndJobId(args.projectId, args.currentDeviceId);
+  const cachedCurrent = sessionEndCache.get(cachedCurrentKey);
+  if (cachedCurrent && cachedCurrent.expiresAt > Date.now()) {
+    return { deviceId: cachedCurrent.deviceId, job: cachedCurrent.job };
+  }
+
+  const cachedPreviousKey = getSessionEndJobId(args.projectId, args.previousDeviceId);
+  const cachedPrevious = sessionEndCache.get(cachedPreviousKey);
+  if (cachedPrevious && cachedPrevious.expiresAt > Date.now()) {
+    return { deviceId: cachedPrevious.deviceId, job: cachedPrevious.job };
+  }
+
+  // Cache miss — fall back to Redis
   async function handleJobStates(
     job: Job<EventsQueuePayloadCreateSessionEnd>,
     deviceId: string,
@@ -124,6 +185,15 @@ export async function getSessionEndJob(args: {
     }
 
     if (state === 'delayed' || state === 'waiting') {
+      // Populate cache on Redis fallback hit (cold start recovery)
+      const cacheKey = getSessionEndJobId(args.projectId, deviceId);
+      if (sessionEndCache.size < SESSION_CACHE_MAX_SIZE) {
+        sessionEndCache.set(cacheKey, {
+          job,
+          deviceId,
+          expiresAt: Date.now() + SESSION_CACHE_TTL,
+        });
+      }
       return { deviceId, job };
     }
 
