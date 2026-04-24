@@ -395,7 +395,6 @@ export type IEmailConfig = z.infer<typeof zEmailConfig>;
 
 export const zHermesConfig = z.object({
   type: z.literal('hermes'),
-  apiKey: z.string().min(1),
   webhookUrl: z.string().url(),
 });
 export type IHermesConfig = z.infer<typeof zHermesConfig>;

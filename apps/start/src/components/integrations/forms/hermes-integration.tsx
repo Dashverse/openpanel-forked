@@ -31,7 +31,6 @@ export function HermesIntegrationForm({
         organizationId,
         config: {
           type: 'hermes' as const,
-          apiKey: '',
           webhookUrl: DEFAULT_WEBHOOK_URL,
         },
       },
@@ -76,13 +75,6 @@ export function HermesIntegrationForm({
           ['config', 'webhookUrl', 'message'],
           form.formState.errors,
         )}
-      />
-      <InputWithLabel
-        label="API Key"
-        type="password"
-        placeholder="Secret key shared by Hermes team"
-        {...form.register('config.apiKey')}
-        error={path(['config', 'apiKey', 'message'], form.formState.errors)}
       />
       <Button type="submit">
         {defaultValues?.id ? 'Update' : 'Create'}

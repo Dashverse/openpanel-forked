@@ -11,7 +11,6 @@ export type HermesFlowTriggerResult = {
 
 async function postOnce(
   webhookUrl: string,
-  apiKey: string,
   body: string,
 ): Promise<{ status: number; body: unknown }> {
   const controller = new AbortController();
@@ -21,7 +20,6 @@ async function postOnce(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-API-Key': apiKey,
       },
       body,
       signal: controller.signal,
@@ -44,13 +42,11 @@ function sleep(ms: number) {
 
 export async function sendHermesFlowTrigger({
   webhookUrl,
-  apiKey,
   ruleId,
   userIds,
   fcmToken,
 }: {
   webhookUrl: string;
-  apiKey: string;
   ruleId: string;
   userIds: string[];
   fcmToken?: string;
@@ -74,7 +70,7 @@ export async function sendHermesFlowTrigger({
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const { status, body: resBody } = await postOnce(webhookUrl, apiKey, body);
+      const { status, body: resBody } = await postOnce(webhookUrl, body);
       lastStatus = status;
       lastBody = resBody;
 

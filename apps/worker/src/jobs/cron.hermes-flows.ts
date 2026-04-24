@@ -13,7 +13,6 @@ const HERMES_BATCH_SIZE = 10_000;
 
 type IHermesConfig = {
   type: 'hermes';
-  apiKey: string;
   webhookUrl: string;
 };
 
@@ -123,7 +122,6 @@ export async function hermesFlows() {
 
         const result = await sendHermesFlowTrigger({
           webhookUrl: integrationConfig.webhookUrl,
-          apiKey: integrationConfig.apiKey,
           ruleId: rule.id,
           userIds: batch,
         });
