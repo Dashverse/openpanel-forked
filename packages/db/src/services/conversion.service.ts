@@ -124,14 +124,19 @@ export class ConversionService {
       const selectColumns = [...new Set([...baseColumns, ...extraColumns])];
       const selectList = selectColumns.map(quoteCol).join(', ');
 
+      // project_id / name / created_at go into PREWHERE so ClickHouse can skip
+      // granules using the sort key before loading other columns. The rest of
+      // the predicates (groupCol != '', user filters, preFilterCte subquery)
+      // stay in WHERE — they reference columns that PREWHERE can't help with
+      // or depend on the profile LEFT JOIN executed after PREWHERE.
       return `${cteName} AS (
         SELECT ${selectList}
         FROM ${TABLE_NAMES.events}${profileJoinClause}
-        WHERE project_id = '${projectId}'
+        PREWHERE project_id = '${projectId}'
           AND name = '${event.name}'
-          AND ${groupCol} != ''
           AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
-          AND created_at <= toDateTime('${formatClickhouseDate(endDate)}')${filterWhere}${preFilterCte ? `\n          AND ${groupCol} IN (SELECT ${groupCol} FROM ${preFilterCte})` : ''}
+          AND created_at <= toDateTime('${formatClickhouseDate(endDate)}')
+        WHERE ${groupCol} != ''${filterWhere}${preFilterCte ? `\n          AND ${groupCol} IN (SELECT ${groupCol} FROM ${preFilterCte})` : ''}
       )`;
     }
   }
@@ -446,8 +451,18 @@ export class ConversionService {
     const toStartOf = clix.toStartOf('se.first_open_at', interval);
     const breakdownGroupByStr = breakdownGroupBy.join(', ');
 
-    // Conversion window condition — reused in both converted flag and time diff
-    const conversionCondition = `ee.${groupCol} != '' AND ee.first_act_at >= se.first_open_at - INTERVAL ${gracePeriodSeconds} SECOND AND ee.first_act_at <= se.first_open_at + INTERVAL ${funnelWindowSeconds} SECOND`;
+    // Conversion time window — pushed into the JOIN ON below so ee rows outside
+    // the window are dropped before aggregation (vs flowing through a LEFT JOIN
+    // that explodes to a near-Cartesian product per user and then being filtered
+    // in countIf/minIf). Huge reduction in intermediate row count for >1d ranges.
+    const joinTimeWindowConditions =
+      `AND ee.first_act_at >= se.first_open_at - INTERVAL ${gracePeriodSeconds} SECOND
+        AND ee.first_act_at <= se.first_open_at + INTERVAL ${funnelWindowSeconds} SECOND`;
+
+    // Post-join "did we match an end event?" predicate. Unmatched LEFT JOIN rows
+    // default to empty string for groupCol, so this correctly distinguishes rows
+    // with a conversion from rows without one.
+    const conversionCondition = `ee.${groupCol} != ''`;
 
     // Time diff column for time-to-convert measuring.
     // Uses minIf so that when multiple end_events rows fall in the window we
@@ -495,6 +510,7 @@ export class ConversionService {
       LEFT JOIN end_events ee ON
         ee.${groupCol} = se.${groupCol}
         ${holdJoinConditions}
+        ${joinTimeWindowConditions}
       ${cohortJoins}${cohortFilterWhere}
       GROUP BY ${innerGroupByCols}`;
 
