@@ -396,11 +396,27 @@ export class ConversionService {
       GROUP BY ${endDedupeGroupBy}
     )`);
 
-    // Add cohort CTEs (computed once per query, not per row)
+    // Add cohort CTEs, prefiltered to the profiles present in start_events_raw.
+    //
+    // The base cohort query reads cohort_members FINAL (a ReplacingMergeTree
+    // merge at query time) and returns every profile in the cohort — millions
+    // of rows for large cohorts. The conversion only ever joins the cohort
+    // against se.profile_id, so any profile not in start_events_raw is dead
+    // weight in the JOIN hash table.
+    //
+    // Wrapping with `WHERE profile_id IN (SELECT profile_id FROM start_events_raw)`:
+    //   1. Shrinks the LEFT ANY JOIN hash to |cohort ∩ start_events_raw|.
+    //   2. Lets ClickHouse's analyzer push the IN into the cohort_members scan,
+    //      where the bloom_filter index on profile_id can skip granules that
+    //      don't contain any relevant profile — most of the table for narrow
+    //      date ranges against large cohorts.
     cohortIds.forEach((cohortId) => {
       const cohortMeta = cohortMetadata.get(cohortId);
       const cohortQuery = buildCohortMembershipQuery(cohortId, projectId, cohortMeta);
-      ctes.push(`${getCohortCteName(cohortId)} AS (${cohortQuery})`);
+      ctes.push(`${getCohortCteName(cohortId)} AS (
+        SELECT profile_id FROM (${cohortQuery})
+        WHERE profile_id IN (SELECT profile_id FROM start_events_raw)
+      )`);
     });
 
     // Build breakdown columns (from start_events with 'se' alias)
