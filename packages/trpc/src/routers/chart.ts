@@ -370,7 +370,7 @@ export const chartRouter = createTRPCRouter({
     };
   }),
 
-  conversion: protectedProcedure.input(zChartInput).query(async ({ input }) => {
+  conversion: protectedProcedure.input(zChartInput).use(cacher).query(async ({ input }) => {
     const { timezone } = await getSettingsForProject(input.projectId);
     const currentPeriod = getChartStartEndDate(input, timezone);
     const previousPeriod = getChartPrevStartEndDate(currentPeriod);
