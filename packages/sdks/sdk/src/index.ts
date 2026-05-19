@@ -88,6 +88,8 @@ export type OpenPanelOptions = {
 export class OpenPanel {
   api: Api;
   profileId?: string;
+  deviceId?: string;
+  sessionId?: string;
   global?: Record<string, unknown>;
   queue: TrackHandlerPayload[] = [];
 
@@ -212,11 +214,16 @@ export class OpenPanel {
   }
 
   async fetchDeviceId(): Promise<string> {
-    const result = await this.api.fetch<undefined, { deviceId: string }>(
-      '/track/device-id',
+    const result = await this.api.fetch<
       undefined,
-      { method: 'GET', keepalive: false },
-    );
+      { deviceId: string; sessionId?: string }
+    >('/track/device-id', undefined, { method: 'GET', keepalive: false });
+    if (result?.deviceId) {
+      this.deviceId = result.deviceId;
+    }
+    if (result?.sessionId) {
+      this.sessionId = result.sessionId;
+    }
     return result?.deviceId ?? '';
   }
 

@@ -8,6 +8,7 @@ import {
   getProfileById,
   getSalts,
   replayBuffer,
+  sessionBuffer,
   upsertProfile,
 } from '@openpanel/db';
 import { type GeoLocation, getGeoLocation } from '@openpanel/geo';
@@ -513,15 +514,25 @@ export async function fetchDeviceId(
     ]);
 
     if (currentExists) {
+      const session = await sessionBuffer.getExistingSession({
+        projectId,
+        profileId: currentDeviceId,
+      });
       return reply.status(200).send({
         deviceId: currentDeviceId,
+        sessionId: session?.id,
         message: 'current session exists for this device id',
       });
     }
 
     if (previousExists) {
+      const session = await sessionBuffer.getExistingSession({
+        projectId,
+        profileId: previousDeviceId,
+      });
       return reply.status(200).send({
         deviceId: previousDeviceId,
+        sessionId: session?.id,
         message: 'previous session exists for this device id',
       });
     }
