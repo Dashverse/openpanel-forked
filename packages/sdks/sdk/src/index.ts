@@ -20,7 +20,21 @@ export type TrackHandlerPayload =
   | {
       type: 'identify';
       payload: IdentifyPayload;
+    }
+  | {
+      type: 'replay';
+      payload: ReplayPayload;
     };
+
+export type ReplayPayload = {
+  session_id: string;
+  chunk_index: number;
+  events_count: number;
+  is_full_snapshot: boolean;
+  started_at: string;
+  ended_at: string;
+  payload: string;
+};
 
 export type TrackPayload = {
   name: string;
@@ -213,15 +227,18 @@ export class OpenPanel {
 
   flush() {
     this.queue.forEach((item) => {
+      if (item.type === 'replay') {
+        this.send(item);
+        return;
+      }
+      const profileId = item.payload.profileId ?? this.profileId;
       this.send({
         ...item,
-        // Not sure why ts-expect-error is needed here
-        // @ts-expect-error
         payload: {
           ...item.payload,
-          profileId: item.payload.profileId ?? this.profileId,
+          profileId,
         },
-      });
+      } as TrackHandlerPayload);
     });
     this.queue = [];
   }

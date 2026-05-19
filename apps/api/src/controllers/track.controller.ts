@@ -4,7 +4,12 @@ import { assocPath, pathOr, pick } from 'ramda';
 import { HttpError } from '@/utils/errors';
 import { generateId, slug } from '@openpanel/common';
 import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
-import { getProfileById, getSalts, upsertProfile } from '@openpanel/db';
+import {
+  getProfileById,
+  getSalts,
+  replayBuffer,
+  upsertProfile,
+} from '@openpanel/db';
 import { type GeoLocation, getGeoLocation } from '@openpanel/geo';
 import { getEventsGroupQueueShard, getQueueName } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
@@ -12,9 +17,26 @@ import type {
   DecrementPayload,
   IdentifyPayload,
   IncrementPayload,
+  ReplayPayload,
   TrackHandlerPayload,
   TrackPayload,
 } from '@openpanel/sdk';
+
+const replayProjectIdsEnv = (process.env.REPLAY_ENABLED_PROJECT_IDS || '').trim();
+const replayAllowAllProjects = replayProjectIdsEnv === '*';
+const replayProjectIdAllowList = new Set<string>(
+  replayProjectIdsEnv && !replayAllowAllProjects
+    ? replayProjectIdsEnv
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean)
+    : [],
+);
+
+function isReplayEnabledForProject(projectId: string): boolean {
+  if (replayAllowAllProjects) return true;
+  return replayProjectIdAllowList.has(projectId);
+}
 
 export function getStringHeaders(headers: FastifyRequest['headers']) {
   return Object.entries(
@@ -38,6 +60,9 @@ export function getStringHeaders(headers: FastifyRequest['headers']) {
 }
 
 function getIdentity(body: TrackHandlerPayload): IdentifyPayload | undefined {
+  if (body.type === 'replay') {
+    return undefined;
+  }
   const identity =
     'properties' in body.payload
       ? (body.payload?.properties?.__identify as IdentifyPayload | undefined)
@@ -130,7 +155,7 @@ export async function handler(
 
   // We might get a profileId from the alias table
   // If we do, we should use that instead of the one from the payload
-  if (profileId) {
+  if (profileId && request.body.type !== 'replay') {
     request.body.payload.profileId = profileId;
   }
 
@@ -225,6 +250,13 @@ export async function handler(
       });
       break;
     }
+    case 'replay': {
+      await handleReplay({
+        payload: request.body.payload,
+        projectId,
+      });
+      break;
+    }
     default: {
       return reply.status(400).send({
         status: 400,
@@ -288,6 +320,33 @@ async function track({
     },
     groupId,
     jobId,
+  });
+}
+
+async function handleReplay({
+  payload,
+  projectId,
+}: {
+  payload: ReplayPayload;
+  projectId: string;
+}) {
+  if (!isReplayEnabledForProject(projectId)) {
+    return;
+  }
+  if (!payload.session_id) {
+    throw new HttpError('session_id is required for replay chunks', {
+      status: 400,
+    });
+  }
+  await replayBuffer.add({
+    project_id: projectId,
+    session_id: payload.session_id,
+    chunk_index: payload.chunk_index,
+    started_at: payload.started_at,
+    ended_at: payload.ended_at,
+    events_count: payload.events_count,
+    is_full_snapshot: payload.is_full_snapshot,
+    payload: payload.payload,
   });
 }
 
