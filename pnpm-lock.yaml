@@ -743,6 +743,9 @@ importers:
       remark-rehype:
         specifier: ^11.1.2
         version: 11.1.2
+      rrweb:
+        specifier: 2.0.0-alpha.20
+        version: 2.0.0-alpha.20
       short-unique-id:
         specifier: ^5.0.3
         version: 5.0.3
@@ -1425,7 +1428,7 @@ importers:
   packages/sdks/astro:
     dependencies:
       '@openpanel/web':
-        specifier: workspace:1.0.6-local
+        specifier: workspace:1.1.0-local
         version: link:../web
     devDependencies:
       astro:
@@ -1463,7 +1466,7 @@ importers:
   packages/sdks/nextjs:
     dependencies:
       '@openpanel/web':
-        specifier: workspace:1.0.6-local
+        specifier: workspace:1.1.0-local
         version: link:../web
       next:
         specifier: ^12.0.0 || ^13.0.0 || ^14.0.0 || ^15.0.0 || ^16.0.0
