@@ -141,7 +141,7 @@ export function ReplayPlayer({ sessionId, projectId }: ReplayPlayerProps) {
     const applyScale = () => {
       const wrapper = container.querySelector('.replayer-wrapper') as HTMLElement | null;
       if (!wrapper) return;
-      const scale = container.clientWidth / recordedWidth;
+      const scale = Math.min(1, container.clientWidth / recordedWidth);
       scaleRef.current = scale;
       wrapper.style.transform = `scale(${scale})`;
       wrapper.style.transformOrigin = 'top left';

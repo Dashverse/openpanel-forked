@@ -255,6 +255,8 @@ export async function handler(
       await handleReplay({
         payload: request.body.payload,
         projectId,
+        ip,
+        ua,
       });
       break;
     }
@@ -327,21 +329,57 @@ async function track({
 async function handleReplay({
   payload,
   projectId,
+  ip,
+  ua,
 }: {
   payload: ReplayPayload;
   projectId: string;
+  ip: string | undefined;
+  ua: string | undefined;
 }) {
   if (!isReplayEnabledForProject(projectId)) {
     return;
   }
-  if (!payload.session_id) {
+
+  // Resolve session_id server-side from the request's IP + UA so it stays
+  // in sync even after the 30-min idle rotation (SDK carries a stale id).
+  // Fall back to SDK-provided session_id if we can't derive one.
+  let sessionId = payload.session_id;
+  if (ip && ua) {
+    try {
+      const salts = await getSalts();
+      const redis = getRedisCache();
+      const queueName = getQueueName('sessions');
+      for (const salt of [salts.current, salts.previous]) {
+        const deviceId = generateDeviceId({ salt, origin: projectId, ip, ua });
+        const exists = await redis.exists(
+          `bull:${queueName}:sessionEnd:${projectId}:${deviceId}`,
+        );
+        if (exists) {
+          const session = await sessionBuffer.getExistingSession({
+            projectId,
+            profileId: deviceId,
+          });
+          if (session?.id) {
+            sessionId = session.id;
+            break;
+          }
+        }
+      }
+    } catch {
+      // non-fatal — fall back to SDK-provided session_id
+    }
+  }
+
+  if (!sessionId) {
     throw new HttpError('session_id is required for replay chunks', {
       status: 400,
     });
   }
+
   await replayBuffer.add({
     project_id: projectId,
-    session_id: payload.session_id,
+    session_id: sessionId,
     chunk_index: payload.chunk_index,
     started_at: payload.started_at,
     ended_at: payload.ended_at,
