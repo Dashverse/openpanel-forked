@@ -395,6 +395,8 @@ return added
       if (lastEvent) {
         this.scheduleThrottledPublish(lastEvent.event);
       }
+
+      await publishEvent('events', 'received', transformEvent(event));
     } catch (error) {
       this.logger.error('Failed to flush local buffer to Redis', {
         error,
