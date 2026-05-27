@@ -59,6 +59,7 @@ const initialState: InitialState = {
   hiddenSeries: [],
   measuring: 'conversion_rate' as const,
   cohortFilters: [],
+  sortOrder: 'desc' as const,
 };
 
 export const reportSlice = createSlice({
@@ -348,6 +349,11 @@ export const reportSlice = createSlice({
       state.measuring = action.payload;
     },
 
+    changeSortOrder(state, action: PayloadAction<'asc' | 'desc'>) {
+      state.dirty = true;
+      state.sortOrder = action.payload;
+    },
+
     setHiddenSeries(state, action: PayloadAction<string[]>) {
       state.dirty = true;
       state.hiddenSeries = action.payload;
@@ -389,6 +395,7 @@ export const {
   removeHoldProperty,
   changeLimit,
   changeMeasuring,
+  changeSortOrder,
   setHiddenSeries,
 } = reportSlice.actions;
 
