@@ -60,6 +60,7 @@ const initialState: InitialState = {
   measuring: 'conversion_rate' as const,
   cohortFilters: [],
   sortOrder: 'desc' as const,
+  ttcAggregation: 'avg' as const,
 };
 
 export const reportSlice = createSlice({
@@ -354,6 +355,11 @@ export const reportSlice = createSlice({
       state.sortOrder = action.payload;
     },
 
+    changeTtcAggregation(state, action: PayloadAction<string>) {
+      state.dirty = true;
+      state.ttcAggregation = action.payload;
+    },
+
     setHiddenSeries(state, action: PayloadAction<string[]>) {
       state.dirty = true;
       state.hiddenSeries = action.payload;
@@ -396,6 +402,7 @@ export const {
   changeLimit,
   changeMeasuring,
   changeSortOrder,
+  changeTtcAggregation,
   setHiddenSeries,
 } = reportSlice.actions;
 
