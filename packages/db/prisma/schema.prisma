@@ -328,7 +328,6 @@ model Report {
   hiddenSeries    Json      @default("[]")
   measuring       String?
   sortOrder       String    @default("desc")
-  ttcAggregation  String    @default("avg")
 
   dashboardId String
   dashboard   Dashboard     @relation(fields: [dashboardId], references: [id], onDelete: Cascade)

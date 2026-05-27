@@ -1,8 +1,6 @@
-import { changeTtcAggregation } from '@/components/report/reportSlice';
-import { useDispatch } from '@/redux';
 import type { RouterOutputs } from '@/trpc/client';
 import { getChartColor } from '@/utils/theme';
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   CartesianGrid,
   Legend,
@@ -68,10 +66,9 @@ interface Props {
 
 export function FunnelTtcChart({ data }: Props) {
   const {
-    report: { interval, lineType, ttcAggregation: savedTtcAggregation },
+    report: { interval, lineType },
   } = useReportChartContext();
-  const dispatch = useDispatch();
-  const ttcAggregation = (savedTtcAggregation as TtcAggregation) || 'avg';
+  const [ttcAggregation, setTtcAggregation] = useState<TtcAggregation>('avg');
 
   const series = data.current;
 
@@ -125,7 +122,7 @@ export function FunnelTtcChart({ data }: Props) {
         <Combobox
           placeholder="Select aggregation"
           value={ttcAggregation}
-          onChange={(val) => dispatch(changeTtcAggregation(val))}
+          onChange={(val) => setTtcAggregation(val as TtcAggregation)}
           items={TTC_AGGREGATION_ITEMS}
         />
       </div>
