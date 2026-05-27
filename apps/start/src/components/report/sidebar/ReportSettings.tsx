@@ -11,7 +11,6 @@ import {
   changeFunnelWindow,
   changeMeasuring,
   changePrevious,
-  changeSortOrder,
   changeUnit,
 } from '../reportSlice';
 
@@ -23,7 +22,6 @@ export function ReportSettings() {
   const funnelGroup = useSelector((state) => state.report.funnelGroup);
   const funnelWindow = useSelector((state) => state.report.funnelWindow);
   const measuring = useSelector((state) => state.report.measuring);
-  const sortOrder = useSelector((state) => state.report.sortOrder);
 
   const dispatch = useDispatch();
 
@@ -32,10 +30,6 @@ export function ReportSettings() {
 
     if (chartType !== 'retention') {
       fields.push('previous');
-    }
-
-    if (chartType === 'bar' || chartType === 'histogram') {
-      fields.push('sortOrder');
     }
 
     if (chartType === 'retention') {
@@ -70,29 +64,6 @@ export function ReportSettings() {
               onCheckedChange={(val) => dispatch(changePrevious(!!val))}
             />
           </Label>
-        )}
-        {fields.includes('sortOrder') && (
-          <div className="flex items-center justify-between gap-4">
-            <span className="whitespace-nowrap font-medium">Sort Order</span>
-            <Combobox
-              align="end"
-              placeholder="Descending"
-              value={sortOrder || 'desc'}
-              onChange={(val) => {
-                dispatch(changeSortOrder(val as 'asc' | 'desc'));
-              }}
-              items={[
-                {
-                  label: 'Descending',
-                  value: 'desc',
-                },
-                {
-                  label: 'Ascending',
-                  value: 'asc',
-                },
-              ]}
-            />
-          </div>
         )}
         {fields.includes('criteria') && (
           <div className="flex items-center justify-between gap-4">
