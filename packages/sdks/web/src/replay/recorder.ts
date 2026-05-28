@@ -51,21 +51,19 @@ export function startReplayRecorder(
     const payloadJson = JSON.stringify(buffer);
     const payloadBytes = new TextEncoder().encode(payloadJson).length;
 
-    // Recursively split oversized batches; drop a single event if it alone exceeds the cap
-    if (payloadBytes > maxPayloadBytes) {
-      if (buffer.length > 1) {
-        const mid = Math.floor(buffer.length / 2);
-        const firstHalf = buffer.slice(0, mid);
-        const secondHalf = buffer.slice(mid);
-        const firstHasFullSnapshot =
-          isFullSnapshot && firstHalf.some((e) => e.type === 2);
-        buffer = firstHalf;
-        flush(firstHasFullSnapshot);
-        buffer = secondHalf;
-        flush(false);
-        return;
-      }
-      buffer = [];
+    // Recursively split oversized batches.
+    // For a single oversized event (e.g. large FullSnapshot) send it anyway —
+    // dropping it silently would make the entire replay unplayable.
+    if (payloadBytes > maxPayloadBytes && buffer.length > 1) {
+      const mid = Math.floor(buffer.length / 2);
+      const firstHalf = buffer.slice(0, mid);
+      const secondHalf = buffer.slice(mid);
+      const firstHasFullSnapshot =
+        isFullSnapshot && firstHalf.some((e) => e.type === 2);
+      buffer = firstHalf;
+      flush(firstHasFullSnapshot);
+      buffer = secondHalf;
+      flush(false);
       return;
     }
 
