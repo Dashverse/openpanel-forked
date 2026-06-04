@@ -60,7 +60,7 @@ function ReplayChunkLoader({
 }) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
-  const { addEvent, refreshDuration } = useReplayContext();
+  const { addEvent, refreshDuration, setChunksLoaded } = useReplayContext();
 
   useEffect(() => {
     function recursive(fromIndex: number) {
@@ -81,16 +81,32 @@ function ReplayChunkLoader({
           refreshDuration();
           if (res.hasMore) {
             recursive(fromIndex + res.data.length);
+          } else {
+            setChunksLoaded(true);
           }
         })
         .catch(() => {
-          // chunk loading failed — replay may be incomplete
+          // chunk loading failed — surface as "done" so the UI stops hiding.
+          setChunksLoaded(true);
         });
     }
 
     recursive(fromIndex);
   }, []);
 
+  return null;
+}
+
+/**
+ * Mounted when the first replay batch contains everything (hasMore === false).
+ * Marks chunksLoaded immediately so the UI doesn't sit waiting for a loader
+ * that will never mount.
+ */
+function ReplayChunksLoadedFlag() {
+  const { setChunksLoaded } = useReplayContext();
+  useEffect(() => {
+    setChunksLoaded(true);
+  }, [setChunksLoaded]);
   return null;
 }
 
@@ -227,6 +243,7 @@ function ReplayContent({
           sessionId={sessionId}
         />
       )}
+      {hasReplay && !hasMore && <ReplayChunksLoadedFlag />}
     </ReplayProvider>
   );
 }

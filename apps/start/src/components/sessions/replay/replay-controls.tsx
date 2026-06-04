@@ -4,12 +4,12 @@ import { Pause, Play } from 'lucide-react';
 import { formatDuration } from './replay-utils';
 
 export function ReplayTime() {
-  const { duration } = useReplayContext();
+  const { duration, chunksLoaded } = useReplayContext();
   const currentTime = useCurrentTime(250);
 
   return (
     <span className="text-sm tabular-nums text-muted-foreground font-mono">
-      {formatDuration(currentTime)} / {formatDuration(duration)}
+      {formatDuration(currentTime)} / {chunksLoaded ? formatDuration(duration) : '…'}
     </span>
   );
 }

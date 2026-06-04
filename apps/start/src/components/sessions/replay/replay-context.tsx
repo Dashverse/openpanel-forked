@@ -34,6 +34,9 @@ interface ReplayContextValue {
   duration: number;
   startTime: number | null;
   isReady: boolean;
+  // True only after every chunk batch has been fetched + fed in. While false,
+  // duration grows as more chunks arrive — UI should hide it to avoid flicker.
+  chunksLoaded: boolean;
   // Playback controls
   play: () => void;
   pause: () => void;
@@ -50,6 +53,7 @@ interface ReplayContextValue {
   setCurrentTime: (t: number) => void;
   setIsPlaying: (p: boolean) => void;
   setDuration: (d: number) => void;
+  setChunksLoaded: (loaded: boolean) => void;
 }
 
 const ReplayContext = createContext<ReplayContextValue | null>(null);
@@ -101,6 +105,7 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
   const [duration, setDuration] = useState(0);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [isReady, setIsReady] = useState(false);
+  const [chunksLoaded, setChunksLoaded] = useState(false);
 
   const setIsPlayingWithRef = useCallback((playing: boolean) => {
     isPlayingRef.current = playing;
@@ -141,6 +146,7 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
     setDuration(0);
     setStartTime(null);
     setIsPlayingWithRef(false);
+    setChunksLoaded(false);
   }, [setIsPlayingWithRef]);
 
   const play = useCallback(() => {
@@ -195,6 +201,8 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
     setCurrentTime,
     setIsPlaying: setIsPlayingWithRef,
     setDuration,
+    chunksLoaded,
+    setChunksLoaded,
   };
 
   return (
