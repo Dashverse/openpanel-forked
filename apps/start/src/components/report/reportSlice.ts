@@ -60,6 +60,7 @@ const initialState: InitialState = {
   measuring: 'conversion_rate' as const,
   cohortFilters: [],
   sortOrder: 'desc' as const,
+  ttcAggregation: 'avg' as const,
 };
 
 export const reportSlice = createSlice({
@@ -209,6 +210,22 @@ export const reportSlice = createSlice({
       ) {
         state.interval = 'day';
       }
+
+      // Conversion/funnel require at least 2 events — add empty slots if needed
+      if (
+        (action.payload === 'conversion' || action.payload === 'funnel') &&
+        state.series.length < 2
+      ) {
+        while (state.series.length < 2) {
+          state.series.push({
+            id: shortId(),
+            type: 'event',
+            name: '',
+            segment: 'event',
+            filters: [],
+          });
+        }
+      }
     },
 
     // Line type
@@ -354,6 +371,11 @@ export const reportSlice = createSlice({
       state.sortOrder = action.payload;
     },
 
+    changeTtcAggregation(state, action: PayloadAction<string>) {
+      state.dirty = true;
+      state.ttcAggregation = action.payload;
+    },
+
     setHiddenSeries(state, action: PayloadAction<string[]>) {
       state.dirty = true;
       state.hiddenSeries = action.payload;
@@ -396,6 +418,7 @@ export const {
   changeLimit,
   changeMeasuring,
   changeSortOrder,
+  changeTtcAggregation,
   setHiddenSeries,
 } = reportSlice.actions;
 

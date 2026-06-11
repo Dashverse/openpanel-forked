@@ -85,6 +85,7 @@ export const reportRouter = createTRPCRouter({
           holdProperties: report.holdProperties ?? [],
           hiddenSeries: report.hiddenSeries ?? [],
           sortOrder: report.sortOrder ?? 'desc',
+          ttcAggregation: report.ttcAggregation ?? 'avg',
         },
       });
     }),
@@ -135,6 +136,7 @@ export const reportRouter = createTRPCRouter({
           holdProperties: report.holdProperties ?? [],
           hiddenSeries: report.hiddenSeries ?? [],
           sortOrder: report.sortOrder ?? 'desc',
+          ttcAggregation: report.ttcAggregation ?? 'avg',
         },
       });
     }),

@@ -64,6 +64,7 @@ export const TABLE_NAMES = {
   cohort_metadata: 'cohort_metadata',
   profile_event_summary_mv: 'profile_event_summary_mv',
   profile_event_property_summary_mv: 'profile_event_property_summary_mv',
+  session_replay_chunks: 'session_replay_chunks',
 };
 
 /**
@@ -110,7 +111,18 @@ export const CLICKHOUSE_OPTIONS: NodeClickHouseClientConfigOptions = {
   request_timeout: parseInt(process.env.CLICKHOUSE_REQUEST_TIMEOUT || '3600000', 10),
   keep_alive: {
     enabled: true,
-    idle_socket_ttl: 60000,
+    // Must be lower than server-side keep_alive_timeout (CH default 10s)
+    // so we never reuse a socket the server has already closed.
+    // Matches upstream openpanel — kept that value rather than going
+    // more aggressive because upstream's been running it in production
+    // long enough to validate it.
+    //
+    // The previous 60s value here was guaranteed to hit stale sockets
+    // under sustained load: server closes after ~10s idle, client kept
+    // the socket in the pool until 60s, and the next reuse failed with
+    // "socket hang up" / ECONNRESET. Worker-cron logs showed ~70 hang
+    // ups per 15min at 100% replay sampling before this change.
+    idle_socket_ttl: 7000,
   },
   compression: {
     request: true,
@@ -119,6 +131,16 @@ export const CLICKHOUSE_OPTIONS: NodeClickHouseClientConfigOptions = {
   log: {
     LoggerClass: CustomLogger,
     level: ClickHouseLogLevel.DEBUG,
+  },
+  // Custom JSON serializer used on inserts. For buffers that already
+  // hold JSONEachRow lines as strings (event/replay/bot/group — pulled
+  // straight out of Redis), this is a passthrough — no JSON.stringify
+  // on the hot path. For buffers that pass real objects (session /
+  // profile, which need to parse + transform before inserting), it
+  // falls back to JSON.stringify. The client appends '\n' itself.
+  json: {
+    stringify: <T>(value: T): string =>
+      typeof value === 'string' ? value : JSON.stringify(value),
   },
 };
 

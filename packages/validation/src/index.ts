@@ -236,6 +236,11 @@ export const zChartInputBase = z.object({
     .optional()
     .default('desc')
     .describe('Sort order for bar chart series (ascending or descending)'),
+  ttcAggregation: z
+    .enum(['avg', 'median', 'min', 'max', 'p25', 'p75', 'p90', 'p99'])
+    .optional()
+    .default('avg')
+    .describe('Aggregation method for time-to-convert display'),
 });
 
 export const zChartInput = z.preprocess((val) => {

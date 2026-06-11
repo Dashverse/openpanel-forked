@@ -92,6 +92,7 @@ export function transformReport(
     holdProperties: (report.holdProperties as string[]) ?? [],
     hiddenSeries: (report.hiddenSeries as string[]) ?? [],
     sortOrder: (report.sortOrder as 'asc' | 'desc') ?? 'desc',
+    ttcAggregation: (report.ttcAggregation as string) ?? 'avg',
     limit: 50,
     cohortFilters: [],
     layout: report.layout ?? undefined,
