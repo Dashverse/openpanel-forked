@@ -2,9 +2,11 @@ import { FullPageEmptyState } from '@/components/full-page-empty-state';
 import { Sidebar } from '@/components/sidebar';
 import { Button, LinkButton, buttonVariants } from '@/components/ui/button';
 import { useAppContext } from '@/hooks/use-app-context';
+import { useSidebarCollapsed } from '@/hooks/use-sidebar-collapsed';
 import { cn } from '@/utils/cn';
 import { Outlet, createFileRoute, redirect } from '@tanstack/react-router';
 import { ConstructionIcon } from 'lucide-react';
+import { useEffect } from 'react';
 
 export const Route = createFileRoute('/_app')({
   beforeLoad: async ({ context }) => {
@@ -17,6 +19,18 @@ export const Route = createFileRoute('/_app')({
 
 function AppLayout() {
   const { isMaintenance } = useAppContext();
+  const [collapsed] = useSidebarCollapsed();
+
+  // The sidebar width animates over ~150ms. Width-measuring layouts like
+  // react-grid-layout's WidthProvider only re-measure on window resize, so
+  // nudge them once the transition settles to reflow to the new content width.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `collapsed` is a trigger — the effect fires a resize when it changes rather than reading it.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      window.dispatchEvent(new Event('resize'));
+    }, 220);
+    return () => clearTimeout(id);
+  }, [collapsed]);
 
   if (isMaintenance) {
     return (
@@ -41,7 +55,7 @@ function AppLayout() {
   return (
     <div className="flex h-screen w-full">
       <Sidebar />
-      <div className="lg:pl-72 w-full">
+      <div className={cn('w-full', collapsed ? 'lg:pl-16' : 'lg:pl-72')}>
         <div className="block lg:hidden bg-background h-16 w-full fixed top-0 z-10 border-b" />
         <div className="block lg:hidden h-16" />
         <Outlet />
