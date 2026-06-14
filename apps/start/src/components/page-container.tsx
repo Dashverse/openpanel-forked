@@ -3,11 +3,7 @@ import { cn } from '@/utils/cn';
 interface PageContainerProps {
   className?: string;
   children: React.ReactNode;
-  /**
-   * Fill the full available width instead of capping at the responsive
-   * `container` max-width. Useful for canvas-like pages (e.g. dashboards) that
-   * should expand when the sidebar collapses.
-   */
+  /** Fill full width instead of the capped `container` (e.g. dashboard). */
   fluid?: boolean;
 }
 

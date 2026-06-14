@@ -21,10 +21,8 @@ function AppLayout() {
   const { isMaintenance } = useAppContext();
   const [collapsed] = useSidebarCollapsed();
 
-  // The collapse is instant (content padding snaps). Width-measuring layouts
-  // like react-grid-layout's WidthProvider only re-measure on window resize, so
-  // nudge them on the next frame to reflow to the new content width.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `collapsed` is a trigger — the effect fires a resize when it changes rather than reading it.
+  // Nudge width-measuring layouts (react-grid-layout) to reflow after collapse.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `collapsed` triggers the effect; it isn't read.
   useEffect(() => {
     const id = setTimeout(() => {
       window.dispatchEvent(new Event('resize'));
