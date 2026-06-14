@@ -535,7 +535,7 @@ function Component() {
           <ReportSkeleton />
         </div>
       ) : (
-        <div className="w-full overflow-hidden -mx-4">
+        <div className="overflow-hidden -mx-4">
           <style>{`
             .react-grid-item {
               transition: ${enableTransitions ? 'transform 200ms ease, width 200ms ease, height 200ms ease' : 'none'} !important;
