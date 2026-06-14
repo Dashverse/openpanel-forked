@@ -117,7 +117,7 @@ export default function ReportEditor({
             <EditReportName />
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-2 p-4 pt-0 md:grid-cols-6">
+        <div className="grid grid-cols-2 gap-2 p-4 pt-0 md:grid-cols-7">
           <SheetTrigger asChild>
             <Button
               icon={GanttChartSquareIcon}
@@ -157,7 +157,7 @@ export default function ReportEditor({
             />
             <ReportLineType className="min-w-0 flex-1" />
           </div>
-          <div className="col-start-2 row-start-1 text-right md:col-start-6 row gap-2 justify-end flex-nowrap whitespace-nowrap">
+          <div className="col-start-2 row-start-1 text-right md:col-start-6 md:col-span-2 row gap-2 justify-end flex-nowrap whitespace-nowrap">
             {reportId && (
               existingRule ? (
                 <Button
