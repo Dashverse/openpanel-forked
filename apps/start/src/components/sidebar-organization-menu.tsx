@@ -33,7 +33,7 @@ export default function SidebarOrganizationMenu({
     <>
       <Link
         className={cn(
-          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-all hover:bg-def-200 text-[13px]',
+          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-colors hover:bg-def-200 text-[13px]',
           SB_CENTER,
         )}
         activeOptions={{ exact: true }}
@@ -46,7 +46,7 @@ export default function SidebarOrganizationMenu({
       </Link>
       <Link
         className={cn(
-          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-all hover:bg-def-200 text-[13px]',
+          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-colors hover:bg-def-200 text-[13px]',
           SB_CENTER,
         )}
         activeOptions={{ exact: true }}
@@ -59,7 +59,7 @@ export default function SidebarOrganizationMenu({
       </Link>
       <Link
         className={cn(
-          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-all hover:bg-def-200 text-[13px]',
+          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-colors hover:bg-def-200 text-[13px]',
           SB_CENTER,
         )}
         activeOptions={{ exact: true }}
@@ -80,7 +80,7 @@ export default function SidebarOrganizationMenu({
       </Link>
       <Link
         className={cn(
-          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-all hover:bg-def-200 text-[13px]',
+          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-colors hover:bg-def-200 text-[13px]',
           SB_CENTER,
         )}
         to="/$organizationId/members"
@@ -92,7 +92,7 @@ export default function SidebarOrganizationMenu({
       </Link>
       <Link
         className={cn(
-          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-all hover:bg-def-200 text-[13px]',
+          'flex items-center gap-2 rounded-md px-3 py-2 font-medium transition-colors hover:bg-def-200 text-[13px]',
           SB_CENTER,
         )}
         to="/$organizationId/integrations"
