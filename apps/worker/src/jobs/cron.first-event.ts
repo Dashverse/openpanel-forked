@@ -3,7 +3,10 @@ import { getLock } from '@openpanel/redis';
 
 import { logger } from '../utils/logger';
 
-const PROJECT_IDS = ['dashreels', 'shortreels'];
+// dashreels only for now — shortreels' Jun-10+ backlog isn't loaded yet, so running
+// the cron for it would emit _first_event with late timestamps for backlog devices.
+// Add 'shortreels' here once its backlog is backfilled.
+const PROJECT_IDS = ['dashreels'];
 const BATCH_SIZE = 10_000;
 // Per-device infra (migration 19). device_first_seen is the candidate list
 // (one row/device, fed by device_first_seen_mv at insert); first_event_dedup_device
