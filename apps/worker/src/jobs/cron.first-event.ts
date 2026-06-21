@@ -16,6 +16,7 @@ type Candidate = {
   device_id: string;
   project_id: string;
   profile_id: string;
+  session_id: string;
   first_ts: string;
 };
 
@@ -39,13 +40,15 @@ export async function firstEvent() {
         candidates.deviceUID AS device_id,
         candidates.project_id,
         candidates.install_profile AS profile_id,
+        candidates.install_session AS session_id,
         toString(candidates.first_ts) AS first_ts
       FROM (
         SELECT
           project_id,
           deviceUID,
           minMerge(first_ts) AS first_ts,
-          argMinMerge(install_profile) AS install_profile
+          argMinMerge(install_profile) AS install_profile,
+          argMinMerge(install_session) AS install_session
         FROM ${SOURCE_TABLE}
         WHERE project_id IN (${projectList})
         GROUP BY project_id, deviceUID
@@ -77,7 +80,7 @@ export async function firstEvent() {
           // and every per-device funnel key on it.
           device_id: c.device_id,
           project_id: c.project_id,
-          session_id: '',
+          session_id: c.session_id,
           created_at: c.first_ts,
           properties: JSON.stringify({
             deviceUID: c.device_id,
