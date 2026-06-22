@@ -9,6 +9,7 @@ import {
   getSalts,
   replayBuffer,
   sessionBuffer,
+  upsertAlias,
   upsertProfile,
 } from '@openpanel/db';
 import { type GeoLocation, getGeoLocation } from '@openpanel/geo';
@@ -144,10 +145,14 @@ export async function handler(
   const identity = getIdentity(request.body);
   const profileId = identity?.profileId;
   const overrideDeviceId = (() => {
-    const deviceId =
-      'properties' in request.body.payload
-        ? request.body.payload.properties?.__deviceId
-        : undefined;
+    if (!('properties' in request.body.payload)) {
+      return undefined;
+    }
+    const properties = request.body.payload.properties;
+    // The Mixpanel proxy forwards the original device id as `$device_id`.
+    // Honor it (alongside the SDK's `__deviceId`) so proxied events use the
+    // real device id instead of falling back to the salted IP+UA fingerprint.
+    const deviceId = properties?.__deviceId ?? properties?.$device_id;
     if (typeof deviceId === 'string') {
       return deviceId;
     }
@@ -231,11 +236,21 @@ export async function handler(
       break;
     }
     case 'alias': {
-      return reply.status(400).send({
-        status: 400,
-        error: 'Bad Request',
-        message: 'Alias is not supported',
+      const payload = request.body.payload;
+      if (!payload.profileId || !payload.alias) {
+        throw new HttpError('Missing profileId or alias', {
+          status: 400,
+        });
+      }
+
+      // Persist the (anonymous id -> identified id) mapping. Nothing reads
+      // profile_aliases yet — query-time resolution lands in a follow-up PR.
+      await upsertAlias({
+        projectId,
+        profileId: payload.profileId,
+        alias: payload.alias,
       });
+      break;
     }
     case 'increment': {
       await increment({

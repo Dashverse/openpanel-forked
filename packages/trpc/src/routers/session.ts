@@ -2,7 +2,10 @@ import { z } from 'zod';
 
 import {
   getSessionList,
+  getSessionReplayChunksAroundTime,
+  getSessionReplayChunksByIndexRange,
   getSessionReplayChunksFrom,
+  getSessionReplayMeta,
   sessionHasReplay,
   sessionService,
 } from '@openpanel/db';
@@ -83,5 +86,56 @@ export const sessionRouter = createTRPCRouter({
     )
     .query(({ input: { sessionId, projectId, fromIndex } }) => {
       return getSessionReplayChunksFrom(sessionId, projectId, fromIndex);
+    }),
+
+  replayMeta: protectedProcedure
+    .input(z.object({ sessionId: z.string(), projectId: z.string() }))
+    .query(({ input: { sessionId, projectId } }) => {
+      return getSessionReplayMeta(sessionId, projectId);
+    }),
+
+  replayChunksByIndexRange: protectedProcedure
+    .input(
+      z.object({
+        sessionId: z.string(),
+        projectId: z.string(),
+        fromIndex: z.number().min(0),
+        toIndex: z.number().min(0),
+      }),
+    )
+    .query(({ input: { sessionId, projectId, fromIndex, toIndex } }) => {
+      return getSessionReplayChunksByIndexRange(
+        sessionId,
+        projectId,
+        fromIndex,
+        toIndex,
+      );
+    }),
+
+  /**
+   * Smart seek — given a target wall-clock ms inside the session, returns the
+   * latest full-snapshot chunk before the target plus everything through
+   * target + lookahead. One round trip, ~30 sec of chunks, regardless of how
+   * far into the session the target is.
+   */
+  replayChunksAroundTime: protectedProcedure
+    .input(
+      z.object({
+        sessionId: z.string(),
+        projectId: z.string(),
+        // Accept floats — rrweb timestamps can be non-integer (Math.random
+        // jitter in chunked emission, accumulating ms drift). Floored
+        // server-side inside getSessionReplayChunksAroundTime.
+        targetMs: z.number().min(0),
+        lookaheadMs: z.number().min(0).max(120_000).default(30_000),
+      }),
+    )
+    .query(({ input: { sessionId, projectId, targetMs, lookaheadMs } }) => {
+      return getSessionReplayChunksAroundTime(
+        sessionId,
+        projectId,
+        targetMs,
+        lookaheadMs,
+      );
     }),
 });

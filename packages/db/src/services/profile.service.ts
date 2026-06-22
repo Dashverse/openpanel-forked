@@ -326,3 +326,53 @@ export async function upsertProfile(
 
   return profileBuffer.add(profile, isFromEvent);
 }
+
+export interface IServiceUpsertAlias {
+  projectId: string;
+  /** The canonical (identified) profile id, e.g. the backend user id. */
+  profileId: string;
+  /** The previous anonymous id the events were stamped with. */
+  alias: string;
+}
+
+/**
+ * Persist an `(anonymous id) -> (identified id)` mapping into `profile_aliases`.
+ *
+ * We follow Mixpanel's identity model: we never rewrite event rows. The alias
+ * row is written once on sign-in and resolved at query time (in a later PR).
+ *
+ * Volume is one row per sign-in transition, so we insert directly rather than
+ * going through a buffer. Guards drop self-maps / empty ids so we never create
+ * a chain (an alias that is also a canonical) or a no-op row.
+ */
+export async function upsertAlias({
+  projectId,
+  profileId,
+  alias,
+}: IServiceUpsertAlias) {
+  if (!projectId || !profileId || !alias || alias === profileId) {
+    return;
+  }
+
+  await ch.insert({
+    table: TABLE_NAMES.alias,
+    values: [
+      {
+        project_id: projectId,
+        profile_id: profileId,
+        alias,
+        created_at: formatClickhouseDate(new Date()),
+      },
+    ],
+    format: 'JSONEachRow',
+    // Aliases are written one row at a time per sign-in batch (the proxy
+    // re-emits per batch). async_insert lets ClickHouse coalesce these into
+    // server-side batches (~1 part/sec) instead of a part per insert, which
+    // matters at scale on this single-partition ReplacingMergeTree. The
+    // client-level CLICKHOUSE_SETTINGS does not enable it, so set it here.
+    clickhouse_settings: {
+      async_insert: 1,
+      wait_for_async_insert: 0,
+    },
+  });
+}
