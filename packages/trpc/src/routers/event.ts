@@ -60,13 +60,15 @@ export const eventRouter = createTRPCRouter({
         id: z.string(),
         projectId: z.string(),
         createdAt: z.date().optional(),
+        withProfile: z.boolean().optional(),
       }),
     )
-    .query(async ({ input: { id, projectId, createdAt } }) => {
+    .query(async ({ input: { id, projectId, createdAt, withProfile } }) => {
       const res = await eventService.getById({
         projectId,
         id,
         createdAt,
+        withProfile,
       });
 
       if (!res) {

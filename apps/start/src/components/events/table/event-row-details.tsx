@@ -66,6 +66,7 @@ export function EventRowDetails({
       id: seed.id,
       projectId: seed.projectId,
       createdAt: seed.createdAt,
+      withProfile: false,
     }),
   );
 
