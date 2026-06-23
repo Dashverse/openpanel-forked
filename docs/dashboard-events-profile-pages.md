@@ -219,22 +219,44 @@ profiles + shared `profile.byId`. Opening a session adds replay queries
 
 ## 4. Query-count summary
 
+> **Updated after the events/profile rework.** The inline event dropdown replaced
+> the click-through modal on the table, the `EventDetails` modal was slimmed to a
+> single `event.byId`, and the profile **Overview tab was removed** (left pane now
+> renders from `profile.byId` only). Current counts:
+
 | Page / tab | tRPC procedures | CH queries (cold) | Notes |
 |---|---|---|---|
-| Events list | `event.events` (+count) | 1–2 / page | sliding-window keyset |
-| Single event | `event.details` | 1–2 | ±1s lookup + optional session |
-| Profile header (all tabs) | `profile.byId` | 1 (often buffer hit) | shared |
-| Profile · Overview | metrics, activity, mostEvents, popularRoutes, events, 2× chart | **~8** | metrics dominates |
-| Profile · Events | `event.events` | 1 / page | + shared byId |
+| Events list | `event.events` | **1 / page** | sliding-window keyset; no count query |
+| Event dropdown (row expand) | `event.byId` | **1 / expand** | ±1s lookup; cached on re-expand; **0** on row toggle |
+| Single-event modal (profile widgets / realtime) | `event.byId` | **1** | slimmed from ~3 (session + chart removed) |
+| Profile page · left pane | `profile.byId` | **1** (often buffer hit) | renders the whole pane; **0** extra |
+| Profile page · default (Events) | `event.events` | 1 / page | index redirects here |
 | Profile · Sessions | `session.list` | ~2 / page | `sessions FINAL` + replay flag |
+| ~~Profile · Overview~~ | — | **removed** | tab deleted (was **~8**, incl. the metrics bottleneck) |
 
 ---
 
 ## 5. Bottlenecks
 
-Ordered by impact.
+Ordered by impact. **Status reflects the events/profile rework** — the three
+heaviest (B1, B2, B5) were eliminated by deleting the Overview tab; B7 was
+halved. B3/B4/B6 remain but are all low-impact.
 
-### B1 — `profile.metrics` scans the whole profile history ~9× (highest)
+| | Bottleneck | Status |
+|---|---|---|
+| B1 | `profile.metrics` ~13-CTE full-history scan | ✅ **resolved** — Overview removed, never called |
+| B2 | profile analytics bypass the MV fast-path | ✅ **resolved** — those queries deleted |
+| B5 | Overview 8-query fan-out + Suspense blocking | ✅ **resolved** — tab deleted |
+| B7 | single-event detail waterfall | 🟡 **partial** — `session.byId` gone (`details` deleted); `getProfileById` still sequential inside `getById` |
+| B3 | `sessions FINAL` merge-on-read | ⚠️ **still valid** — Sessions tab unchanged |
+| B4 | app-side enrichment round-trips (cached) | ⚠️ **still valid** — low impact |
+| B6 | sliding-window retries on sparse data | ⚠️ **still valid** — `getEventList` unchanged |
+
+### B1 — `profile.metrics` scans the whole profile history ~9× ✅ RESOLVED
+**No longer reached** — the Overview tab that called `profile.metrics` was removed;
+the profile left pane renders from `profile.byId` only. The procedure still exists
+but is dead code. (Original analysis below.)
+
 - The ~13-CTE query has **no date bound**, and **`profile_id` is not in the sort
   key at all** (migration 8 removed it) and has no skip index. A `profile_id = ?`
   filter can only prune on the `project_id` prefix, so CH must read **every
@@ -294,5 +316,3 @@ Ordered by impact.
   write-buffer as a read-through cache.
 - **Dedicated concurrency pool** for profile reads (`bypassConcurrencyLimit`) so
   heavy dashboard queries don't starve them.
-</content>
-</invoke>
