@@ -52,9 +52,9 @@ export default function SidebarProjectMenu({
         label="Dashboards"
         href={'/dashboards'}
       />
+      <SidebarLink icon={GanttChartIcon} label="Events" href={'/events'} />
       <SidebarLink icon={LayersIcon} label="Pages" href={'/pages'} />
       <SidebarLink icon={Globe2Icon} label="Realtime" href={'/realtime'} />
-      <SidebarLink icon={GanttChartIcon} label="Events" href={'/events'} />
       <SidebarLink icon={UsersRoundIcon} label="Sessions" href={'/sessions'} />
       <SidebarLink
         icon={CircleUserRoundIcon}
