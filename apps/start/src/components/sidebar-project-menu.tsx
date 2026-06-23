@@ -96,7 +96,7 @@ export function ActionCTAButton() {
 
   const ACTIONS = [
     {
-      label: 'Create report',
+      label: 'Report',
       icon: ChartLineIcon,
       onClick: () =>
         navigate({
@@ -105,7 +105,7 @@ export function ActionCTAButton() {
         }),
     },
     {
-      label: 'Create reference',
+      label: 'Reference',
       icon: BookOpenIcon,
       onClick: () => pushModal('AddReference'),
     },
@@ -119,12 +119,12 @@ export function ActionCTAButton() {
         }),
     },
     {
-      label: 'Create dashboard',
+      label: 'Dashboard',
       icon: LayoutDashboardIcon,
       onClick: () => pushModal('AddDashboard'),
     },
     {
-      label: 'Create notification rule',
+      label: 'Notification rule',
       icon: BellIcon,
       onClick: () =>
         navigate({
