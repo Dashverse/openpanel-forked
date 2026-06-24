@@ -244,6 +244,7 @@ export class FunnelService {
     additionalGroupBy = [],
     fromClause,
     needsNameFilter,
+    funnelConditions,
   }: {
     projectId: string;
     startDate: string;
@@ -256,8 +257,15 @@ export class FunnelService {
     additionalGroupBy?: string[];
     fromClause: string;
     needsNameFilter: boolean;
+    // When the caller (getFunnel) hoists event filters to a
+    // `filtered_profiles` pre-CTE, it passes name-only conditions here so
+    // windowFunnel doesn't re-read the filtered columns (country, etc.) —
+    // those reads would break proj_funnel routing. Default is the existing
+    // behaviour: per-step name + event-filter conditions.
+    funnelConditions?: string[];
   }) {
-    const funnels = this.getFunnelConditions(eventSeries, projectId);
+    const funnels =
+      funnelConditions ?? this.getFunnelConditions(eventSeries, projectId);
 
     const query = clix(this.client, timezone)
       .select([
@@ -480,10 +488,60 @@ export class FunnelService {
     // level after the union, not inside the per-event CTEs.
     const resolveAliases = funnelGroup !== 'session_id' && cohortIds.length === 0;
 
+    // Hoist event filters to a `filtered_profiles` pre-CTE when conditions
+    // allow (mirrors the conversion service's fast path). Filters inside
+    // windowFunnel conditions force CH off proj_funnel for column reads on
+    // columns not in the projection (most notably country) — measured 3-7x
+    // speedup on filtered funnels by pre-filtering at the user level
+    // instead.
+    //
+    // Gated to the simple funnel case: no breakdowns / hold properties /
+    // cohorts / custom events / profile.* filters. Anything else keeps the
+    // filter in windowFunnel conditions (strict semantic, slower).
+    //
+    // Semantic note: broader than per-event strict — a user with one step
+    // matching the filter and another step NOT matching is included
+    // (catches the backend-country attribution case). Day-level counts
+    // can differ by ~0-1%.
+    const eventFiltersForPrefilter = eventSeries.flatMap((e) =>
+      (e.filters ?? []).filter(
+        (f) =>
+          !f.name.startsWith('profile.') &&
+          f.operator !== 'inCohort' &&
+          f.operator !== 'notInCohort',
+      ),
+    );
+    const canPrefilterUsers =
+      eventFiltersForPrefilter.length > 0 &&
+      breakdowns.length === 0 &&
+      holdProperties.length === 0 &&
+      cohortIds.length === 0 &&
+      !anyFilterOnProfile &&
+      withClauses.length === 0; // no custom-event CTEs
+
     // Determine group column using the actual fromClause (not hardcoded table name)
     const group = this.resolveFunnelGroup(funnelGroup, fromClause, resolveAliases);
 
-    // Create the funnel CTE
+    const filteredProfilesClauses = canPrefilterUsers
+      ? [
+          ...new Set(
+            Object.values(
+              getEventFiltersWhereClause(eventFiltersForPrefilter, projectId),
+            ),
+          ),
+        ]
+      : [];
+
+    // When pre-filtering at the user level, drop filters from windowFunnel
+    // conditions (just keep `name = 'X'`) — the column reads they triggered
+    // were the source of the slowdown. The filtered_profiles WHERE narrows
+    // input to matching users; windowFunnel only checks step membership by
+    // name.
+    const funnelConditions = canPrefilterUsers
+      ? eventSeries.map((e) => `name = ${sqlstring.escape(e.name)}`)
+      : this.getFunnelConditions(eventSeries, projectId);
+    const step1Condition = funnelConditions[0];
+
     // Pull breakdown value from step 1's qualifying events only via anyIf().
     // Without this, the breakdown column would be added to the windowFunnel
     // GROUP BY, which buckets events by their breakdown value before
@@ -492,8 +550,6 @@ export class FunnelService {
     // events would push those later events into a different bucket and
     // they'd never match, producing zero conversions.
     // Mirrors the conversion service's "breakdown from start_events" behaviour.
-    const funnelConditions = this.getFunnelConditions(eventSeries, projectId);
-    const step1Condition = funnelConditions[0];
     const breakdownSelects = breakdowns.map((b, index) => {
       const expr = getSelectPropertyKey(
         b.name,
@@ -527,6 +583,7 @@ export class FunnelService {
       additionalGroupBy: [...breakdownGroupBy, ...holdPropertyGroupBy],
       fromClause,
       needsNameFilter,
+      funnelConditions,
     });
 
     if (anyFilterOnProfile || anyBreakdownOnProfile) {
@@ -627,6 +684,27 @@ export class FunnelService {
     if (sessionsCte) {
       funnelCte.leftJoin('sessions s', `s.sid = ${fromClause}.session_id`);
       funnelQuery.with('sessions', sessionsCte);
+    }
+
+    // Register the `filtered_profiles` pre-CTE + WHERE clause when the gate
+    // above was satisfied. The funnelCte's main scan becomes
+    // `WHERE profile_id IN (SELECT profile_id FROM filtered_profiles)`,
+    // proj_funnel stays selected, and windowFunnel runs name-only matches
+    // (the filters live in filtered_profiles, not in step conditions).
+    if (filteredProfilesClauses.length > 0) {
+      funnelQuery.with(
+        'filtered_profiles',
+        `SELECT DISTINCT profile_id
+         FROM ${TABLE_NAMES.events}
+         WHERE project_id = ${sqlstring.escape(projectId)}
+           AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
+           AND created_at <= toDateTime('${formatClickhouseDate(endDate)}')
+           AND profile_id != ''
+           AND ${filteredProfilesClauses.join(' AND ')}`,
+      );
+      funnelCte.rawWhere(
+        `${fromClause}.profile_id IN (SELECT profile_id FROM filtered_profiles)`,
+      );
     }
 
     // Identity-merge alias map: join the event's profile_id to its canonical so the
