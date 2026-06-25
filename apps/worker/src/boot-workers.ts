@@ -7,6 +7,7 @@ import {
   cronQueue,
   eventsGroupQueues,
   importQueue,
+  isKafkaConfigured,
   miscQueue,
   notificationQueue,
   queueLogger,
@@ -20,6 +21,10 @@ import { Worker as GroupWorker } from 'groupmq';
 
 import { cronJob } from './jobs/cron';
 import { incomingEvent } from './jobs/events.incoming-event';
+import {
+  type KafkaConsumerHandle,
+  startKafkaEventsConsumer,
+} from './jobs/events.kafka-consumer';
 import { importJob } from './jobs/import';
 import { miscJob } from './jobs/misc';
 import { notificationJob } from './jobs/notification';
@@ -160,11 +165,26 @@ export async function bootWorkers() {
     : getEnabledQueues();
 
   const workers: (Worker | GroupWorker<any>)[] = [];
+  const extraStops: Array<() => Promise<unknown>> = [];
 
-  // Start event workers based on enabled queues
+  // Does this pod handle event ingestion at all? (the events statefulset —
+  // NOT the cron/import deployments, which set ENABLED_QUEUES=cron / import).
+  // Gates the Kafka consumer so cron/import pods don't also consume events when
+  // KAFKA_BROKERS is set in the shared configmap.
+  const handlesEvents =
+    enabledQueues.includes('events') ||
+    enabledQueues.includes('events_kafka') ||
+    enabledQueues.some((q) => /^events_\d+$/.test(q));
+
+  // Start event workers based on enabled queues.
+  // When Kafka is configured the producer (api) routes every event to Kafka, so
+  // the GroupMQ event shards would only poll an empty queue — skip them on the
+  // events pod and let the Kafka consumer (below) handle ingestion instead.
   const eventQueuesToStart: number[] = [];
 
-  if (enabledQueues.includes('events')) {
+  if (isKafkaConfigured() && handlesEvents) {
+    logger.info('Kafka is configured, skipping GroupMQ event workers');
+  } else if (enabledQueues.includes('events')) {
     // Start all event shards
     for (let i = 0; i < EVENTS_GROUP_QUEUES_SHARDS; i++) {
       eventQueuesToStart.push(i);
@@ -203,6 +223,27 @@ export async function bootWorkers() {
     worker.run();
     workers.push(worker);
     logger.info(`Started worker for ${queueName}`, { concurrency });
+  }
+
+  // Start the Kafka events consumer. When Kafka is configured this fully
+  // replaces the GroupMQ event workers (which are skipped above). Only the
+  // events pod runs it — cron/import pods (handlesEvents=false) never consume.
+  if (isKafkaConfigured() && handlesEvents) {
+    let handle: KafkaConsumerHandle | null = null;
+    const startPromise = startKafkaEventsConsumer()
+      .then((h) => {
+        handle = h;
+        logger.info('Started Kafka events consumer');
+      })
+      .catch((err) => {
+        logger.error('Failed to start Kafka events consumer', { err });
+      });
+    extraStops.push(async () => {
+      await startPromise.catch(() => undefined);
+      if (handle) {
+        await handle.stop();
+      }
+    });
   }
 
   // Start sessions worker
@@ -352,7 +393,14 @@ export async function bootWorkers() {
         await waitForQueueToEmpty(cronQueue);
       }
 
-      await Promise.all(workers.map((worker) => worker.close()));
+      await Promise.all([
+        ...workers.map((worker) => worker.close()),
+        ...extraStops.map((stop) =>
+          stop().catch((err) => {
+            logger.error('extra stop handler error', { err });
+          }),
+        ),
+      ]);
 
       logger.info('workers closed successfully', {
         elapsed: performance.now() - time,

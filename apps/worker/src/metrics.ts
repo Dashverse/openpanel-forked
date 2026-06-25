@@ -24,6 +24,16 @@ export const eventsGroupJobDuration = new client.Histogram({
 
 register.registerMetric(eventsGroupJobDuration);
 
+// Counts Kafka messages redelivered (at-least-once duplicates) outside of a
+// rebalance — the signature of an offset-handling bug. Should stay flat at 0.
+export const kafkaReprocessedTotal = new client.Counter({
+  name: 'kafka_reprocessed_total',
+  help: 'Kafka messages redelivered outside a rebalance (at-least-once duplicates)',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(kafkaReprocessedTotal);
+
 queues.forEach((queue) => {
   register.registerMetric(
     new client.Gauge({

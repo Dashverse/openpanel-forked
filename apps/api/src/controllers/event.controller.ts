@@ -2,7 +2,12 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
 import { getSalts } from '@openpanel/db';
-import { getEventsGroupQueueShard } from '@openpanel/queue';
+import {
+  type EventsQueuePayloadIncomingEvent,
+  getEventsGroupQueueShard,
+  produceIncomingEvent,
+  shouldUseKafka,
+} from '@openpanel/queue';
 import type { PostEventPayload } from '@openpanel/sdk';
 
 import { generateId, slug } from '@openpanel/common';
@@ -62,24 +67,32 @@ export async function postEvent(
   ]
     .filter(Boolean)
     .join('-');
-  await getEventsGroupQueueShard(groupId).add({
-    orderMs: new Date(timestamp).getTime(),
-    data: {
-      projectId,
-      headers,
-      event: {
-        ...request.body,
-        timestamp,
-        isTimestampFromThePast,
-      },
-      uaInfo,
-      geo,
-      currentDeviceId,
-      previousDeviceId,
+  const queueData: EventsQueuePayloadIncomingEvent['payload'] = {
+    projectId,
+    headers,
+    event: {
+      ...request.body,
+      timestamp,
+      isTimestampFromThePast,
     },
-    groupId,
-    jobId,
-  });
+    uaInfo,
+    geo,
+    currentDeviceId,
+    previousDeviceId,
+  };
+
+  const partitionKey = groupId || generateId();
+
+  if (shouldUseKafka()) {
+    await produceIncomingEvent(queueData, partitionKey);
+  } else {
+    await getEventsGroupQueueShard(partitionKey).add({
+      orderMs: new Date(timestamp).getTime(),
+      data: queueData,
+      groupId,
+      jobId,
+    });
+  }
 
   reply.status(202).send('ok');
 }
