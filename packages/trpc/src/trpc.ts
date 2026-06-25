@@ -190,25 +190,41 @@ export const cacheMiddleware = (
     if (rawInput) {
       key += JSON.stringify(rawInput).replace(/\"/g, "'");
     }
-    const cache = await getRedisCache().getJson(key);
-    if (cache && process.env.NODE_ENV === 'production') {
-      return {
-        ok: true,
-        data: cache,
-        ctx,
-        marker: middlewareMarker,
-      };
+
+    // A client "Reload" sends this header to force fresh data. We skip the
+    // cache READ but still recompute and write below, so the refreshed value
+    // repopulates the cache for every other viewer of the same query.
+    const skipCacheRead =
+      (ctx.req as any)?.headers?.['x-op-skip-cache'] === '1';
+
+    // Cache reads are on in production; locally set ENABLE_TRPC_CACHE=1 to test
+    // the cache path in dev (writes happen regardless).
+    const cacheReadEnabled =
+      process.env.NODE_ENV === 'production' ||
+      process.env.ENABLE_TRPC_CACHE === '1';
+
+    if (!skipCacheRead && cacheReadEnabled) {
+      const cache = await getRedisCache().getJson(key);
+      if (cache) {
+        return {
+          ok: true,
+          data: cache,
+          ctx,
+          marker: middlewareMarker,
+        };
+      }
     }
     const result = await next();
 
     // @ts-expect-error
-    if (result.data) {
-      getRedisCache().setJson(
-        key,
-        ttl,
-        // @ts-expect-error
-        result.data,
-      );
+    const data = result.data;
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      // Stamp when this data was actually computed (i.e. fetched from
+      // ClickHouse). It's written INTO the cached payload, so a later cache HIT
+      // still reports the original compute time — not when the client read it.
+      // Clients use this for an honest "last updated" indicator.
+      data.__computedAt = Date.now();
+      getRedisCache().setJson(key, ttl, data);
     }
     return result;
   });
