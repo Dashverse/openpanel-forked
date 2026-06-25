@@ -275,19 +275,23 @@ function Component() {
   );
 
   const queryClient = useQueryClient();
-  const [isReloading, setIsReloading] = useState(false);
   // Bumped on Reload to remount every ReportChart, which resets the latched
   // lazy-loading state (`once.current`). That way Reload behaves like a fresh
   // page load: only in-viewport charts refetch, the rest reload lazily on
   // scroll — instead of refiring every previously-seen chart at once.
   const [reloadKey, setReloadKey] = useState(0);
 
+  // tRPC's React Query keys are shaped `[[router, procedure], { input, type }]`,
+  // so chart procedures match `queryKey[0][0] === 'chart'`. This is a tRPC
+  // implementation detail relied on by the predicates below.
+  const isChartQuery = (query: { queryKey: unknown }) =>
+    (query.queryKey as [string[]] | undefined)?.[0]?.[0] === 'chart';
+
   // Charts read from a 1h server-side Redis cache, so the dashboard loads fast
   // and stops fanning out to ClickHouse on every visit. Reload opens a cache
   // bypass window (server recomputes fresh + repopulates) and remounts charts.
   const handleReload = useCallback(() => {
     openServerCacheBypassWindow();
-    setIsReloading(true);
     setReloadKey((k) => k + 1);
   }, []);
 
@@ -300,11 +304,7 @@ function Component() {
   // charts, lazy rest" without re-firing every previously-seen chart at once.
   useEffect(() => {
     if (reloadKey === 0) return;
-    queryClient.removeQueries({
-      predicate: (query) =>
-        (query.queryKey?.[0] as unknown[] | undefined)?.[0] === 'chart',
-    });
-    setIsReloading(false);
+    queryClient.removeQueries({ predicate: isChartQuery });
   }, [reloadKey, queryClient]);
 
   // "Last updated" = when the chart data was actually computed from ClickHouse
@@ -317,10 +317,7 @@ function Component() {
     const cache = queryClient.getQueryCache();
     const sync = () => {
       const stamps = cache
-        .findAll({
-          predicate: (query) =>
-            (query.queryKey?.[0] as unknown[] | undefined)?.[0] === 'chart',
-        })
+        .findAll({ predicate: isChartQuery })
         .map(
           (query) =>
             (query.state.data as { __computedAt?: number })?.__computedAt,
@@ -550,7 +547,6 @@ function Component() {
             <Button
               variant="outline"
               icon={RefreshCw}
-              loading={isReloading}
               onClick={handleReload}
               title="Reload reports with fresh data"
             >

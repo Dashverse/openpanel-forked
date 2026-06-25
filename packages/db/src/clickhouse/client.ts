@@ -101,7 +101,14 @@ function getClickhouseSettings(): ClickHouseSettings {
   // rejects the excess with "Too many simultaneous queries". Set this in prod to
   // give that burst headroom. Unset = leave CH's own default untouched.
   // (Inserts and profile reads set their own higher limits per-query.)
-  const queryLimit = process.env.CLICKHOUSE_QUERY_LIMIT?.trim() || undefined;
+  // Passed as a string — that's the @clickhouse/client setting type, and CH
+  // receives all HTTP settings as strings. Validate it's numeric so a bad value
+  // is ignored rather than sent to CH.
+  const rawQueryLimit = process.env.CLICKHOUSE_QUERY_LIMIT?.trim();
+  const queryLimit =
+    rawQueryLimit && Number.isFinite(Number(rawQueryLimit))
+      ? rawQueryLimit
+      : undefined;
 
   return {
     date_time_input_format: 'best_effort',

@@ -194,7 +194,11 @@ export const cacheMiddleware = (
     // A client "Reload" sends this header to force fresh data. We skip the
     // cache READ but still recompute and write below, so the refreshed value
     // repopulates the cache for every other viewer of the same query.
+    // Gated on an authenticated session: otherwise an anonymous caller on a
+    // public procedure (chart.chart via a shared dashboard) could spam this
+    // header to force fresh ClickHouse recomputes and bypass the cache (DoS).
     const skipCacheRead =
+      !!ctx.session?.userId &&
       (ctx.req as any)?.headers?.['x-op-skip-cache'] === '1';
 
     // Cache reads are on in production; locally set ENABLE_TRPC_CACHE=1 to test
@@ -218,13 +222,18 @@ export const cacheMiddleware = (
 
     // @ts-expect-error
     const data = result.data;
-    if (data && typeof data === 'object' && !Array.isArray(data)) {
+    if (data && typeof data === 'object') {
       // Stamp when this data was actually computed (i.e. fetched from
       // ClickHouse). It's written INTO the cached payload, so a later cache HIT
       // still reports the original compute time — not when the client read it.
-      // Clients use this for an honest "last updated" indicator.
-      data.__computedAt = Date.now();
-      getRedisCache().setJson(key, ttl, data);
+      // Clients use this for an honest "last updated" indicator. We shallow-copy
+      // rather than mutate tRPC's internal result object; arrays can't carry the
+      // field so they're cached as-is.
+      const stamped = Array.isArray(data)
+        ? data
+        : { ...data, __computedAt: Date.now() };
+      getRedisCache().setJson(key, ttl, stamped);
+      return { ...result, data: stamped };
     }
     return result;
   });
