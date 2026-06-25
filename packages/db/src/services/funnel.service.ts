@@ -692,11 +692,15 @@ export class FunnelService {
     // proj_funnel stays selected, and windowFunnel runs name-only matches
     // (the filters live in filtered_profiles, not in step conditions).
     if (filteredProfilesClauses.length > 0) {
+      const funnelNamesIn = eventSeries
+        .map((e) => sqlstring.escape(e.name))
+        .join(', ');
       funnelQuery.with(
         'filtered_profiles',
         `SELECT DISTINCT profile_id
          FROM ${TABLE_NAMES.events}
          WHERE project_id = ${sqlstring.escape(projectId)}
+           AND name IN (${funnelNamesIn})
            AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
            AND created_at <= toDateTime('${formatClickhouseDate(endDate)}')
            AND profile_id != ''
