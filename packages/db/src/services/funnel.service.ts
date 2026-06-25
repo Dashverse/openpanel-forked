@@ -492,26 +492,45 @@ export class FunnelService {
     // allow (mirrors the conversion service's fast path). Filters inside
     // windowFunnel conditions force CH off proj_funnel for column reads on
     // columns not in the projection (most notably country) — measured 3-7x
-    // speedup on filtered funnels by pre-filtering at the user level
-    // instead.
+    // speedup on filtered funnels by pre-filtering at the user level.
     //
-    // Gated to the simple funnel case: no breakdowns / hold properties /
-    // cohorts / custom events / profile.* filters. Anything else keeps the
-    // filter in windowFunnel conditions (strict semantic, slower).
-    //
-    // Semantic note: broader than per-event strict — a user with one step
-    // matching the filter and another step NOT matching is included
-    // (catches the backend-country attribution case). Day-level counts
-    // can differ by ~0-1%.
-    const eventFiltersForPrefilter = eventSeries.flatMap((e) =>
-      (e.filters ?? []).filter(
-        (f) =>
-          !f.name.startsWith('profile.') &&
-          f.operator !== 'inCohort' &&
-          f.operator !== 'notInCohort',
+    // Hoisting is only safe when filters are identical across every step
+    // (the "global filter" case). When step N has a different filter than
+    // step M (e.g. screenName='TRAIL_PURCHASE_SCREEN' on step 1 only,
+    // country='US' on all steps), the fast path would (a) AND those
+    // filters together in filtered_profiles — narrower than per-step
+    // requires, and (b) drop them from windowFunnel — letting any event
+    // with the right name match the step, inflating conversions. So we
+    // gate strictly to uniform-filters and let mixed-filter funnels fall
+    // back to the slower-but-correct path.
+    const eventFilterSets = eventSeries.map((e) =>
+      JSON.stringify(
+        (e.filters ?? [])
+          .filter(
+            (f) =>
+              !f.name.startsWith('profile.') &&
+              f.operator !== 'inCohort' &&
+              f.operator !== 'notInCohort',
+          )
+          .map((f) => ({
+            name: f.name,
+            operator: f.operator,
+            value: f.value,
+          }))
+          .sort((a, b) => (a.name + a.operator).localeCompare(b.name + b.operator)),
       ),
     );
+    const allFiltersIdentical = eventFilterSets.every(
+      (s) => s === eventFilterSets[0],
+    );
+    const eventFiltersForPrefilter = (eventSeries[0]?.filters ?? []).filter(
+      (f) =>
+        !f.name.startsWith('profile.') &&
+        f.operator !== 'inCohort' &&
+        f.operator !== 'notInCohort',
+    );
     const canPrefilterUsers =
+      allFiltersIdentical &&
       eventFiltersForPrefilter.length > 0 &&
       breakdowns.length === 0 &&
       holdProperties.length === 0 &&
