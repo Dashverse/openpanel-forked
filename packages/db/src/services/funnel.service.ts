@@ -544,7 +544,15 @@ export class FunnelService {
           if (cached) {
             profileFieldsSet.add(cached.replace('profile.', ''));
           } else {
-            profileFieldsSet.add('properties');
+            // Extract specific key as aliased column instead of pulling the
+            // whole `properties` Map — avoids name collision with
+            // events.properties when a funnel mixes profile.* and
+            // event-level properties.* filters. Pairs with the matching
+            // alias form in getSelectPropertyKey.
+            const key = f.replace('properties.', '');
+            profileFieldsSet.add(
+              `properties[${sqlstring.escape(key)}] AS \`properties.${key}\``,
+            );
           }
         } else {
           profileFieldsSet.add(f.split('.')[0]!);
@@ -558,7 +566,10 @@ export class FunnelService {
           if (cached) {
             profileFieldsSet.add(cached.replace('profile.', ''));
           } else {
-            profileFieldsSet.add('properties');
+            const key = b.name.replace('profile.properties.', '');
+            profileFieldsSet.add(
+              `properties[${sqlstring.escape(key)}] AS \`properties.${key}\``,
+            );
           }
         } else {
           const fieldName = b.name.replace('profile.', '').split('.')[0];

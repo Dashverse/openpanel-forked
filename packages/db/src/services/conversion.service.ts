@@ -1,6 +1,7 @@
 import { NOT_SET_VALUE } from '@openpanel/constants';
 import type { IChartEvent, IChartInput } from '@openpanel/validation';
 import { omit } from 'ramda';
+import sqlstring from 'sqlstring';
 import { TABLE_NAMES, ch, formatClickhouseDate } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import {
@@ -110,12 +111,28 @@ export class ConversionService {
         ? ' AND ' + filterClauses.join(' AND ')
         : '';
 
-      // If any filter references profile.*, join the profiles table inside the CTE
+      // If any filter references profile.*, join the profiles table inside the CTE.
+      // For profile.properties.X paths, extract the specific key as an aliased
+      // column rather than pulling the whole `properties` Map — avoids name
+      // collision with events.properties when a conversion mixes profile.* and
+      // event-level properties.* filters. Matches the alias form returned by
+      // getSelectPropertyKey for profile.properties.X.
       const profileFilters = (event.filters || []).filter(f => f.name.startsWith('profile.'));
       let profileJoinClause = '';
       if (profileFilters.length > 0) {
+        const matCols = await getMaterializedColumns('profiles');
         const profileColumns = [...new Set(
-          profileFilters.map(f => f.name.replace('profile.', '').split('.')[0])
+          profileFilters.flatMap(f => {
+            if (f.name.startsWith('profile.properties.')) {
+              const cached = matCols[f.name];
+              if (cached) {
+                return [cached.replace('profile.', '')];
+              }
+              const key = f.name.replace('profile.properties.', '');
+              return [`properties[${sqlstring.escape(key)}] AS \`properties.${key}\``];
+            }
+            return [f.name.replace('profile.', '').split('.')[0]!];
+          })
         )];
         profileJoinClause = `\n        LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = ${TABLE_NAMES.events}.profile_id`;
       }
@@ -689,22 +706,27 @@ export class ConversionService {
       return `LEFT ANY JOIN ${cohortCte} AS ${cohortAlias} ON ${cohortAlias}.profile_id = se.profile_id`;
     }).join('\n      ') : '';
 
-    // Build LEFT JOIN for profile table if any breakdown uses profile.*
+    // Build LEFT JOIN for profile table if any breakdown uses profile.*.
+    // For profile.properties.X paths, extract the specific key as an aliased
+    // column rather than pulling the whole `properties` Map — avoids name
+    // collision with events.properties when breakdowns mix profile.* and
+    // event-level properties.* paths. Matches the alias form returned by
+    // getSelectPropertyKey for profile.properties.X.
     const profileBreakdowns = breakdowns.filter(b => b.name.startsWith('profile.'));
     let profileJoin = '';
     if (profileBreakdowns.length > 0) {
       const matCols = await getMaterializedColumns('profiles');
       const profileColumns = [...new Set(
-        profileBreakdowns.map(b => {
+        profileBreakdowns.flatMap(b => {
           if (b.name.startsWith('profile.properties.')) {
             const cached = matCols[b.name];
             if (cached) {
-              // cached = "profile.campaign" -> select "campaign" (the materialized column)
-              return cached.replace('profile.', '');
+              return [cached.replace('profile.', '')];
             }
+            const key = b.name.replace('profile.properties.', '');
+            return [`properties[${sqlstring.escape(key)}] AS \`properties.${key}\``];
           }
-          // Fall back to the top-level field name (e.g., "properties", "email")
-          return b.name.replace('profile.', '').split('.')[0];
+          return [b.name.replace('profile.', '').split('.')[0]!];
         })
       )];
       profileJoin = `\n      LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = se.profile_id`;
