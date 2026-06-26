@@ -175,6 +175,13 @@ const middlewareMarker = 'middlewareMarker' as 'middlewareMarker' & {
 
 export const cacheMiddleware = (
   cbOrTtl: number | ((input: any, opts: { path: string }) => number),
+  options?: {
+    // Build the cache key from a normalized view of the raw input — e.g. strip
+    // presentational/volatile fields (layout, id, name, …) so they don't bloat
+    // the key or spawn new entries on every UI change. Defaults to the full
+    // raw input.
+    keyInput?: (rawInput: any) => unknown;
+  },
 ) =>
   t.middleware(async ({ ctx, next, path, type, getRawInput, input }) => {
     const ttl =
@@ -186,29 +193,55 @@ export const cacheMiddleware = (
     if (type !== 'query') {
       return next();
     }
+    const keySource = options?.keyInput ? options.keyInput(rawInput) : rawInput;
     let key = `trpc:${path}:`;
-    if (rawInput) {
-      key += JSON.stringify(rawInput).replace(/\"/g, "'");
+    if (keySource) {
+      key += JSON.stringify(keySource).replace(/\"/g, "'");
     }
-    const cache = await getRedisCache().getJson(key);
-    if (cache && process.env.NODE_ENV === 'production') {
-      return {
-        ok: true,
-        data: cache,
-        ctx,
-        marker: middlewareMarker,
-      };
+
+    // A client "Reload" sends this header to force fresh data. We skip the
+    // cache READ but still recompute and write below, so the refreshed value
+    // repopulates the cache for every other viewer of the same query.
+    // Gated on an authenticated session: otherwise an anonymous caller on a
+    // public procedure (chart.chart via a shared dashboard) could spam this
+    // header to force fresh ClickHouse recomputes and bypass the cache (DoS).
+    const skipCacheRead =
+      !!ctx.session?.userId &&
+      (ctx.req as any)?.headers?.['x-op-skip-cache'] === '1';
+
+    // Cache reads are on in production; locally set ENABLE_TRPC_CACHE=1 to test
+    // the cache path in dev (writes happen regardless).
+    const cacheReadEnabled =
+      process.env.NODE_ENV === 'production' ||
+      process.env.ENABLE_TRPC_CACHE === '1';
+
+    if (!skipCacheRead && cacheReadEnabled) {
+      const cache = await getRedisCache().getJson(key);
+      if (cache) {
+        return {
+          ok: true,
+          data: cache,
+          ctx,
+          marker: middlewareMarker,
+        };
+      }
     }
     const result = await next();
 
     // @ts-expect-error
-    if (result.data) {
-      getRedisCache().setJson(
-        key,
-        ttl,
-        // @ts-expect-error
-        result.data,
-      );
+    const data = result.data;
+    if (data && typeof data === 'object') {
+      // Stamp when this data was actually computed (i.e. fetched from
+      // ClickHouse). It's written INTO the cached payload, so a later cache HIT
+      // still reports the original compute time — not when the client read it.
+      // Clients use this for an honest "last updated" indicator. We shallow-copy
+      // rather than mutate tRPC's internal result object; arrays can't carry the
+      // field so they're cached as-is.
+      const stamped = Array.isArray(data)
+        ? data
+        : { ...data, __computedAt: Date.now() };
+      getRedisCache().setJson(key, ttl, stamped);
+      return { ...result, data: stamped };
     }
     return result;
   });

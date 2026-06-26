@@ -13,10 +13,12 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/utils/cn';
 import { createProjectTitle } from '@/utils/title';
 import {
+  Clock,
   CopyIcon,
   LayoutPanelTopIcon,
   MoreHorizontal,
   PlusIcon,
+  RefreshCw,
   RotateCcw,
   SearchIcon,
   Trash,
@@ -29,9 +31,10 @@ import { OverviewInterval } from '@/components/overview/overview-interval';
 import { OverviewRange } from '@/components/overview/overview-range';
 import { PageContainer } from '@/components/page-container';
 import { PageHeader } from '@/components/page-header';
+import { openServerCacheBypassWindow } from '@/integrations/trpc/cache-bypass';
 import { handleErrorToastOptions, useTRPC } from '@/integrations/trpc/react';
 import { showConfirm } from '@/modals';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, useRouter } from '@tanstack/react-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Responsive, WidthProvider } from 'react-grid-layout';
@@ -122,6 +125,7 @@ function ReportItem({
   startDate,
   endDate,
   interval,
+  reloadKey,
   onDelete,
   onDuplicate,
 }: {
@@ -132,6 +136,7 @@ function ReportItem({
   startDate: any;
   endDate: any;
   interval: any;
+  reloadKey: number;
   onDelete: (reportId: string) => void;
   onDuplicate: (reportId: string) => void;
 }) {
@@ -228,6 +233,7 @@ function ReportItem({
         )}
       >
         <ReportChart
+          key={reloadKey}
           options={
             ['linear', 'conversion', 'funnel'].includes(report.chartType)
               ? { fillHeight: true }
@@ -267,6 +273,71 @@ function Component() {
       projectId,
     }),
   );
+
+  const queryClient = useQueryClient();
+  // Bumped on Reload to remount every ReportChart, which resets the latched
+  // lazy-loading state (`once.current`). That way Reload behaves like a fresh
+  // page load: only in-viewport charts refetch, the rest reload lazily on
+  // scroll — instead of refiring every previously-seen chart at once.
+  const [reloadKey, setReloadKey] = useState(0);
+
+  // tRPC's React Query keys are shaped `[[router, procedure], { input, type }]`,
+  // so chart procedures match `queryKey[0][0] === 'chart'`. The "Updated"
+  // indicator pairs this with `type: 'active'` to consider only charts mounted
+  // on the CURRENT dashboard (others visited this session are inactive); we
+  // can't scope by `input.dashboardId` since funnel inputs don't carry one.
+  // Reload's removeQueries deliberately does NOT filter by active (see below).
+  const isChartQuery = (query: { queryKey: unknown }) =>
+    (query.queryKey as [string[]] | undefined)?.[0]?.[0] === 'chart';
+
+  // Charts read from a server-side Redis cache, so the dashboard loads fast and
+  // stops fanning out to ClickHouse on every visit. Reload opens a cache bypass
+  // window (server recomputes fresh + repopulates) and remounts charts.
+  const handleReload = useCallback(() => {
+    openServerCacheBypassWindow();
+    setReloadKey((k) => k + 1);
+  }, []);
+
+  // After the remount commits, drop cached chart data so the remounted charts
+  // refetch (carrying the cache-bypass header → fresh from ClickHouse + cache
+  // repopulate). This MUST be unconditional (no `type: 'active'` filter): right
+  // after the remount the charts are still lazy/disabled (intersection fires a
+  // frame later), so they aren't "active" yet — filtering on active would leave
+  // their data in place and Reload would just re-show the cached value. Removing
+  // all chart queries is harmless: other dashboards simply refetch (from the
+  // server cache) when revisited.
+  useEffect(() => {
+    if (reloadKey === 0) return;
+    queryClient.removeQueries({ predicate: isChartQuery });
+  }, [reloadKey, queryClient]);
+
+  // "Last updated" = when THIS dashboard's chart data was actually computed from
+  // ClickHouse (the server stamps `__computedAt` into the payload, so it survives
+  // caching). This is the TRUE data freshness — a cache hit reports the original
+  // compute time, not when this browser read it. Scoped to the current dashboard
+  // and shown as the oldest across its charts ("nothing newer than").
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  useEffect(() => {
+    // Reset when switching dashboards so we don't briefly show the prior
+    // dashboard's timestamp.
+    setLastUpdatedAt(null);
+    const cache = queryClient.getQueryCache();
+    const sync = () => {
+      const stamps = cache
+        .findAll({ type: 'active', predicate: isChartQuery })
+        .map(
+          (query) =>
+            (query.state.data as { __computedAt?: number })?.__computedAt,
+        )
+        .filter((ts): ts is number => typeof ts === 'number');
+      if (stamps.length > 0) {
+        setLastUpdatedAt(Math.min(...stamps));
+      }
+    };
+    sync();
+    return cache.subscribe(sync);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, dashboardId]);
 
   const dashboardDeletion = useMutation(
     trpc.dashboard.delete.mutationOptions({
@@ -466,6 +537,29 @@ function Component() {
             </div>
             <OverviewRange />
             <OverviewInterval />
+            {lastUpdatedAt && (
+              <div
+                className="flex items-center gap-1.5 px-1 text-xs font-medium text-muted-foreground whitespace-nowrap tabular-nums max-md:hidden"
+                title={`Data last updated ${new Date(lastUpdatedAt).toLocaleString()}`}
+              >
+                <Clock className="size-3.5 shrink-0" />
+                <span>
+                  Updated{' '}
+                  {new Date(lastUpdatedAt).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </span>
+              </div>
+            )}
+            <Button
+              variant="outline"
+              icon={RefreshCw}
+              onClick={handleReload}
+              title="Reload reports with fresh data"
+            >
+              <span className="max-sm:hidden">Reload</span>
+            </Button>
             <LinkButton
               from={Route.fullPath}
               to={'/$organizationId/$projectId/reports'}
@@ -586,6 +680,7 @@ function Component() {
                   startDate={startDate}
                   endDate={endDate}
                   interval={interval}
+                  reloadKey={reloadKey}
                   onDelete={(reportId) => {
                     reportDeletion.mutate({ reportId });
                   }}
