@@ -282,14 +282,17 @@ function Component() {
   const [reloadKey, setReloadKey] = useState(0);
 
   // tRPC's React Query keys are shaped `[[router, procedure], { input, type }]`,
-  // so chart procedures match `queryKey[0][0] === 'chart'`. This is a tRPC
-  // implementation detail relied on by the predicates below.
+  // so chart procedures match `queryKey[0][0] === 'chart'`. We pair this with
+  // `type: 'active'` in the filters below to scope to charts mounted on the
+  // CURRENT dashboard only — charts from other dashboards visited this session
+  // are inactive. (We can't scope by `input.dashboardId` because funnel inputs
+  // don't carry one.)
   const isChartQuery = (query: { queryKey: unknown }) =>
     (query.queryKey as [string[]] | undefined)?.[0]?.[0] === 'chart';
 
-  // Charts read from a 1h server-side Redis cache, so the dashboard loads fast
-  // and stops fanning out to ClickHouse on every visit. Reload opens a cache
-  // bypass window (server recomputes fresh + repopulates) and remounts charts.
+  // Charts read from a server-side Redis cache, so the dashboard loads fast and
+  // stops fanning out to ClickHouse on every visit. Reload opens a cache bypass
+  // window (server recomputes fresh + repopulates) and remounts charts.
   const handleReload = useCallback(() => {
     openServerCacheBypassWindow();
     setReloadKey((k) => k + 1);
@@ -304,20 +307,23 @@ function Component() {
   // charts, lazy rest" without re-firing every previously-seen chart at once.
   useEffect(() => {
     if (reloadKey === 0) return;
-    queryClient.removeQueries({ predicate: isChartQuery });
+    queryClient.removeQueries({ type: 'active', predicate: isChartQuery });
   }, [reloadKey, queryClient]);
 
-  // "Last updated" = when the chart data was actually computed from ClickHouse
-  // (the server stamps `__computedAt` into the payload, so it survives caching).
-  // This is the TRUE data freshness — a cache hit reports the original compute
-  // time, not when this browser read it. We show the oldest across all charts so
-  // it honestly reflects the staleness of the whole page ("nothing newer than").
+  // "Last updated" = when THIS dashboard's chart data was actually computed from
+  // ClickHouse (the server stamps `__computedAt` into the payload, so it survives
+  // caching). This is the TRUE data freshness — a cache hit reports the original
+  // compute time, not when this browser read it. Scoped to the current dashboard
+  // and shown as the oldest across its charts ("nothing newer than").
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   useEffect(() => {
+    // Reset when switching dashboards so we don't briefly show the prior
+    // dashboard's timestamp.
+    setLastUpdatedAt(null);
     const cache = queryClient.getQueryCache();
     const sync = () => {
       const stamps = cache
-        .findAll({ predicate: isChartQuery })
+        .findAll({ type: 'active', predicate: isChartQuery })
         .map(
           (query) =>
             (query.state.data as { __computedAt?: number })?.__computedAt,
@@ -329,7 +335,8 @@ function Component() {
     };
     sync();
     return cache.subscribe(sync);
-  }, [queryClient]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryClient, dashboardId]);
 
   const dashboardDeletion = useMutation(
     trpc.dashboard.delete.mutationOptions({

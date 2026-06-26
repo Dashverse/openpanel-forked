@@ -1,4 +1,4 @@
-import { flatten, map, pipe, prop, range, sort, uniq } from 'ramda';
+import { flatten, map, omit, pipe, prop, range, sort, uniq } from 'ramda';
 import sqlstring from 'sqlstring';
 import { z } from 'zod';
 
@@ -65,7 +65,29 @@ const CHART_CACHE_TTL = Number.parseInt(
   process.env.CHART_CACHE_TTL_SECONDS || '3600',
   10,
 );
-const chartCacher = cacheMiddleware(CHART_CACHE_TTL);
+// Fields that DON'T affect the query result but DO bloat / churn the cache key:
+// - layout: changes on every widget drag/resize (createdAt/updatedAt) -> would
+//   rewrite every report's key whenever the dashboard is rearranged.
+// - id/name/lineType: presentational; identical configs should share a key.
+// - dirty/ready: report-editor UI state (flip on every interaction).
+// Stripping them keeps one cache entry per actual query (per range/interval),
+// instead of multiplying by layout version, edit state, etc.
+const CHART_KEY_OMIT = [
+  'id',
+  'name',
+  'lineType',
+  'layout',
+  'dirty',
+  'ready',
+  'createdAt',
+  'updatedAt',
+];
+const chartCacher = cacheMiddleware(CHART_CACHE_TTL, {
+  keyInput: (raw) =>
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? omit(CHART_KEY_OMIT, raw)
+      : raw,
+});
 
 export const chartRouter = createTRPCRouter({
   projectCard: protectedProcedure

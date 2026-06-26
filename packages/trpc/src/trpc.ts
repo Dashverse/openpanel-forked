@@ -175,6 +175,13 @@ const middlewareMarker = 'middlewareMarker' as 'middlewareMarker' & {
 
 export const cacheMiddleware = (
   cbOrTtl: number | ((input: any, opts: { path: string }) => number),
+  options?: {
+    // Build the cache key from a normalized view of the raw input — e.g. strip
+    // presentational/volatile fields (layout, id, name, …) so they don't bloat
+    // the key or spawn new entries on every UI change. Defaults to the full
+    // raw input.
+    keyInput?: (rawInput: any) => unknown;
+  },
 ) =>
   t.middleware(async ({ ctx, next, path, type, getRawInput, input }) => {
     const ttl =
@@ -186,9 +193,10 @@ export const cacheMiddleware = (
     if (type !== 'query') {
       return next();
     }
+    const keySource = options?.keyInput ? options.keyInput(rawInput) : rawInput;
     let key = `trpc:${path}:`;
-    if (rawInput) {
-      key += JSON.stringify(rawInput).replace(/\"/g, "'");
+    if (keySource) {
+      key += JSON.stringify(keySource).replace(/\"/g, "'");
     }
 
     // A client "Reload" sends this header to force fresh data. We skip the
