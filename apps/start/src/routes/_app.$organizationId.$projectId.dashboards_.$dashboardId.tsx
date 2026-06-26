@@ -282,11 +282,11 @@ function Component() {
   const [reloadKey, setReloadKey] = useState(0);
 
   // tRPC's React Query keys are shaped `[[router, procedure], { input, type }]`,
-  // so chart procedures match `queryKey[0][0] === 'chart'`. We pair this with
-  // `type: 'active'` in the filters below to scope to charts mounted on the
-  // CURRENT dashboard only — charts from other dashboards visited this session
-  // are inactive. (We can't scope by `input.dashboardId` because funnel inputs
-  // don't carry one.)
+  // so chart procedures match `queryKey[0][0] === 'chart'`. The "Updated"
+  // indicator pairs this with `type: 'active'` to consider only charts mounted
+  // on the CURRENT dashboard (others visited this session are inactive); we
+  // can't scope by `input.dashboardId` since funnel inputs don't carry one.
+  // Reload's removeQueries deliberately does NOT filter by active (see below).
   const isChartQuery = (query: { queryKey: unknown }) =>
     (query.queryKey as [string[]] | undefined)?.[0]?.[0] === 'chart';
 
@@ -298,16 +298,17 @@ function Component() {
     setReloadKey((k) => k + 1);
   }, []);
 
-  // After the remount commits, drop cached chart data. The remounted charts
-  // start disabled (lazy), so this triggers no immediate fetch; but once an
-  // in-viewport chart enables (intersection fires a frame later) it has no data
-  // and MUST fetch — and that fetch happens inside the cache-bypass window, so
-  // the server recomputes fresh and repopulates Redis. Off-screen charts stay
-  // disabled and refetch when scrolled into view. This gives "fresh visible
-  // charts, lazy rest" without re-firing every previously-seen chart at once.
+  // After the remount commits, drop cached chart data so the remounted charts
+  // refetch (carrying the cache-bypass header → fresh from ClickHouse + cache
+  // repopulate). This MUST be unconditional (no `type: 'active'` filter): right
+  // after the remount the charts are still lazy/disabled (intersection fires a
+  // frame later), so they aren't "active" yet — filtering on active would leave
+  // their data in place and Reload would just re-show the cached value. Removing
+  // all chart queries is harmless: other dashboards simply refetch (from the
+  // server cache) when revisited.
   useEffect(() => {
     if (reloadKey === 0) return;
-    queryClient.removeQueries({ type: 'active', predicate: isChartQuery });
+    queryClient.removeQueries({ predicate: isChartQuery });
   }, [reloadKey, queryClient]);
 
   // "Last updated" = when THIS dashboard's chart data was actually computed from
