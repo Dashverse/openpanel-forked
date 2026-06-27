@@ -315,6 +315,111 @@ export class FunnelService {
       ]);
   }
 
+  /**
+   * Build the inner `user_events` CTE for the array-based funnel fast path.
+   * Replaces windowFunnel by collecting each step's matching timestamps as
+   * an array per user (`groupArrayIf` per step). The wrapping `funnel` CTE
+   * (see buildArrayFunnelLevelSql) then computes the `level` integer per
+   * user via array math.
+   *
+   * Why arrays instead of windowFunnel: per-step filters (e.g.
+   * screenName='X' on step 2 only) are preserved inside each step's
+   * groupArrayIf condition. The earlier windowFunnel hoist required
+   * uniform filters across all steps; this path drops that restriction
+   * without losing the speed win.
+   *
+   * Caller chains the same JOINs / IN-filter as the windowFunnel path
+   * (sessions, al, filtered_profiles) before registering as `user_events`.
+   */
+  private buildArrayUserEventsCte({
+    projectId,
+    startDate,
+    endDate,
+    eventSeries,
+    group,
+    timezone,
+    fromClause,
+    needsNameFilter,
+    funnelConditions,
+  }: {
+    projectId: string;
+    startDate: string;
+    endDate: string;
+    eventSeries: IChartEvent[];
+    group: [string, string];
+    timezone: string;
+    fromClause: string;
+    needsNameFilter: boolean;
+    funnelConditions: string[];
+  }) {
+    const stepSelects = funnelConditions.map(
+      (cond, i) =>
+        `groupArrayIf(toUInt64(toUnixTimestamp64Milli(created_at)), ${cond}) AS s${i + 1}`,
+    );
+
+    const query = clix(this.client, timezone)
+      .select([`${group[0]} AS ${group[1]}`, ...stepSelects])
+      .from(fromClause, false)
+      .where('project_id', '=', projectId)
+      .groupBy([group[1]])
+      // Drop users who never matched step 1 — they can't be at any level.
+      // Equivalent to `level != 0` filter but avoids carrying empty-array
+      // rows into the wrapping `funnel` CTE.
+      .having('length(s1)', '>', 0);
+
+    if (needsNameFilter) {
+      query
+        .where('created_at', 'BETWEEN', [
+          clix.datetime(startDate, 'toDateTime'),
+          clix.datetime(endDate, 'toDateTime'),
+        ])
+        .where(
+          'name',
+          'IN',
+          eventSeries.map((e) => e.name),
+        );
+    }
+
+    return query;
+  }
+
+  /**
+   * Build the wrapping `funnel` CTE SQL for the array fast path. Reads
+   * `user_events` (per-step timestamp arrays) and computes a `level`
+   * integer per user via greedy strict-increase semantics:
+   *   t_1 = earliest s_1 (user_events HAVING guarantees non-empty)
+   *   t_i = earliest s_i strictly > t_{i-1}, within `windowMs` of t_1
+   *   level = max i with t_i > 0 (otherwise 0 — unreachable per HAVING)
+   *
+   * Returns raw SQL — caller registers via `funnelQuery.with('funnel', ...)`.
+   */
+  private buildArrayFunnelLevelSql(
+    numSteps: number,
+    windowMs: number,
+    group: [string, string],
+  ): string {
+    const [, groupAlias] = group;
+    const tDecls: string[] = ['arrayMin(s1) AS t1'];
+    for (let i = 2; i <= numSteps; i++) {
+      const prev = `t${i - 1}`;
+      if (i === 2) {
+        tDecls.push(
+          `arrayMin(arrayFilter(t -> t > t1 AND t <= t1 + ${windowMs}, s${i})) AS t${i}`,
+        );
+      } else {
+        tDecls.push(
+          `if(${prev} = 0, 0, arrayMin(arrayFilter(t -> t > ${prev} AND t <= t1 + ${windowMs}, s${i}))) AS t${i}`,
+        );
+      }
+    }
+    const branches: string[] = [];
+    for (let i = numSteps; i >= 1; i--) {
+      branches.push(`t${i} > 0`, `${i}`);
+    }
+    branches.push('0');
+    return `SELECT ${groupAlias}, ${tDecls.join(', ')}, multiIf(${branches.join(', ')}) AS level FROM user_events`;
+  }
+
   private fillFunnel(
     funnel: { level: number; count: number }[],
     steps: number,
@@ -488,77 +593,88 @@ export class FunnelService {
     // level after the union, not inside the per-event CTEs.
     const resolveAliases = funnelGroup !== 'session_id' && cohortIds.length === 0;
 
-    // Hoist event filters to a `filtered_profiles` pre-CTE when conditions
-    // allow (mirrors the conversion service's fast path). Filters inside
-    // windowFunnel conditions force CH off proj_funnel for column reads on
-    // columns not in the projection (most notably country) — measured 3-7x
-    // speedup on filtered funnels by pre-filtering at the user level.
+    // Array-based fast path (mirrors the conversion service's fast path).
+    // When eligible, the funnel CTE uses `groupArrayIf` per step instead of
+    // `windowFunnel`, AND event filters get hoisted into a `filtered_profiles`
+    // pre-CTE. Two wins:
+    //   1. Filters inside windowFunnel conditions force CH off proj_funnel
+    //      for column reads on non-projection columns (notably `country`).
+    //      Hoisting filters into a pre-CTE narrows the event scan at the
+    //      user level — measured ~40% faster on filtered funnels.
+    //   2. groupArrayIf preserves per-step filters in each step's If
+    //      predicate, so funnels with non-uniform filters (e.g.
+    //      screenName='TRAIL_PURCHASE_SCREEN' on step 2 only) get the
+    //      fast path without the over-counting risk that windowFunnel-
+    //      with-hoisted-filters had. That risk is why an earlier
+    //      iteration of this gate required identical filters across all
+    //      steps — that restriction is removed now.
     //
-    // Hoisting is only safe when filters are identical across every step
-    // (the "global filter" case). When step N has a different filter than
-    // step M (e.g. screenName='TRAIL_PURCHASE_SCREEN' on step 1 only,
-    // country='US' on all steps), the fast path would (a) AND those
-    // filters together in filtered_profiles — narrower than per-step
-    // requires, and (b) drop them from windowFunnel — letting any event
-    // with the right name match the step, inflating conversions. So we
-    // gate strictly to uniform-filters and let mixed-filter funnels fall
-    // back to the slower-but-correct path.
-    const eventFilterSets = eventSeries.map((e) =>
-      JSON.stringify(
-        (e.filters ?? [])
-          .filter(
-            (f) =>
-              !f.name.startsWith('profile.') &&
-              f.operator !== 'inCohort' &&
-              f.operator !== 'notInCohort',
+    // filtered_profiles uses the INTERSECTION of step filters (filters
+    // common to every step). They're the only filters guaranteed to
+    // exclude users universally — per-step-only filters stay in the
+    // groupArrayIf predicates where they belong.
+    const filterKey = (f: { name: string; operator: string; value: unknown }) =>
+      `${f.name}|${f.operator}|${JSON.stringify(f.value)}`;
+    const isHoistableFilter = (f: {
+      name: string;
+      operator: string;
+    }) =>
+      !f.name.startsWith('profile.') &&
+      f.operator !== 'inCohort' &&
+      f.operator !== 'notInCohort';
+    const stepFilterKeys = eventSeries.map(
+      (e) =>
+        new Set(
+          (e.filters ?? [])
+            .filter(isHoistableFilter)
+            .map((f) => filterKey(f as any)),
+        ),
+    );
+    const commonKeys =
+      stepFilterKeys[0]
+        ? [...stepFilterKeys[0]].filter((k) =>
+            stepFilterKeys.every((s) => s.has(k)),
           )
-          .map((f) => ({
-            name: f.name,
-            operator: f.operator,
-            value: f.value,
-          }))
-          .sort((a, b) => (a.name + a.operator).localeCompare(b.name + b.operator)),
-      ),
-    );
-    const allFiltersIdentical = eventFilterSets.every(
-      (s) => s === eventFilterSets[0],
-    );
-    const eventFiltersForPrefilter = (eventSeries[0]?.filters ?? []).filter(
+        : [];
+    const commonFilters = (eventSeries[0]?.filters ?? []).filter(
       (f) =>
-        !f.name.startsWith('profile.') &&
-        f.operator !== 'inCohort' &&
-        f.operator !== 'notInCohort',
+        isHoistableFilter(f) && commonKeys.includes(filterKey(f as any)),
     );
-    const canPrefilterUsers =
-      allFiltersIdentical &&
-      eventFiltersForPrefilter.length > 0 &&
+    const anyHoistableFilter = eventSeries.some((e) =>
+      (e.filters ?? []).some(isHoistableFilter),
+    );
+
+    // Gate: any hoistable filter + simple funnel (no breakdowns / holds /
+    // cohorts / profile filters / custom events). Same restrictions as the
+    // earlier windowFunnel-hoist path, minus the all-filters-identical
+    // requirement.
+    const useArrayPath =
+      anyHoistableFilter &&
       breakdowns.length === 0 &&
       holdProperties.length === 0 &&
       cohortIds.length === 0 &&
       !anyFilterOnProfile &&
-      withClauses.length === 0; // no custom-event CTEs
+      withClauses.length === 0;
 
     // Determine group column using the actual fromClause (not hardcoded table name)
     const group = this.resolveFunnelGroup(funnelGroup, fromClause, resolveAliases);
 
-    const filteredProfilesClauses = canPrefilterUsers
-      ? [
-          ...new Set(
-            Object.values(
-              getEventFiltersWhereClause(eventFiltersForPrefilter, projectId),
+    const filteredProfilesClauses =
+      useArrayPath && commonFilters.length > 0
+        ? [
+            ...new Set(
+              Object.values(
+                getEventFiltersWhereClause(commonFilters, projectId),
+              ),
             ),
-          ),
-        ]
-      : [];
+          ]
+        : [];
 
-    // When pre-filtering at the user level, drop filters from windowFunnel
-    // conditions (just keep `name = 'X'`) — the column reads they triggered
-    // were the source of the slowdown. The filtered_profiles WHERE narrows
-    // input to matching users; windowFunnel only checks step membership by
-    // name.
-    const funnelConditions = canPrefilterUsers
-      ? eventSeries.map((e) => `name = ${sqlstring.escape(e.name)}`)
-      : this.getFunnelConditions(eventSeries, projectId);
+    // Full per-step conditions (name + per-step filters). Used by the
+    // array path's groupArrayIf predicates — per-step filters are
+    // preserved here, NOT stripped to name-only as the windowFunnel hoist
+    // would have required.
+    const funnelConditions = this.getFunnelConditions(eventSeries, projectId);
     const step1Condition = funnelConditions[0];
 
     // Pull breakdown value from step 1's qualifying events only via anyIf().
@@ -590,20 +706,36 @@ export class FunnelService {
     );
     const holdPropertyGroupBy = holdProperties.map((_, i) => `hp_${i}`);
 
-    const funnelCte = this.buildFunnelCte({
-      projectId,
-      startDate,
-      endDate,
-      eventSeries,
-      funnelWindowMilliseconds,
-      group,
-      timezone,
-      additionalSelects: [...breakdownSelects, ...holdPropertySelects],
-      additionalGroupBy: [...breakdownGroupBy, ...holdPropertyGroupBy],
-      fromClause,
-      needsNameFilter,
-      funnelConditions,
-    });
+    // Inner CTE: array path builds `user_events` (groupArrayIf per step);
+    // slow path keeps the existing windowFunnel `funnel` CTE. JOIN /
+    // filtered_profiles wiring below operates on whichever `mainCte` won.
+    const mainCte = useArrayPath
+      ? this.buildArrayUserEventsCte({
+          projectId,
+          startDate,
+          endDate,
+          eventSeries,
+          group,
+          timezone,
+          fromClause,
+          needsNameFilter,
+          funnelConditions,
+        })
+      : this.buildFunnelCte({
+          projectId,
+          startDate,
+          endDate,
+          eventSeries,
+          funnelWindowMilliseconds,
+          group,
+          timezone,
+          additionalSelects: [...breakdownSelects, ...holdPropertySelects],
+          additionalGroupBy: [...breakdownGroupBy, ...holdPropertyGroupBy],
+          fromClause,
+          needsNameFilter,
+          funnelConditions,
+        });
+    const funnelCte = mainCte;
 
     if (anyFilterOnProfile || anyBreakdownOnProfile) {
       const matCols = await getMaterializedColumns('profiles');
@@ -745,7 +877,22 @@ export class FunnelService {
       );
     }
 
-    funnelQuery.with('funnel', funnelCte);
+    if (useArrayPath) {
+      // Array path: inner CTE is `user_events`, then a raw `funnel` CTE
+      // computes the `level` column via array math (greedy strict-increase
+      // matching with the funnelWindow window).
+      funnelQuery.with('user_events', mainCte);
+      funnelQuery.with(
+        'funnel',
+        this.buildArrayFunnelLevelSql(
+          eventSeries.length,
+          funnelWindowMilliseconds,
+          group,
+        ),
+      );
+    } else {
+      funnelQuery.with('funnel', funnelCte);
+    }
 
     funnelQuery
       .select<{
