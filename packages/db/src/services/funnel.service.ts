@@ -501,8 +501,30 @@ export class FunnelService {
         b.cohortId,
         b.cohortId ? cohortMetadata.get(b.cohortId)?.name : undefined,
       );
-      return step1Condition
-        ? `anyIf(${expr}, ${step1Condition}) as b_${index}`
+
+      // Cohort breakdowns are membership-based — per-step sourcing doesn't apply.
+      const isCohort = !!b.cohortId || b.name.startsWith('cohort:');
+      if (isCohort) {
+        return step1Condition
+          ? `anyIf(${expr}, ${step1Condition}) as b_${index}`
+          : `${expr} as b_${index}`;
+      }
+
+      // 'first'/'last' = value at the first/last event (by time) where the
+      // property is defined — lets the breakdown live on any step.
+      if (b.step === 'first') {
+        return `argMinIf(${expr}, created_at, notEmpty(toString(${expr}))) as b_${index}`;
+      }
+      if (b.step === 'last') {
+        return `argMaxIf(${expr}, created_at, notEmpty(toString(${expr}))) as b_${index}`;
+      }
+
+      // Specific step (1-based); default step 1 (current behaviour). Pull the
+      // value from that step's qualifying events and apply it to the user.
+      const stepIndex = (typeof b.step === 'number' ? b.step : 1) - 1;
+      const stepCondition = funnelConditions[stepIndex] ?? step1Condition;
+      return stepCondition
+        ? `anyIf(${expr}, ${stepCondition}) as b_${index}`
         : `${expr} as b_${index}`;
     });
     const breakdownGroupBy: string[] = [];
