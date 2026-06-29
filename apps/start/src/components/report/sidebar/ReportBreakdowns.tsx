@@ -66,7 +66,10 @@ export function ReportBreakdowns() {
       <h3 className="mb-2 font-medium">Breakdown</h3>
       <div className="flex flex-col gap-4">
         {selectedBreakdowns.map((item, index) => {
-          const isCohortBreakdown = item.name.startsWith('cohort:');
+          // Match the backend's cohort check (prefix OR cohortId) so the step
+          // selector is hidden for any cohort-backed breakdown.
+          const isCohortBreakdown =
+            item.name.startsWith('cohort:') || !!item.cohortId;
           const cohortId = isCohortBreakdown
             ? (item.cohortId || item.name.split(':')[1])
             : null;
