@@ -51,6 +51,7 @@ function SortableSeries({
   index,
   showSegment,
   showAddFilter,
+  showPerUser,
   isSelectManyEvents,
   ...props
 }: {
@@ -58,6 +59,7 @@ function SortableSeries({
   index: number;
   showSegment: boolean;
   showAddFilter: boolean;
+  showPerUser: boolean;
   isSelectManyEvents: boolean;
 } & React.HTMLAttributes<HTMLDivElement>) {
   const dispatch = useDispatch();
@@ -94,7 +96,7 @@ function SortableSeries({
       </div>
 
       {/* Segment and Filter buttons - only for events */}
-      {chartEvent && (showSegment || showAddFilter) && (
+      {chartEvent && (showSegment || showAddFilter || showPerUser) && (
         <div className="flex flex-wrap gap-2 p-2 pt-0">
           {showSegment && (
             <ReportSegment
@@ -109,7 +111,9 @@ function SortableSeries({
               }}
             />
           )}
-          {showSegment && (
+          {/* Per-user is only meaningful for the Distribution chart (bucket
+              users by their per-user value); hidden everywhere else. */}
+          {showPerUser && (
             <ReportPerUser
               event={chartEvent}
               onChange={(perUser) => {
@@ -180,7 +184,11 @@ export function ReportSeries() {
     projectId,
   });
 
-  const showSegment = !['retention', 'funnel'].includes(chartType);
+  // Distribution uses the Per-user picker instead of the segment dropdown.
+  const showSegment = !['retention', 'funnel', 'distribution'].includes(
+    chartType,
+  );
+  const showPerUser = chartType === 'distribution';
   const showAddFilter = !['retention'].includes(chartType);
   const showDisplayNameInput = !['retention'].includes(chartType);
   const isAddEventDisabled =
@@ -264,6 +272,7 @@ export function ReportSeries() {
                   index={index}
                   showSegment={showSegment}
                   showAddFilter={showAddFilter}
+                  showPerUser={showPerUser}
                   isSelectManyEvents={isSelectManyEvents}
                   className="rounded-lg border bg-def-100"
                 >

@@ -1,6 +1,3 @@
-import { Combobox } from '@/components/ui/combobox';
-import { useAppParams } from '@/hooks/use-app-params';
-import { useEventProperties } from '@/hooks/use-event-properties';
 import { useDispatch } from '@/redux';
 import { cn } from '@/utils/cn';
 import { DatabaseIcon } from 'lucide-react';
@@ -8,56 +5,47 @@ import { DatabaseIcon } from 'lucide-react';
 import type { IChartEvent } from '@openpanel/validation';
 
 import { changeEvent } from '../reportSlice';
+import { PropertiesCombobox } from './PropertiesCombobox';
 
 interface EventPropertiesComboboxProps {
   event: IChartEvent;
 }
 
+// Property picker for the property_* segments. Uses the shared PropertiesCombobox
+// (same UI as the filter / breakdown / per-user pickers) scoped to event
+// properties, instead of the basic flat combobox.
 export function EventPropertiesCombobox({
   event,
 }: EventPropertiesComboboxProps) {
   const dispatch = useDispatch();
-  const { projectId } = useAppParams();
-  const { items: rawProperties } = useEventProperties(
-    {
-      event: event.name,
-      projectId,
-    },
-    {
-      enabled: !!event.name,
-    },
-  );
-  const properties = rawProperties.map((item) => ({
-    label: item,
-    value: item,
-  }));
 
   return (
-    <Combobox
-      searchable
-      placeholder="Select a filter"
-      value=""
-      items={properties}
-      onChange={(value) => {
+    <PropertiesCombobox
+      event={event}
+      mode="events"
+      onSelect={(action) => {
         dispatch(
           changeEvent({
             ...event,
-            property: value,
+            property: action.value,
             type: 'event',
           }),
         );
       }}
     >
-      <button
-        type="button"
-        className={cn(
-          'flex items-center gap-1 rounded-md border border-border p-1 px-2 text-sm font-medium leading-none',
-          !event.property && 'border-destructive text-destructive',
-        )}
-      >
-        <DatabaseIcon size={12} />{' '}
-        {event.property ? `Property: ${event.property}` : 'Select property'}
-      </button>
-    </Combobox>
+      {(setOpen) => (
+        <button
+          type="button"
+          onClick={() => setOpen((p) => !p)}
+          className={cn(
+            'flex items-center gap-1 rounded-md border border-border p-1 px-2 text-sm font-medium leading-none',
+            !event.property && 'border-destructive text-destructive',
+          )}
+        >
+          <DatabaseIcon size={12} />{' '}
+          {event.property ? `Property: ${event.property}` : 'Select property'}
+        </button>
+      )}
+    </PropertiesCombobox>
   );
 }
