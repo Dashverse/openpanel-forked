@@ -197,6 +197,21 @@ export const reportSlice = createSlice({
       state.dirty = true;
       state.chartType = action.payload;
 
+      // Normalize series config that the new chart type no longer exposes, so a
+      // hidden control can't keep applying stale config (the sidebar only shows
+      // per-user on Distribution and the segment everywhere else):
+      // - leaving Distribution clears `perUser` (per-user picker is gone)
+      // - entering Distribution resets `segment` to default (segment is hidden)
+      const isDistribution = action.payload === 'distribution';
+      for (const serie of state.series) {
+        if (serie.type === 'formula') continue;
+        if (isDistribution) {
+          serie.segment = 'event';
+        } else {
+          serie.perUser = undefined;
+        }
+      }
+
       if (
         !isMinuteIntervalEnabledByRange(state.range) &&
         state.interval === 'minute'
