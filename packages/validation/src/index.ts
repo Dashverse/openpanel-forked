@@ -119,6 +119,13 @@ export const zChartBreakdown = z.object({
   id: z.string().optional(),
   name: z.string(),
   cohortId: z.string().optional(),
+  // Funnel-only: which step's event the breakdown value is sourced from and
+  // applied to the user across the funnel (Mixpanel "breakdown on step N").
+  // A number is a 1-based step; 'first'/'last' = first/last step where the
+  // property is defined (by event time). Undefined defaults to step 1.
+  step: z
+    .union([z.literal('first'), z.literal('last'), z.number().int().min(1)])
+    .optional(),
 });
 
 // Support both old format (array of events without type) and new format (array of event/formula items)

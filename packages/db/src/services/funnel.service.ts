@@ -494,6 +494,13 @@ export class FunnelService {
     // Mirrors the conversion service's "breakdown from start_events" behaviour.
     const funnelConditions = this.getFunnelConditions(eventSeries, projectId);
     const step1Condition = funnelConditions[0];
+    // Matches an event qualifying for ANY funnel step (name + that step's
+    // filters). Used by first/last so the breakdown value can only come from a
+    // real funnel-step event, not a filtered-out or unrelated row.
+    const anyStepCondition = funnelConditions
+      .filter(Boolean)
+      .map((c) => `(${c})`)
+      .join(' OR ');
     const breakdownSelects = breakdowns.map((b, index) => {
       const expr = getSelectPropertyKey(
         b.name,
@@ -501,8 +508,30 @@ export class FunnelService {
         b.cohortId,
         b.cohortId ? cohortMetadata.get(b.cohortId)?.name : undefined,
       );
-      return step1Condition
-        ? `anyIf(${expr}, ${step1Condition}) as b_${index}`
+
+      // Cohort breakdowns are membership-based — per-step sourcing doesn't apply.
+      const isCohort = !!b.cohortId || b.name.startsWith('cohort:');
+      if (isCohort) {
+        return step1Condition
+          ? `anyIf(${expr}, ${step1Condition}) as b_${index}`
+          : `${expr} as b_${index}`;
+      }
+
+      // 'first'/'last' = value at the first/last qualifying funnel-step event
+      // (by time) where the property is defined. Gated on anyStepCondition so a
+      // filtered-out or unrelated event can't supply the value.
+      if ((b.step === 'first' || b.step === 'last') && anyStepCondition) {
+        const cond = `(${anyStepCondition}) AND notEmpty(toString(${expr}))`;
+        const fn = b.step === 'first' ? 'argMinIf' : 'argMaxIf';
+        return `${fn}(${expr}, created_at, ${cond}) as b_${index}`;
+      }
+
+      // Specific step (1-based); default step 1 (current behaviour). Pull the
+      // value from that step's qualifying events and apply it to the user.
+      const stepIndex = (typeof b.step === 'number' ? b.step : 1) - 1;
+      const stepCondition = funnelConditions[stepIndex] ?? step1Condition;
+      return stepCondition
+        ? `anyIf(${expr}, ${stepCondition}) as b_${index}`
         : `${expr} as b_${index}`;
     });
     const breakdownGroupBy: string[] = [];
