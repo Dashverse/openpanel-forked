@@ -63,6 +63,23 @@ const initialState: InitialState = {
   ttcAggregation: 'avg' as const,
 };
 
+// Drop series config the chart type doesn't expose, so hidden or persisted
+// config can't keep being applied: per-user is only available on Distribution
+// (cleared elsewhere); the segment is hidden on Distribution (reset to default
+// there). Formula series are left untouched.
+function normalizeSeriesForChartType(
+  series: InitialState['series'],
+  chartType: IChartType,
+): InitialState['series'] {
+  const isDistribution = chartType === 'distribution';
+  return series.map((serie) => {
+    if (serie.type === 'formula') return serie;
+    return isDistribution
+      ? { ...serie, segment: 'event' as const }
+      : { ...serie, perUser: undefined };
+  });
+}
+
 export const reportSlice = createSlice({
   name: 'report',
   initialState,
@@ -86,6 +103,11 @@ export const reportSlice = createSlice({
       return {
         ...state,
         ...action.payload,
+        // Normalize persisted series so stale hidden config isn't re-applied.
+        series: normalizeSeriesForChartType(
+          action.payload.series ?? [],
+          action.payload.chartType,
+        ),
         limit: action.payload.limit ?? state.limit,
         range: '7d',
         startDate: null,
@@ -197,20 +219,9 @@ export const reportSlice = createSlice({
       state.dirty = true;
       state.chartType = action.payload;
 
-      // Normalize series config that the new chart type no longer exposes, so a
-      // hidden control can't keep applying stale config (the sidebar only shows
-      // per-user on Distribution and the segment everywhere else):
-      // - leaving Distribution clears `perUser` (per-user picker is gone)
-      // - entering Distribution resets `segment` to default (segment is hidden)
-      const isDistribution = action.payload === 'distribution';
-      for (const serie of state.series) {
-        if (serie.type === 'formula') continue;
-        if (isDistribution) {
-          serie.segment = 'event';
-        } else {
-          serie.perUser = undefined;
-        }
-      }
+      // Drop series config the new chart type no longer exposes (per-user when
+      // leaving Distribution, non-default segment when entering it).
+      state.series = normalizeSeriesForChartType(state.series, action.payload);
 
       if (
         !isMinuteIntervalEnabledByRange(state.range) &&
