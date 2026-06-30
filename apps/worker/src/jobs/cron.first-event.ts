@@ -4,7 +4,7 @@ import { getLock } from '@openpanel/redis';
 import { logger } from '../utils/logger';
 
 // dashreels only for now — shortreels' Jun-10+ backlog isn't loaded yet, so running
-// the cron for it would emit _first_event with late timestamps for backlog devices.
+// the cron for it would emit first_install with late timestamps for backlog devices.
 // Add 'shortreels' here once its backlog is backfilled.
 const PROJECT_IDS = ['dashreels'];
 const BATCH_SIZE = 10_000;
@@ -13,6 +13,12 @@ const BATCH_SIZE = 10_000;
 // is the guard (one row/device that already has a _first_event, fed by its MV).
 const SOURCE_TABLE = 'device_first_seen';
 const DEDUP_TABLE = 'first_event_dedup_device';
+// profile_aliases (anon -> canonical backend_userid). Second anti-join: a firebase-keyed
+// candidate whose install_profile is a known canonical account = a RETURNING user on a NEW
+// deviceUID (deviceUID reset / new phone) that the device-guard can't catch (it only knows the
+// old deviceUID). Excluding them keeps first_install to genuinely-new users AND lifts keying to
+// ~99.97% anon — the firebase-keyed slice IS the returning slice, so dropping it does both.
+const ALIAS_TABLE = TABLE_NAMES.alias;
 const LOOKBACK_DAYS = 7;
 
 type Candidate = {
@@ -35,9 +41,11 @@ export async function firstEvent() {
 
     // Per-device: each deviceUID's first-seen time + install profile from
     // device_first_seen, bounded to the last LOOKBACK_DAYS (keeps the scan cheap
-    // and drops stale/late-arriving edge cases), anti-joined against the guard so
-    // any device that already has a _first_event is skipped. Emitting then feeds
-    // the guard (via first_event_dedup_device_mv), so a device is processed once.
+    // and drops stale/late-arriving edge cases). Two anti-joins: (1) the deviceUID guard
+    // — skip any device that already has a first_install; (2) profile_aliases — skip
+    // returning users (firebase-keyed install_profile that's a known canonical account,
+    // i.e. a returning user on a new/reset deviceUID the device-guard can't see).
+    // Emitting feeds the guard (via first_event_dedup_device_mv), so a device fires once.
     const candidates = await chQuery<Candidate>(`
       SELECT
         candidates.deviceUID AS device_id,
@@ -60,6 +68,13 @@ export async function firstEvent() {
       LEFT ANTI JOIN ${DEDUP_TABLE} AS d
         ON candidates.project_id = d.project_id
         AND candidates.deviceUID = d.deviceUID
+      LEFT ANTI JOIN (
+        SELECT DISTINCT project_id, profile_id
+        FROM ${ALIAS_TABLE}
+        WHERE project_id IN (${projectList})
+      ) AS pa
+        ON candidates.project_id = pa.project_id
+        AND candidates.install_profile = pa.profile_id
       SETTINGS max_execution_time = 60
     `);
 
@@ -76,7 +91,7 @@ export async function firstEvent() {
       await ch.insert({
         table: TABLE_NAMES.events,
         values: batch.map((c) => ({
-          name: '_first_event',
+          name: 'first_install',
           // Anon install profile — resolved to canonical at read via profile_aliases.
           profile_id: c.profile_id,
           // device_id carries the deviceUID (matches the backfill), so the dedup MV
@@ -111,7 +126,7 @@ export async function firstEvent() {
     }
 
     logger.info(
-      `[first-event] Done — inserted _first_event for ${candidates.length} devices`,
+      `[first-event] Done — inserted first_install for ${candidates.length} devices`,
     );
   } catch (error) {
     logger.error('[first-event] Error:', error);
