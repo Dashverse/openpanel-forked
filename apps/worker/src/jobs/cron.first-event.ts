@@ -49,7 +49,7 @@ export async function firstEvent() {
     const candidates = await chQuery<Candidate>(`
       SELECT
         candidates.deviceUID AS device_id,
-        candidates.project_id,
+        candidates.project_id AS project_id,
         candidates.install_profile AS profile_id,
         candidates.install_session AS session_id,
         toString(candidates.first_ts) AS first_ts
