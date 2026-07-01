@@ -41,7 +41,7 @@ interface VirtualizedEventsTableProps {
   table: Table<IServiceEvent>;
   data: IServiceEvent[];
   isLoading: boolean;
-  expandedId: string | null;
+  expandedIds: Set<string>;
   onToggle: (id: string) => void;
 }
 
@@ -161,7 +161,7 @@ const VirtualizedEventsTable = ({
   table,
   data,
   isLoading,
-  expandedId,
+  expandedIds,
   onToggle,
 }: VirtualizedEventsTableProps) => {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -251,7 +251,11 @@ const VirtualizedEventsTable = ({
               headerColumnsHash={headerColumnsHash}
               scrollMargin={rowVirtualizer.options.scrollMargin}
               isLoading={isLoading}
-              isExpanded={!isLoading && row.original?.id === expandedId}
+              isExpanded={
+                !isLoading &&
+                !!row.original?.id &&
+                expandedIds.has(row.original.id)
+              }
               onToggle={onToggle}
             />
           );
@@ -264,9 +268,17 @@ const VirtualizedEventsTable = ({
 export const EventsTable = ({ query }: Props) => {
   const { isLoading } = query;
   const columns = useColumns();
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const onToggle = useCallback((id: string) => {
-    setExpandedId((prev) => (prev === id ? null : id));
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   }, []);
 
   const data = useMemo(() => {
@@ -326,7 +338,7 @@ export const EventsTable = ({ query }: Props) => {
         table={table}
         data={data}
         isLoading={isLoading}
-        expandedId={expandedId}
+        expandedIds={expandedIds}
         onToggle={onToggle}
       />
       <div className="w-full h-10 center-center pt-4" ref={inViewportRef}>
