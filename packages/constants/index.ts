@@ -125,7 +125,7 @@ export const chartTypes = {
 } as const;
 
 export const chartSegments = {
-  event: 'All events',
+  event: 'Total events',
   user: 'Unique users',
   session: 'Unique sessions',
   user_average: 'Average users',

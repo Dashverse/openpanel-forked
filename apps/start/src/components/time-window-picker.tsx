@@ -104,7 +104,7 @@ export function TimeWindowPicker({
     };
     const segmentClass = (active: boolean) =>
       cn(
-        'rounded-md px-2.5 py-1 text-sm font-medium transition-colors',
+        'flex h-full items-center rounded-md px-2.5 text-sm font-medium transition-colors',
         active
           ? 'bg-def-200 text-foreground'
           : 'text-muted-foreground hover:text-foreground',
@@ -112,7 +112,7 @@ export function TimeWindowPicker({
     return (
       <div
         className={cn(
-          'inline-flex items-center gap-0.5 rounded-lg border p-0.5',
+          'inline-flex h-8 items-center gap-0.5 rounded-lg border p-0.5',
           className,
         )}
       >
