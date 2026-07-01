@@ -128,8 +128,8 @@ export default function ReportEditor({
         </div>
       </aside>
       <div className="min-w-0 flex-1">
-        <div className="p-4 pt-6">
-          <div className="flex min-w-0 items-center gap-2">
+        <div className="flex items-center gap-2 border-b px-4 py-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
             {dashboard && dashboardId && (
               <>
                 <Link
@@ -148,32 +148,7 @@ export default function ReportEditor({
             )}
             <EditReportName />
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 p-4 pt-0">
-          <div className="grid flex-1 grid-cols-2 gap-2 md:max-w-xl md:grid-cols-3">
-            <TimeWindowPicker
-              className="min-w-0 flex-1"
-              onChange={(value) => {
-                dispatch(changeDateRanges(value));
-              }}
-              value={report.range}
-              onStartDateChange={(date) => dispatch(changeStartDate(date))}
-              onEndDateChange={(date) => dispatch(changeEndDate(date))}
-              endDate={report.endDate}
-              startDate={report.startDate}
-            />
-            <ReportInterval
-              className="min-w-0 flex-1"
-              interval={report.interval}
-              onChange={(newInterval) => dispatch(changeInterval(newInterval))}
-              range={report.range}
-              chartType={report.chartType}
-              startDate={report.startDate}
-              endDate={report.endDate}
-            />
-            <ReportLineType className="min-w-0 flex-1" />
-          </div>
-          <div className="row ml-auto gap-2 whitespace-nowrap">
+          <div className="row gap-2 whitespace-nowrap">
             {reportId &&
               (existingRule ? (
                 <Button
@@ -204,6 +179,31 @@ export default function ReportEditor({
                 </Button>
               ))}
             <ReportSaveButton />
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3">
+          <TimeWindowPicker
+            className="min-w-0"
+            onChange={(value) => {
+              dispatch(changeDateRanges(value));
+            }}
+            value={report.range}
+            onStartDateChange={(date) => dispatch(changeStartDate(date))}
+            onEndDateChange={(date) => dispatch(changeEndDate(date))}
+            endDate={report.endDate}
+            startDate={report.startDate}
+          />
+          <div className="row ml-auto gap-2">
+            <ReportInterval
+              className="min-w-0"
+              interval={report.interval}
+              onChange={(newInterval) => dispatch(changeInterval(newInterval))}
+              range={report.range}
+              chartType={report.chartType}
+              startDate={report.startDate}
+              endDate={report.endDate}
+            />
+            <ReportLineType className="min-w-0" />
           </div>
         </div>
         <div className="flex flex-col gap-4 p-4" id="report-editor">
