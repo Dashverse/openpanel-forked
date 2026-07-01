@@ -1,4 +1,4 @@
-import { flatten, map, pipe, prop, range, sort, uniq } from 'ramda';
+import { flatten, map, omit, pipe, prop, range, sort, uniq } from 'ramda';
 import sqlstring from 'sqlstring';
 import { z } from 'zod';
 
@@ -58,7 +58,36 @@ function utc(date: string | Date) {
   return formatISO(date).replace('T', ' ').slice(0, 19);
 }
 
-const cacher = cacheMiddleware(60);
+// Dashboard chart/funnel/conversion results are cached in Redis so that a page
+// full of report widgets does not fan out into one ClickHouse query per widget
+// on every (cold) load. Default 1h; tune via env. Set to 0 to disable.
+const CHART_CACHE_TTL = Number.parseInt(
+  process.env.CHART_CACHE_TTL_SECONDS || '3600',
+  10,
+);
+// Fields that DON'T affect the query result but DO bloat / churn the cache key:
+// - layout: changes on every widget drag/resize (createdAt/updatedAt) -> would
+//   rewrite every report's key whenever the dashboard is rearranged.
+// - id/name/lineType: presentational; identical configs should share a key.
+// - dirty/ready: report-editor UI state (flip on every interaction).
+// Stripping them keeps one cache entry per actual query (per range/interval),
+// instead of multiplying by layout version, edit state, etc.
+const CHART_KEY_OMIT = [
+  'id',
+  'name',
+  'lineType',
+  'layout',
+  'dirty',
+  'ready',
+  'createdAt',
+  'updatedAt',
+];
+const chartCacher = cacheMiddleware(CHART_CACHE_TTL, {
+  keyInput: (raw) =>
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? omit(CHART_KEY_OMIT, raw)
+      : raw,
+});
 
 export const chartRouter = createTRPCRouter({
   projectCard: protectedProcedure
@@ -360,84 +389,88 @@ export const chartRouter = createTRPCRouter({
       };
     }),
 
-  funnel: protectedProcedure.input(zChartInput).query(async ({ input }) => {
-    const { timezone } = await getSettingsForProject(input.projectId);
-    const currentPeriod = getChartStartEndDate(input, timezone);
-    const previousPeriod = getChartPrevStartEndDate(currentPeriod);
+  funnel: protectedProcedure
+    .input(zChartInput)
+    .use(chartCacher)
+    .query(async ({ input }) => {
+      const { timezone } = await getSettingsForProject(input.projectId);
+      const currentPeriod = getChartStartEndDate(input, timezone);
+      const previousPeriod = getChartPrevStartEndDate(currentPeriod);
 
-    const [current, previous] = await Promise.all([
-      funnelService.getFunnel({ ...input, ...currentPeriod, timezone }),
-      input.previous
-        ? funnelService.getFunnel({ ...input, ...previousPeriod, timezone })
-        : Promise.resolve(null),
-    ]);
+      const [current, previous] = await Promise.all([
+        funnelService.getFunnel({ ...input, ...currentPeriod, timezone }),
+        input.previous
+          ? funnelService.getFunnel({ ...input, ...previousPeriod, timezone })
+          : Promise.resolve(null),
+      ]);
 
-    return {
-      current,
-      previous,
-    };
-  }),
+      return {
+        current,
+        previous,
+      };
+    }),
 
-  conversion: protectedProcedure.input(zChartInput).query(async ({ input }) => {
-    const { timezone } = await getSettingsForProject(input.projectId);
-    const currentPeriod = getChartStartEndDate(input, timezone);
-    const previousPeriod = getChartPrevStartEndDate(currentPeriod);
+  conversion: protectedProcedure
+    .input(zChartInput)
+    .use(chartCacher)
+    .query(async ({ input }) => {
+      const { timezone } = await getSettingsForProject(input.projectId);
+      const currentPeriod = getChartStartEndDate(input, timezone);
+      const previousPeriod = getChartPrevStartEndDate(currentPeriod);
 
-    const [current, previous] = await Promise.all([
-      conversionService.getConversion({ ...input, ...currentPeriod, timezone }),
-      input.previous
-        ? conversionService.getConversion({
-            ...input,
-            ...previousPeriod,
-            timezone,
-          })
-        : Promise.resolve(null),
-    ]);
+      const [current, previous] = await Promise.all([
+        conversionService.getConversion({
+          ...input,
+          ...currentPeriod,
+          timezone,
+        }),
+        input.previous
+          ? conversionService.getConversion({
+              ...input,
+              ...previousPeriod,
+              timezone,
+            })
+          : Promise.resolve(null),
+      ]);
 
-    return {
-      current: current.map((serie, sIndex) => ({
-        ...serie,
-        data: serie.data.map((d, dIndex) => ({
-          ...d,
-          previousRate: previous?.[sIndex]?.data?.[dIndex]?.rate,
+      return {
+        current: current.map((serie, sIndex) => ({
+          ...serie,
+          data: serie.data.map((d, dIndex) => ({
+            ...d,
+            previousRate: previous?.[sIndex]?.data?.[dIndex]?.rate,
+          })),
         })),
-      })),
-      previous,
-    };
-  }),
+        previous,
+      };
+    }),
 
   chart: publicProcedure
-    // .use(cacher)
     .input(zChartInput)
-    .query(async ({ input, ctx }) => {
-      if (ctx.session.userId) {
-        const access = await getProjectAccess({
-          projectId: input.projectId,
-          userId: ctx.session.userId,
-        });
-        if (!access) {
-          const share = await db.shareOverview.findFirst({
-            where: {
-              projectId: input.projectId,
-            },
-          });
+    // Access must be enforced BEFORE the cache layer — a cache hit short-circuits
+    // the resolver, so the access check cannot live inside it.
+    .use(async ({ ctx, input, next }) => {
+      const projectId = (input as { projectId: string }).projectId;
+      const hasAccess = ctx.session.userId
+        ? !!(await getProjectAccess({
+            projectId,
+            userId: ctx.session.userId,
+          }))
+        : false;
 
-          if (!share) {
-            throw TRPCAccessError('You do not have access to this project');
-          }
-        }
-      } else {
+      if (!hasAccess) {
         const share = await db.shareOverview.findFirst({
-          where: {
-            projectId: input.projectId,
-          },
+          where: { projectId },
         });
-
         if (!share) {
           throw TRPCAccessError('You do not have access to this project');
         }
       }
 
+      return next();
+    })
+    .use(chartCacher)
+    .query(async ({ input }) => {
       // Use new chart engine
       return ChartEngine.execute(input);
     }),

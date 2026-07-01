@@ -3,6 +3,7 @@ import { createTRPCClient, httpLink } from '@trpc/client';
 import { createTRPCOptionsProxy } from '@trpc/tanstack-react-query';
 import superjson from 'superjson';
 
+import { shouldBypassServerCache } from '@/integrations/trpc/cache-bypass';
 import { TRPCProvider } from '@/integrations/trpc/react';
 import type { AppRouter } from '@openpanel/trpc';
 import { createIsomorphicFn } from '@tanstack/react-start';
@@ -24,7 +25,15 @@ export function createTRPCClientWithHeaders(apiUrl: string) {
       httpLink({
         transformer: superjson,
         url: `${apiUrl}/trpc`,
-        headers: () => getIsomorphicHeaders(),
+        headers: () => {
+          const headers = getIsomorphicHeaders();
+          // During a "Reload" window, tell the server to bypass its Redis cache
+          // and recompute fresh (it still repopulates the cache afterwards).
+          if (shouldBypassServerCache()) {
+            return { ...headers, 'x-op-skip-cache': '1' };
+          }
+          return headers;
+        },
         fetch: (url, options) => {
           return fetch(url, {
             ...options,

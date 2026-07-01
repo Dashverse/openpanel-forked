@@ -95,8 +95,24 @@ function getClickhouseSettings(): ClickHouseSettings {
     getSafeJson<ClickHouseSettings>(process.env.CLICKHOUSE_SETTINGS || '{}') ||
     {};
 
+  // Per-user concurrent SELECT limit for the app's CH user. A dashboard full of
+  // report widgets fans out to many parallel chart/funnel queries on a cold load
+  // (and when the "Reload" button bypasses the Redis cache); CH's default of 10
+  // rejects the excess with "Too many simultaneous queries". Set this in prod to
+  // give that burst headroom. Unset = leave CH's own default untouched.
+  // (Inserts and profile reads set their own higher limits per-query.)
+  // Passed as a string — that's the @clickhouse/client setting type, and CH
+  // receives all HTTP settings as strings. Validate it's numeric so a bad value
+  // is ignored rather than sent to CH.
+  const rawQueryLimit = process.env.CLICKHOUSE_QUERY_LIMIT?.trim();
+  const queryLimit =
+    rawQueryLimit && Number.isFinite(Number(rawQueryLimit))
+      ? rawQueryLimit
+      : undefined;
+
   return {
     date_time_input_format: 'best_effort',
+    ...(queryLimit ? { max_concurrent_queries_for_user: queryLimit } : {}),
     ...(!process.env.CLICKHOUSE_SETTINGS_REMOVE_CONVERT_ANY_JOIN
       ? {
           query_plan_convert_any_join_to_semi_or_anti_join: 0,
@@ -108,7 +124,10 @@ function getClickhouseSettings(): ClickHouseSettings {
 
 export const CLICKHOUSE_OPTIONS: NodeClickHouseClientConfigOptions = {
   max_open_connections: 30,
-  request_timeout: parseInt(process.env.CLICKHOUSE_REQUEST_TIMEOUT || '3600000', 10),
+  request_timeout: Number.parseInt(
+    process.env.CLICKHOUSE_REQUEST_TIMEOUT || '3600000',
+    10,
+  ),
   keep_alive: {
     enabled: true,
     // Must be lower than server-side keep_alive_timeout (CH default 10s)
@@ -219,7 +238,7 @@ export const ch = new Proxy(originalCh, {
             // when multiple buffers flush simultaneously
             max_concurrent_queries_for_user: Number.parseInt(
               process.env.CLICKHOUSE_INSERT_QUERY_LIMIT || '50',
-              10
+              10,
             ),
             ...args[0].clickhouse_settings,
           };
@@ -259,8 +278,8 @@ export async function chQueryWithMeta<T extends Record<string, any>>(
         ...clickhouseSettings,
         max_concurrent_queries_for_user: Number.parseInt(
           process.env.CLICKHOUSE_PROFILE_QUERY_LIMIT || '50',
-          10
-        )
+          10,
+        ),
       }
     : clickhouseSettings;
 
@@ -339,7 +358,9 @@ export async function chQuery<T extends Record<string, any>>(
   clickhouseSettings?: ClickHouseSettings,
   bypassConcurrencyLimit = false,
 ): Promise<T[]> {
-  return (await chQueryWithMeta<T>(query, clickhouseSettings, bypassConcurrencyLimit)).data;
+  return (
+    await chQueryWithMeta<T>(query, clickhouseSettings, bypassConcurrencyLimit)
+  ).data;
 }
 
 export function formatClickhouseDate(

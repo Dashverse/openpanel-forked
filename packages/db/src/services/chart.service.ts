@@ -287,6 +287,19 @@ export function getSelectPropertyKey(
     )})))`;
   }
 
+  // For profile.properties.X without a materialized column, reference the
+  // aliased extracted column the profile JOIN must add (e.g. `properties.X`)
+  // instead of `profile.properties['X']`. The JOIN selecting the whole
+  // `properties` Map collides with `events.properties` whenever a funnel /
+  // conversion mixes a profile.* filter with an event-level properties.*
+  // filter — CH throws "ambiguous identifier 'properties'". Pairing this
+  // with the aliased SELECT in funnel/conversion services removes the
+  // collision by construction.
+  if (match === 'profile.properties') {
+    const key = property.replace('profile.properties.', '');
+    return `profile.\`properties.${key}\``;
+  }
+
   return `${match}['${property.replace(new RegExp(`^${match}.`), '')}']`;
 }
 
