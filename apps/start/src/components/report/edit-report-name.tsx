@@ -62,7 +62,7 @@ const EditReportName = ({ name }: Props) => {
   return (
     <button
       type="button"
-      className="flex cursor-pointer select-none items-center gap-2 text-xl font-medium h-8 group"
+      className="flex cursor-pointer select-none items-center gap-2 text-lg font-medium h-8 group"
       onClick={() => setIsEditing(true)}
     >
       {newName || 'Unnamed Report'}
