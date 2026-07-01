@@ -183,7 +183,7 @@ export default function ReportEditor({
         </div>
         <div className="flex flex-wrap items-center gap-2 px-4 py-3">
           <TimeWindowPicker
-            className="min-w-0"
+            segmented
             onChange={(value) => {
               dispatch(changeDateRanges(value));
             }}

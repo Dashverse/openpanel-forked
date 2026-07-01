@@ -28,6 +28,7 @@ type Props = {
   endDate: string | null;
   startDate: string | null;
   className?: string;
+  segmented?: boolean;
 };
 const VISIBLE_RANGES: IChartRange[] = [
   'lastHour',
@@ -48,6 +49,7 @@ export function TimeWindowPicker({
   endDate,
   onEndDateChange,
   className,
+  segmented,
 }: Props) {
   const isDateRangerPickerOpen = useRef(false);
   useOnPushModal('DateRangerPicker', (open) => {
@@ -90,6 +92,54 @@ export function TimeWindowPicker({
       },
     });
   }, [handleCustom]);
+
+  if (segmented) {
+    const segments: IChartRange[] = ['today', 'yesterday', '7d', '30d', '3m'];
+    const shortLabel: Partial<Record<IChartRange, string>> = {
+      today: 'Today',
+      yesterday: 'Yesterday',
+      '7d': '7D',
+      '30d': '30D',
+      '3m': '3M',
+    };
+    const segmentClass = (active: boolean) =>
+      cn(
+        'rounded-md px-2.5 py-1 text-sm font-medium transition-colors',
+        active
+          ? 'bg-def-200 text-foreground'
+          : 'text-muted-foreground hover:text-foreground',
+      );
+    return (
+      <div
+        className={cn(
+          'inline-flex items-center gap-0.5 rounded-lg border p-0.5',
+          className,
+        )}
+      >
+        {segments.map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onChange(key)}
+            className={segmentClass(value === key)}
+          >
+            {shortLabel[key]}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={handleCustom}
+          className={cn(
+            segmentClass(value === 'custom'),
+            'flex items-center gap-1',
+          )}
+        >
+          <CalendarIcon size={14} />
+          Custom
+        </button>
+      </div>
+    );
+  }
 
   return (
     <DropdownMenu>

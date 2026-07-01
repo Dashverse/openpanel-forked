@@ -521,7 +521,6 @@ function Component() {
     <PageContainer fluid>
       <PageHeader
         title={dashboard.name}
-        description="View and manage your reports"
         className="mb-0"
         actions={
           <>
