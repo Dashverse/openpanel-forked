@@ -7,7 +7,7 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { CopyIcon, MoreHorizontal, TrashIcon } from 'lucide-react';
+import { CopyIcon, MoreVertical, TrashIcon } from 'lucide-react';
 import * as React from 'react';
 
 export interface ReportEventMoreProps {
@@ -20,8 +20,12 @@ export function ReportEventMore({ onClick }: ReportEventMoreProps) {
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm">
-          <MoreHorizontal />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-6 shrink-0 text-muted-foreground"
+        >
+          <MoreVertical className="size-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-[200px]">
