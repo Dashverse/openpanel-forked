@@ -151,7 +151,7 @@ export function PropertyPicker({
       <PopoverTrigger asChild>{children}</PopoverTrigger>
       <PopoverPortal>
         <PopoverContent
-          className="w-[34em] max-sm:max-w-[100vw] p-0"
+          className="w-[30em] max-sm:max-w-[100vw] p-0"
           align="start"
         >
           <div className="flex">
