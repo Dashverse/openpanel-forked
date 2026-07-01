@@ -573,38 +573,38 @@ function Component() {
         }
       />
       <div className="row mb-4 flex-wrap items-center gap-2">
-        <div className="relative flex items-center">
-          <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
-          <Input
-            placeholder="Search reports..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-48"
-            style={{ paddingLeft: '2rem' }}
-          />
-        </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          icon={RefreshCw}
-          onClick={handleReload}
-          title={
-            lastUpdatedAt
-              ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
-              : 'Reload reports with fresh data'
-          }
-          className="text-muted-foreground max-md:hidden"
-        >
-          {lastUpdatedAt
-            ? `Updated ${new Date(lastUpdatedAt).toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-              })}`
-            : 'Reload'}
-        </Button>
+        <OverviewRange />
+        <OverviewInterval />
         <div className="row ml-auto gap-2">
-          <OverviewRange />
-          <OverviewInterval />
+          <div className="relative flex items-center">
+            <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
+            <Input
+              placeholder="Search reports..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-48"
+              style={{ paddingLeft: '2rem' }}
+            />
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={RefreshCw}
+            onClick={handleReload}
+            title={
+              lastUpdatedAt
+                ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
+                : 'Reload reports with fresh data'
+            }
+            className="text-muted-foreground max-md:hidden"
+          >
+            {lastUpdatedAt
+              ? new Date(lastUpdatedAt).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })
+              : 'Reload'}
+          </Button>
         </div>
       </div>
 
