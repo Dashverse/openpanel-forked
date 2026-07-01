@@ -86,13 +86,16 @@ export function TimeWindowPicker({
           (tw) => tw.shortcut && event.key === tw.shortcut.toLowerCase(),
         );
         if (match?.key === 'custom') {
-          handleCustom();
+          // Segmented mode uses the anchored popover, opened via click only.
+          if (!segmented) {
+            handleCustom();
+          }
         } else if (match) {
           onChange(match.key);
         }
       },
     });
-  }, [handleCustom]);
+  }, [handleCustom, segmented]);
 
   if (segmented) {
     const segments: IChartRange[] = ['today', 'yesterday', '7d', '30d', '3m'];
@@ -121,6 +124,7 @@ export function TimeWindowPicker({
           <button
             key={key}
             type="button"
+            aria-pressed={value === key}
             onClick={() => onChange(key)}
             className={segmentClass(value === key)}
           >

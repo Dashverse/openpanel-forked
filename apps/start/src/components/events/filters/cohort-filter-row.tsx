@@ -46,7 +46,12 @@ export function CohortFilterRow({
           {cohort?.name ?? cohortId ?? filter.name}
         </RenderDots>
       </div>
-      <Button variant="ghost" size="icon" onClick={onRemove}>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Remove filter"
+        onClick={onRemove}
+      >
         <Trash2 className="size-4" />
       </Button>
     </div>

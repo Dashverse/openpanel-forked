@@ -101,7 +101,7 @@ export default function OverviewFilters({
               ? ['event']
               : mode === 'profile'
                 ? ['profile']
-                : undefined
+                : ['event', 'profile']
           }
           exclude={
             enableEventsFilter
