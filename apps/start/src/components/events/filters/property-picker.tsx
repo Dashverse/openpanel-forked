@@ -209,7 +209,7 @@ export function PropertyPicker({
                   <VirtualList
                     height={300}
                     data={filteredActions}
-                    itemHeight={44}
+                    itemHeight={46}
                     itemKey="value"
                   >
                     {(action) => (
@@ -217,9 +217,11 @@ export function PropertyPicker({
                         key={action.value}
                         value={action.value}
                         onSelect={() => handleSelect(action)}
-                        className="col cursor-pointer items-start gap-px"
+                        className="col mx-1 cursor-pointer items-start gap-px"
                       >
-                        <div className="font-medium">{action.label}</div>
+                        <div className="text-sm font-medium">
+                          {action.label}
+                        </div>
                         {action.description && (
                           <div className="text-xs text-muted-foreground">
                             {action.description}
