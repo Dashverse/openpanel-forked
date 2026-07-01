@@ -1,3 +1,4 @@
+import { CustomDateRangePopover } from '@/components/custom-date-range-popover';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -24,7 +25,7 @@ type Props = {
   value: IChartRange;
   onChange: (value: IChartRange) => void;
   onStartDateChange: (date: string) => void;
-  onEndDateChange: (date: string) => void;
+  onEndDateChange: (date: string | null) => void;
   endDate: string | null;
   startDate: string | null;
   className?: string;
@@ -126,9 +127,14 @@ export function TimeWindowPicker({
             {shortLabel[key]}
           </button>
         ))}
-        <button
-          type="button"
-          onClick={handleCustom}
+        <CustomDateRangePopover
+          startDate={startDate}
+          endDate={endDate}
+          onApply={(start, end) => {
+            onStartDateChange(start);
+            onEndDateChange(end);
+            onChange('custom');
+          }}
           className={cn(
             segmentClass(value === 'custom'),
             'flex items-center gap-1',
@@ -136,7 +142,7 @@ export function TimeWindowPicker({
         >
           <CalendarIcon size={14} />
           Custom
-        </button>
+        </CustomDateRangePopover>
       </div>
     );
   }

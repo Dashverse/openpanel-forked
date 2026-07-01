@@ -21,7 +21,7 @@ export function ChatReport({
     props.report.chartType,
   );
   const [startDate, setStartDate] = useState<string>(props.report.startDate);
-  const [endDate, setEndDate] = useState<string>(props.report.endDate);
+  const [endDate, setEndDate] = useState<string | null>(props.report.endDate);
   const [range, setRange] = useState<IChartRange>(props.report.range);
   const [interval, setInterval] = useState<IInterval>(props.report.interval);
   const report = {

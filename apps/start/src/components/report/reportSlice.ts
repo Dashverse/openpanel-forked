@@ -275,7 +275,7 @@ export const reportSlice = createSlice({
     },
 
     // Date range
-    changeEndDate: (state, action: PayloadAction<string>) => {
+    changeEndDate: (state, action: PayloadAction<string | null>) => {
       state.dirty = true;
       state.endDate = action.payload;
 
