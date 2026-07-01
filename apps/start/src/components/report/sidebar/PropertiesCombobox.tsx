@@ -9,8 +9,8 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { useAppParams } from '@/hooks/use-app-params';
-import { useEventProperties } from '@/hooks/use-event-properties';
 import { useCohorts } from '@/hooks/use-cohorts';
+import { useEventProperties } from '@/hooks/use-event-properties';
 import type { IChartEvent } from '@openpanel/validation';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
@@ -86,11 +86,10 @@ export function PropertiesCombobox({
     isLoading: isLoadingCohorts,
     isError: isErrorCohorts,
     refetch: refetchCohorts,
-  } = useCohorts(
-    { projectId, includeCount: false },
-    { enabled: open }
+  } = useCohorts({ projectId, includeCount: false }, { enabled: open });
+  const [state, setState] = useState<'index' | 'event' | 'profile' | 'cohort'>(
+    'index',
   );
-  const [state, setState] = useState<'index' | 'event' | 'profile' | 'cohort'>('index');
   const [search, setSearch] = useState('');
   const [direction, setDirection] = useState<'forward' | 'backward'>('forward');
 
@@ -131,7 +130,9 @@ export function PropertiesCombobox({
       description: property.split('.').slice(0, -1).join('.'),
     }));
 
-  const handleStateChange = (newState: 'index' | 'event' | 'profile' | 'cohort') => {
+  const handleStateChange = (
+    newState: 'index' | 'event' | 'profile' | 'cohort',
+  ) => {
     setDirection(newState === 'index' ? 'backward' : 'forward');
     setState(newState);
   };
@@ -320,7 +321,7 @@ export function PropertiesCombobox({
 
   const renderCohort = () => {
     const filteredCohorts = cohorts.filter((cohort) =>
-      cohort.name.toLowerCase().includes(search.toLowerCase())
+      cohort.name.toLowerCase().includes(search.toLowerCase()),
     );
 
     const cohortActions = filteredCohorts.map((cohort) => ({

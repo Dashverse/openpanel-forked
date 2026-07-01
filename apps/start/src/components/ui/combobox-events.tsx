@@ -175,7 +175,7 @@ export function ComboboxEvents<
       </PopoverTrigger>
       <PopoverPortal>
         <PopoverContent
-          className="w-full max-w-[33em] max-sm:max-w-[100vw] p-0"
+          className="w-full max-w-[22em] max-sm:max-w-[100vw] p-0"
           align={align}
           portal={portal}
         >
@@ -221,7 +221,7 @@ export function ComboboxEvents<
                   })}
                   itemHeight={32}
                   itemKey="value"
-                  className="w-[33em] max-sm:max-w-[100vw]"
+                  className="w-[26em] max-sm:max-w-[100vw]"
                 >
                   {(item) => {
                     return (

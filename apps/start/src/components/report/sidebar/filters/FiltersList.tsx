@@ -1,7 +1,7 @@
 import type { IChartEvent } from '@openpanel/validation';
 
-import { FilterItem } from './FilterItem';
 import { CohortFilterItem } from './CohortFilterItem';
+import { FilterItem } from './FilterItem';
 
 interface ReportEventFiltersProps {
   event: IChartEvent;

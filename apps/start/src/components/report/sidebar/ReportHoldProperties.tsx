@@ -1,10 +1,12 @@
 import { useDispatch, useSelector } from '@/redux';
 import { LockIcon, XIcon } from 'lucide-react';
 
+import { PropertyPicker } from '@/components/property-picker';
+import { useAppParams } from '@/hooks/use-app-params';
 import { addHoldProperty, removeHoldProperty } from '../reportSlice';
-import { PropertiesCombobox } from './PropertiesCombobox';
 
 export function ReportHoldProperties() {
+  const { projectId } = useAppParams();
   const holdProperties = useSelector((state) => state.report.holdProperties);
   const dispatch = useDispatch();
 
@@ -31,23 +33,21 @@ export function ReportHoldProperties() {
           </div>
         ))}
 
-        <PropertiesCombobox
+        <PropertyPicker
+          projectId={projectId}
+          categories={['event']}
+          exclude={holdProperties}
           onSelect={(action) => {
             dispatch(addHoldProperty(action.value));
           }}
-          exclude={holdProperties}
-          mode="events"
         >
-          {(setOpen) => (
-            <button
-              onClick={() => setOpen((p) => !p)}
-              type="button"
-              className="flex h-8 items-center gap-1 rounded-md border border-border bg-card px-2 text-sm font-medium leading-none"
-            >
-              <LockIcon size={12} /> Hold property constant
-            </button>
-          )}
-        </PropertiesCombobox>
+          <button
+            type="button"
+            className="flex h-8 items-center gap-1 rounded-md border border-border bg-card px-2 text-sm font-medium leading-none"
+          >
+            <LockIcon size={12} /> Hold property constant
+          </button>
+        </PropertyPicker>
       </div>
     </div>
   );
