@@ -1,17 +1,17 @@
+import { ColorSquare } from '@/components/color-square';
+import { PropertyPicker } from '@/components/property-picker';
+import { PureFilterItem } from '@/components/report/sidebar/filters/FilterItem';
 import { Button } from '@/components/ui/button';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useEventNames } from '@/hooks/use-event-names';
 import type {
-  ICustomEventDefinition,
-  ICustomEventCriteria,
   IChartEventFilter,
+  ICustomEventCriteria,
+  ICustomEventDefinition,
 } from '@openpanel/validation';
-import { PlusIcon, TrashIcon, FilterIcon } from 'lucide-react';
+import { FilterIcon, PlusIcon, TrashIcon } from 'lucide-react';
 import { useState } from 'react';
-import { PureFilterItem } from '@/components/report/sidebar/filters/FilterItem';
-import { PropertiesCombobox } from '@/components/report/sidebar/PropertiesCombobox';
-import { ColorSquare } from '@/components/color-square';
 
 interface CustomEventBuilderProps {
   value: ICustomEventDefinition;
@@ -185,7 +185,9 @@ function EventCriteriaItem({
         <div className="flex-1">
           <ComboboxAdvanced
             value={criteria.name ? [criteria.name] : []}
-            onChange={(values) => onChange({ ...criteria, name: values[0] || '' })}
+            onChange={(values) =>
+              onChange({ ...criteria, name: values[0] || '' })
+            }
             placeholder="Select event..."
             items={eventNames}
             renderLabel={(item) => (
@@ -243,26 +245,24 @@ function EventCriteriaItem({
             </div>
           )}
 
-          <PropertiesCombobox
-            event={{ name: criteria.name, id: 'custom-event' } as any}
+          <PropertyPicker
+            projectId={projectId}
+            event={criteria.name}
+            categories={['event']}
             onSelect={(action) => {
               addFilter(action.value);
             }}
-            mode="events"
           >
-            {(setOpen) => (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setOpen(true)}
-                icon={PlusIcon}
-                disabled={!criteria.name}
-              >
-                Add filter
-              </Button>
-            )}
-          </PropertiesCombobox>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              icon={PlusIcon}
+              disabled={!criteria.name}
+            >
+              Add filter
+            </Button>
+          </PropertyPicker>
         </div>
       )}
     </div>

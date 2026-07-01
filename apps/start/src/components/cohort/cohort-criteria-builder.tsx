@@ -1,24 +1,24 @@
+import { ColorSquare } from '@/components/color-square';
+import { InputWithLabel } from '@/components/forms/input-with-label';
+import { PropertyPicker } from '@/components/property-picker';
+import { PureFilterItem } from '@/components/report/sidebar/filters/FilterItem';
 import { Button } from '@/components/ui/button';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
-import { InputWithLabel } from '@/components/forms/input-with-label';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useEventNames } from '@/hooks/use-event-names';
 import { operators } from '@openpanel/constants';
 import type {
   CohortDefinition,
   EventBasedCohortDefinition,
-  PropertyBasedCohortDefinition,
   EventCriteria,
   IChartEventFilter,
+  PropertyBasedCohortDefinition,
 } from '@openpanel/validation';
 import { mapKeys } from '@openpanel/validation';
-import { PlusIcon, TrashIcon, FilterIcon } from 'lucide-react';
-import { useState } from 'react';
-import { ColorSquare } from '@/components/color-square';
+import { FilterIcon, PlusIcon, TrashIcon } from 'lucide-react';
 import { SlidersHorizontal } from 'lucide-react';
-import { PureFilterItem } from '@/components/report/sidebar/filters/FilterItem';
-import { PropertiesCombobox } from '@/components/report/sidebar/PropertiesCombobox';
+import { useState } from 'react';
 
 interface CohortCriteriaBuilderProps {
   definition: CohortDefinition;
@@ -209,6 +209,7 @@ function EventCriteriaItem({
   onRemove,
   eventNames,
 }: EventCriteriaItemProps) {
+  const { projectId } = useAppParams();
   const addFilter = (propertyName: string) => {
     onChange({
       ...criteria,
@@ -314,7 +315,7 @@ function EventCriteriaItem({
                 ...criteria,
                 frequency: {
                   ...criteria.frequency!,
-                  count: parseInt(e.target.value) || 1,
+                  count: Number.parseInt(e.target.value) || 1,
                 },
               })
             }
@@ -460,7 +461,9 @@ function EventCriteriaItem({
       {/* Filters */}
       {criteria.filters.length > 0 && (
         <div className="mb-2">
-          <label className="mb-2 block text-sm font-medium">Event Filters</label>
+          <label className="mb-2 block text-sm font-medium">
+            Event Filters
+          </label>
           <div className="space-y-2">
             {criteria.filters.map((filter) => (
               <PureFilterItem
@@ -477,26 +480,24 @@ function EventCriteriaItem({
         </div>
       )}
 
-      <PropertiesCombobox
-        event={{ name: criteria.name, id: 'cohort-event' } as any}
+      <PropertyPicker
+        projectId={projectId}
+        event={criteria.name}
+        categories={['event']}
         onSelect={(action) => {
           addFilter(action.value);
         }}
-        mode="events"
       >
-        {(setOpen) => (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setOpen(true)}
-            icon={PlusIcon}
-            disabled={!criteria.name}
-          >
-            Add filter
-          </Button>
-        )}
-      </PropertiesCombobox>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          icon={PlusIcon}
+          disabled={!criteria.name}
+        >
+          Add filter
+        </Button>
+      </PropertyPicker>
     </div>
   );
 }
@@ -510,6 +511,7 @@ function PropertyBasedBuilder({
   definition,
   onChange,
 }: PropertyBasedBuilderProps) {
+  const { projectId } = useAppParams();
   const addPropertyFilter = (propertyName: string) => {
     onChange({
       ...definition,
@@ -616,23 +618,17 @@ function PropertyBasedBuilder({
         </div>
       )}
 
-      <PropertiesCombobox
+      <PropertyPicker
+        projectId={projectId}
+        categories={['profile']}
         onSelect={(action) => {
           addPropertyFilter(action.value);
         }}
-        mode="profile"
       >
-        {(setOpen) => (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => setOpen(true)}
-            icon={PlusIcon}
-          >
-            Add property filter
-          </Button>
-        )}
-      </PropertiesCombobox>
+        <Button type="button" variant="outline" icon={PlusIcon}>
+          Add property filter
+        </Button>
+      </PropertyPicker>
     </div>
   );
 }

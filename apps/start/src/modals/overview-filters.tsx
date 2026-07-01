@@ -18,7 +18,7 @@ import type {
 } from '@openpanel/validation';
 
 import { OriginFilter } from '@/components/overview/filters/origin-filter';
-import { PropertiesCombobox } from '@/components/report/sidebar/PropertiesCombobox';
+import { PropertyPicker } from '@/components/property-picker';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { useAppParams } from '@/hooks/use-app-params';
 import { cn } from '@/utils/cn';
@@ -94,8 +94,15 @@ export default function OverviewFilters({
             );
           })}
         </div>
-        <PropertiesCombobox
-          mode={mode}
+        <PropertyPicker
+          projectId={projectId}
+          categories={
+            mode === 'events'
+              ? ['event']
+              : mode === 'profile'
+                ? ['profile']
+                : undefined
+          }
           exclude={
             enableEventsFilter
               ? []
@@ -111,18 +118,15 @@ export default function OverviewFilters({
             setFilter(action.value, [], 'is');
           }}
         >
-          {(setOpen) => (
-            <Button
-              onClick={() => setOpen((p) => !p)}
-              variant="outline"
-              size="lg"
-              className="w-full"
-              icon={FilterIcon}
-            >
-              Add filter
-            </Button>
-          )}
-        </PropertiesCombobox>
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full"
+            icon={FilterIcon}
+          >
+            Add filter
+          </Button>
+        </PropertyPicker>
       </div>
     </SheetContent>
   );
