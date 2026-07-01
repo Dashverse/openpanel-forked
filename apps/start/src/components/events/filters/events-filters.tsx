@@ -61,9 +61,11 @@ export function EventsFilters() {
                 key={filter.name}
                 projectId={projectId}
                 filter={filter}
-                onChangeOperator={(operator) =>
-                  setFilter(filter.name, filter.value, operator)
-                }
+                onChangeOperator={(operator) => {
+                  if (operator !== filter.operator) {
+                    setFilter(filter.name, filter.value, operator);
+                  }
+                }}
                 onRemove={() => removeFilter(filter.name)}
               />
             );
@@ -75,9 +77,11 @@ export function EventsFilters() {
               projectId={projectId}
               event={selectedEvent}
               filter={filter}
-              onChangeOperator={(operator) =>
-                setFilter(filter.name, filter.value, operator)
-              }
+              onChangeOperator={(operator) => {
+                if (operator !== filter.operator) {
+                  setFilter(filter.name, filter.value, operator);
+                }
+              }}
               onChangeValue={(value) =>
                 setFilter(filter.name, value, filter.operator)
               }

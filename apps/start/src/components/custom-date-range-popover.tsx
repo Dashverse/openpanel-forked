@@ -30,7 +30,9 @@ export function CustomDateRangePopover({
   children,
 }: CustomDateRangePopoverProps) {
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<Mode>('fixed');
+  const [mode, setMode] = useState<Mode>(
+    startDate && !endDate ? 'since' : 'fixed',
+  );
   const [from, setFrom] = useState<Date | undefined>(
     startDate ? new Date(startDate) : undefined,
   );
@@ -55,8 +57,17 @@ export function CustomDateRangePopover({
     setOpen(false);
   };
 
+  const handleOpenChange = (next: boolean) => {
+    if (next) {
+      setMode(startDate && !endDate ? 'since' : 'fixed');
+      setFrom(startDate ? new Date(startDate) : undefined);
+      setTo(endDate ? new Date(endDate) : undefined);
+    }
+    setOpen(next);
+  };
+
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <button type="button" className={className}>
           {children}

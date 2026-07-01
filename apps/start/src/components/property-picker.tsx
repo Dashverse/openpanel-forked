@@ -38,6 +38,8 @@ interface PropertyPickerProps {
   children: ReactNode;
 }
 
+const EMPTY_EXCLUDE: string[] = [];
+
 const CATEGORIES: { id: Category; label: string; icon: LucideIcon }[] = [
   { id: 'event', label: 'Event properties', icon: DatabaseIcon },
   { id: 'profile', label: 'Profile properties', icon: UserIcon },
@@ -47,7 +49,7 @@ const CATEGORIES: { id: Category; label: string; icon: LucideIcon }[] = [
 export function PropertyPicker({
   projectId,
   event,
-  exclude = [],
+  exclude = EMPTY_EXCLUDE,
   categories = ['event', 'profile', 'cohort'],
   onSelect,
   children,
@@ -62,13 +64,23 @@ export function PropertyPicker({
     isLoading: isLoadingProperties,
     isError: isErrorProperties,
     refetch: refetchProperties,
-  } = useEventProperties({ event, projectId });
+  } = useEventProperties(
+    { event, projectId },
+    {
+      enabled:
+        open &&
+        (categories.includes('event') || categories.includes('profile')),
+    },
+  );
   const {
     items: cohorts,
     isLoading: isLoadingCohorts,
     isError: isErrorCohorts,
     refetch: refetchCohorts,
-  } = useCohorts({ projectId, includeCount: false }, { enabled: open });
+  } = useCohorts(
+    { projectId, includeCount: false },
+    { enabled: open && categories.includes('cohort') },
+  );
 
   const shouldShowProperty = (property: string) =>
     !exclude.find((ex) =>
@@ -110,7 +122,11 @@ export function PropertyPicker({
       cohorts.map((cohort) => ({
         value: `cohort:${cohort.id}`,
         label: cohort.name,
-        description: cohort.description || `${cohort.profileCount || 0} users`,
+        description:
+          cohort.description ||
+          (typeof cohort.profileCount === 'number'
+            ? `${cohort.profileCount} users`
+            : ''),
         cohortId: cohort.id,
       })),
     [cohorts],

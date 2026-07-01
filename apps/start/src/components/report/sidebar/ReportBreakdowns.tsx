@@ -8,7 +8,6 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useCohorts } from '@/hooks/use-cohorts';
-import { useEventProperties } from '@/hooks/use-event-properties';
 import { useDispatch, useSelector } from '@/redux';
 import { ChevronsUpDownIcon, SplitIcon, UsersIcon } from 'lucide-react';
 
@@ -81,7 +80,9 @@ export function ReportBreakdowns() {
           const cohort = cohortId
             ? cohorts.find((c) => c.id === cohortId)
             : null;
-          const displayName = cohort ? cohort.name : item.name;
+          const displayName = isCohortBreakdown
+            ? (cohort?.name ?? cohortId ?? item.name)
+            : item.name;
 
           return (
             <div

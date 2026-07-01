@@ -172,7 +172,7 @@ export function SidebarContainer({
             )}
           </div>
         </div>
-        <div className="shrink-0 px-4 pb-4">
+        <div className="shrink-0 px-4 pb-4 group-data-[collapsed=true]/sidebar:lg:px-0">
           <button
             type="button"
             onClick={() => setCollapsed(!collapsed)}

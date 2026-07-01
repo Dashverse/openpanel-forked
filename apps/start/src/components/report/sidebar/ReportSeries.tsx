@@ -86,6 +86,8 @@ function SortableSeries({
 
   const dragHandle = (
     <button
+      type="button"
+      aria-label="Drag to reorder"
       className="shrink-0 cursor-grab active:cursor-grabbing"
       {...listeners}
     >

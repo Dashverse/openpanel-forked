@@ -162,14 +162,19 @@ export default function ReportEditor({
               <ReportSidebar />
             </div>
           )}
-          <div className="mt-auto shrink-0 px-4 pb-4 pt-2">
+          <div
+            className={cn(
+              'mt-auto shrink-0 pb-4 pt-2',
+              isPanelOpen ? 'px-4' : 'px-1',
+            )}
+          >
             <button
               type="button"
               onClick={() => setIsPanelOpen((open) => !open)}
               title={isPanelOpen ? 'Collapse' : 'Expand'}
               className={cn(
-                'flex w-full items-center gap-2 rounded-md px-3 py-2 text-[13px] font-medium text-muted-foreground transition-all hover:bg-def-200',
-                isPanelOpen ? 'justify-start' : 'justify-center',
+                'flex w-full items-center gap-2 rounded-md py-2 text-[13px] font-medium text-muted-foreground transition-all hover:bg-def-200',
+                isPanelOpen ? 'justify-start px-3' : 'justify-center px-0',
               )}
             >
               {isPanelOpen ? (

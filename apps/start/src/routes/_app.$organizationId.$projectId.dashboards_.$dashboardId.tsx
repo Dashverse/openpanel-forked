@@ -596,14 +596,16 @@ function Component() {
                 ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
                 : 'Reload reports with fresh data'
             }
-            className="text-muted-foreground max-md:hidden"
+            className="text-muted-foreground"
           >
-            {lastUpdatedAt
-              ? new Date(lastUpdatedAt).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })
-              : 'Reload'}
+            <span className="max-md:hidden">
+              {lastUpdatedAt
+                ? new Date(lastUpdatedAt).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : 'Reload'}
+            </span>
           </Button>
         </div>
       </div>
