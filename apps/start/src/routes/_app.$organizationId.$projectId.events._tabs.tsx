@@ -1,4 +1,3 @@
-import { PageHeader } from '@/components/page-header';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { usePageTabs } from '@/hooks/use-page-tabs';
 import { PAGE_TITLES, createProjectTitle } from '@/utils/title';
@@ -37,17 +36,8 @@ function Component() {
   };
 
   return (
-    <div className="container p-8">
-      <PageHeader
-        title="Events"
-        description="Paginate through your events, conversions and overall stats"
-      />
-
-      <Tabs
-        value={activeTab}
-        onValueChange={handleTabChange}
-        className="mt-2 mb-8"
-      >
+    <div className="container p-8 pt-4">
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="mb-4">
         <TabsList>
           {tabs.map((tab) => (
             <TabsTrigger key={tab.id} value={tab.id}>
