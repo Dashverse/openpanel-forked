@@ -607,9 +607,10 @@ export async function getEventList(options: GetEventListOptions) {
     sb.where.created_at = `toDate(created_at) BETWEEN toDate('${formatClickhouseDate(startDate)}') AND toDate('${formatClickhouseDate(endDate)}')`;
   }
 
-  if (events && events.length > 0) {
+  const selectedEventNames = events?.includes('*') ? [] : (events ?? []);
+  if (selectedEventNames.length > 0) {
     sb.where.events = `name IN (${join(
-      events.map((event) => sqlstring.escape(event)),
+      selectedEventNames.map((event) => sqlstring.escape(event)),
       ',',
     )})`;
   }
@@ -675,9 +676,10 @@ export async function getEventsCount({
     sb.where.created_at = `toDate(created_at) BETWEEN toDate('${formatClickhouseDate(startDate)}') AND toDate('${formatClickhouseDate(endDate)}')`;
   }
 
-  if (events && events.length > 0) {
+  const selectedEventNames = events?.includes('*') ? [] : (events ?? []);
+  if (selectedEventNames.length > 0) {
     sb.where.events = `name IN (${join(
-      events.map((event) => sqlstring.escape(event)),
+      selectedEventNames.map((event) => sqlstring.escape(event)),
       ',',
     )})`;
   }
