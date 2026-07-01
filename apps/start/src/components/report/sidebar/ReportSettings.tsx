@@ -118,9 +118,7 @@ export function ReportSettings() {
               value={measuring || 'conversion_rate'}
               onChange={(val) => {
                 dispatch(
-                  changeMeasuring(
-                    val as 'conversion_rate' | 'time_to_convert',
-                  ),
+                  changeMeasuring(val as 'conversion_rate' | 'time_to_convert'),
                 );
               }}
               items={[
@@ -189,9 +187,7 @@ function FunnelWindowInput({
 
   const displayValue = (() => {
     if (!funnelWindow) return '';
-    return unit === 'days'
-      ? String(funnelWindow / 24)
-      : String(funnelWindow);
+    return unit === 'days' ? String(funnelWindow / 24) : String(funnelWindow);
   })();
 
   const handleValueChange = (value: string) => {

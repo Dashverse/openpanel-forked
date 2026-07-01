@@ -334,19 +334,13 @@ export const reportSlice = createSlice({
         ...action.payload,
       });
     },
-    removeGlobalFilter: (
-      state,
-      action: PayloadAction<{ id: string }>,
-    ) => {
+    removeGlobalFilter: (state, action: PayloadAction<{ id: string }>) => {
       state.dirty = true;
       state.globalFilters = state.globalFilters.filter(
         (f) => f.id !== action.payload.id,
       );
     },
-    changeGlobalFilter: (
-      state,
-      action: PayloadAction<IChartEventFilter>,
-    ) => {
+    changeGlobalFilter: (state, action: PayloadAction<IChartEventFilter>) => {
       state.dirty = true;
       state.globalFilters = state.globalFilters.map((f) =>
         f.id === action.payload.id ? action.payload : f,

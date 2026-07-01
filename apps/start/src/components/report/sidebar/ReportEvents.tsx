@@ -1,4 +1,5 @@
 import { ColorSquare } from '@/components/color-square';
+import { PropertyPicker } from '@/components/property-picker';
 import { Button } from '@/components/ui/button';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { Input } from '@/components/ui/input';
@@ -36,7 +37,6 @@ import {
   reorderEvents,
 } from '../reportSlice';
 import { EventPropertiesCombobox } from './EventPropertiesCombobox';
-import { PropertiesCombobox } from './PropertiesCombobox';
 import type { ReportEventMoreProps } from './ReportEventMore';
 import { ReportEventMore } from './ReportEventMore';
 import { FiltersList } from './filters/FiltersList';
@@ -56,6 +56,7 @@ function SortableEvent({
   isSelectManyEvents: boolean;
 } & React.HTMLAttributes<HTMLDivElement>) {
   const dispatch = useDispatch();
+  const { projectId } = useAppParams();
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id: event.id ?? '' });
 
@@ -97,12 +98,10 @@ function SortableEvent({
             />
           )}
           {showAddFilter && (
-            <PropertiesCombobox
-              event={event}
+            <PropertyPicker
+              projectId={projectId}
+              event={event.name}
               onSelect={(action) => {
-                // Check if it's a cohort filter type
-                const isCohort = action.value === 'cohort';
-
                 dispatch(
                   changeEvent({
                     ...event,
@@ -110,26 +109,23 @@ function SortableEvent({
                       ...event.filters,
                       {
                         id: shortId(),
-                        name: isCohort ? 'Cohort' : action.value,
-                        operator: isCohort ? 'inCohort' : 'is',
+                        name: action.value,
+                        operator: action.cohortId ? 'inCohort' : 'is',
                         value: [],
-                        // For cohort filters, cohortId will be set later in CohortFilterItem
+                        cohortId: action.cohortId,
                       },
                     ],
                   }),
                 );
               }}
             >
-              {(setOpen) => (
-                <button
-                  onClick={() => setOpen((p) => !p)}
-                  type="button"
-                  className="flex items-center gap-1 rounded-md border border-border bg-card p-1 px-2 text-sm font-medium leading-none"
-                >
-                  <FilterIcon size={12} /> Add filter
-                </button>
-              )}
-            </PropertiesCombobox>
+              <button
+                type="button"
+                className="flex items-center gap-1 rounded-md border border-border bg-card p-1 px-2 text-sm font-medium leading-none"
+              >
+                <FilterIcon size={12} /> Add filter
+              </button>
+            </PropertyPicker>
           )}
 
           {showSegment && event.segment.startsWith('property_') && (

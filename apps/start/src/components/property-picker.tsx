@@ -33,6 +33,7 @@ interface PropertyPickerProps {
   projectId: string;
   event?: string;
   exclude?: string[];
+  categories?: Category[];
   onSelect: (action: PropertyAction) => void;
   children: ReactNode;
 }
@@ -47,11 +48,13 @@ export function PropertyPicker({
   projectId,
   event,
   exclude = [],
+  categories = ['event', 'profile', 'cohort'],
   onSelect,
   children,
 }: PropertyPickerProps) {
+  const visibleCategories = CATEGORIES.filter((c) => categories.includes(c.id));
   const [open, setOpen] = useState(false);
-  const [category, setCategory] = useState<Category>('event');
+  const [category, setCategory] = useState<Category>(categories[0] ?? 'event');
   const [search, setSearch] = useState('');
 
   const {
@@ -143,7 +146,7 @@ export function PropertyPicker({
       onOpenChange={(next) => {
         setOpen(next);
         if (!next) {
-          setCategory('event');
+          setCategory(categories[0] ?? 'event');
           setSearch('');
         }
       }}
@@ -155,27 +158,29 @@ export function PropertyPicker({
           align="start"
         >
           <div className="flex">
-            <div className="flex w-40 shrink-0 flex-col gap-0.5 border-r p-1">
-              {CATEGORIES.map(({ id, label: title, icon: Icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => {
-                    setCategory(id);
-                    setSearch('');
-                  }}
-                  className={cn(
-                    'flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm',
-                    category === id
-                      ? 'bg-accent text-accent-foreground'
-                      : 'text-muted-foreground hover:bg-accent/50',
-                  )}
-                >
-                  <Icon className="size-4 shrink-0" />
-                  <span className="truncate">{title}</span>
-                </button>
-              ))}
-            </div>
+            {visibleCategories.length > 1 && (
+              <div className="flex w-40 shrink-0 flex-col gap-0.5 border-r p-1">
+                {visibleCategories.map(({ id, label: title, icon: Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => {
+                      setCategory(id);
+                      setSearch('');
+                    }}
+                    className={cn(
+                      'flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm',
+                      category === id
+                        ? 'bg-accent text-accent-foreground'
+                        : 'text-muted-foreground hover:bg-accent/50',
+                    )}
+                  >
+                    <Icon className="size-4 shrink-0" />
+                    <span className="truncate">{title}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="min-w-0 flex-1">
               <Command shouldFilter={false}>
                 <CommandInput
@@ -206,30 +211,32 @@ export function PropertyPicker({
                     No {label} found
                   </div>
                 ) : (
-                  <VirtualList
-                    height={300}
-                    data={filteredActions}
-                    itemHeight={46}
-                    itemKey="value"
-                  >
-                    {(action) => (
-                      <CommandItem
-                        key={action.value}
-                        value={action.value}
-                        onSelect={() => handleSelect(action)}
-                        className="col mx-1 cursor-pointer items-start gap-px"
-                      >
-                        <div className="text-sm font-medium">
-                          {action.label}
-                        </div>
-                        {action.description && (
-                          <div className="text-xs text-muted-foreground">
-                            {action.description}
+                  <div className="py-1">
+                    <VirtualList
+                      height={300}
+                      data={filteredActions}
+                      itemHeight={46}
+                      itemKey="value"
+                    >
+                      {(action) => (
+                        <CommandItem
+                          key={action.value}
+                          value={action.value}
+                          onSelect={() => handleSelect(action)}
+                          className="col mx-1.5 cursor-pointer items-start gap-px"
+                        >
+                          <div className="text-sm font-medium">
+                            {action.label}
                           </div>
-                        )}
-                      </CommandItem>
-                    )}
-                  </VirtualList>
+                          {action.description && (
+                            <div className="text-xs text-muted-foreground">
+                              {action.description}
+                            </div>
+                          )}
+                        </CommandItem>
+                      )}
+                    </VirtualList>
+                  </div>
                 )}
               </Command>
             </div>

@@ -1,4 +1,5 @@
 import { ColorSquare } from '@/components/color-square';
+import { PropertyPicker } from '@/components/property-picker';
 import { Button } from '@/components/ui/button';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { Input } from '@/components/ui/input';
@@ -41,7 +42,6 @@ import {
   reorderEvents,
 } from '../reportSlice';
 import { EventPropertiesCombobox } from './EventPropertiesCombobox';
-import { PropertiesCombobox } from './PropertiesCombobox';
 import type { ReportEventMoreProps } from './ReportEventMore';
 import { ReportEventMore } from './ReportEventMore';
 import { FiltersList } from './filters/FiltersList';
@@ -63,6 +63,7 @@ function SortableSeries({
   isSelectManyEvents: boolean;
 } & React.HTMLAttributes<HTMLDivElement>) {
   const dispatch = useDispatch();
+  const { projectId } = useAppParams();
   const eventId = 'type' in event ? event.id : (event as IChartEvent).id;
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id: eventId ?? '' });
@@ -127,8 +128,9 @@ function SortableSeries({
             />
           )}
           {showAddFilter && (
-            <PropertiesCombobox
-              event={chartEvent}
+            <PropertyPicker
+              projectId={projectId}
+              event={chartEvent.name}
               onSelect={(action) => {
                 dispatch(
                   changeEvent({
@@ -138,24 +140,22 @@ function SortableSeries({
                       {
                         id: shortId(),
                         name: action.value,
-                        operator: 'is',
+                        operator: action.cohortId ? 'inCohort' : 'is',
                         value: [],
+                        cohortId: action.cohortId,
                       },
                     ],
                   }),
                 );
               }}
             >
-              {(setOpen) => (
-                <button
-                  onClick={() => setOpen((p) => !p)}
-                  type="button"
-                  className="flex h-8 items-center gap-1 rounded-md border border-border bg-card px-2 text-sm font-medium leading-none"
-                >
-                  <FilterIcon size={12} /> Add filter
-                </button>
-              )}
-            </PropertiesCombobox>
+              <button
+                type="button"
+                className="flex h-8 items-center gap-1 rounded-md border border-border bg-card px-2 text-sm font-medium leading-none"
+              >
+                <FilterIcon size={12} /> Add filter
+              </button>
+            </PropertyPicker>
           )}
 
           {showSegment && chartEvent.segment.startsWith('property_') && (

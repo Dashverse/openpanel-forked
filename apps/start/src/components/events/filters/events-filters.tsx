@@ -1,3 +1,4 @@
+import { PropertyPicker } from '@/components/property-picker';
 import { Button } from '@/components/ui/button';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { useAppParams } from '@/hooks/use-app-params';
@@ -9,7 +10,6 @@ import {
 import { PlusIcon } from 'lucide-react';
 import { CohortFilterRow } from './cohort-filter-row';
 import { FilterRow } from './filter-row';
-import { PropertyPicker } from './property-picker';
 
 export function EventsFilters() {
   const { projectId } = useAppParams();
