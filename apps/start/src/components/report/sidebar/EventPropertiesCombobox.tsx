@@ -38,12 +38,11 @@ export function EventPropertiesCombobox({
       <button
         type="button"
         className={cn(
-          'flex items-center gap-1 rounded-md border border-border p-1 px-2 text-sm font-medium leading-none',
-          !event.property && 'border-destructive text-destructive',
+          'flex h-8 items-center gap-1 rounded-md px-2 text-sm font-medium leading-none text-muted-foreground transition-colors hover:bg-def-200 hover:text-foreground',
+          !event.property && 'text-destructive hover:text-destructive',
         )}
       >
-        <DatabaseIcon size={12} />{' '}
-        {event.property ? `Property: ${event.property}` : 'Select property'}
+        <DatabaseIcon size={12} /> {event.property || 'Select property'}
       </button>
     </PropertyPicker>
   );

@@ -103,7 +103,12 @@ function SortableSeries({
       <div className="flex flex-col gap-2 p-2 group">
         {children(dragHandle)}
 
-        {/* Segment and Filter buttons - only for events */}
+        {/* Filters sit directly under the event when added */}
+        {chartEvent && !isSelectManyEvents && (
+          <FiltersList event={chartEvent} />
+        )}
+
+        {/* Aggregate-by + add filter row - only for events */}
         {chartEvent && (showSegment || showAddFilter || showPerUser) && (
           <div className="flex flex-wrap gap-1">
             {showSegment && (
@@ -164,17 +169,15 @@ function SortableSeries({
                 </button>
               </PropertyPicker>
             )}
-
-            {showSegment && chartEvent.segment.startsWith('property_') && (
-              <EventPropertiesCombobox event={chartEvent} />
-            )}
           </div>
         )}
 
-        {/* Filters - only for events */}
-        {chartEvent && !isSelectManyEvents && (
-          <FiltersList event={chartEvent} />
-        )}
+        {/* Property selector sits below when aggregating by a property */}
+        {chartEvent &&
+          showSegment &&
+          chartEvent.segment.startsWith('property_') && (
+            <EventPropertiesCombobox event={chartEvent} />
+          )}
       </div>
     </div>
   );
