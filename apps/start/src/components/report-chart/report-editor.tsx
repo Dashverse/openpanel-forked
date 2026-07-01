@@ -154,7 +154,7 @@ export default function ReportEditor({
         <aside
           className={cn(
             'flex shrink-0 flex-col border-r transition-[width]',
-            isPanelOpen ? 'w-[360px]' : 'w-12',
+            isPanelOpen ? 'w-[330px]' : 'w-12',
           )}
         >
           {isPanelOpen && (
