@@ -130,7 +130,11 @@ export function ComboboxAdvanced({
                 value,
                 label: value,
               };
-              return <Badge key={String(item.value)}>{item.label}</Badge>;
+              return (
+                <Badge variant="secondary" key={String(item.value)}>
+                  {item.label}
+                </Badge>
+              );
             })}
           </div>
           <ChevronsUpDownIcon className="ml-2 h-4 w-4 shrink-0 opacity-50" />

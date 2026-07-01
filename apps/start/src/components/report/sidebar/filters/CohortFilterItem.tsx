@@ -1,4 +1,3 @@
-import { ColorSquare } from '@/components/color-square';
 import { RenderDots } from '@/components/ui/RenderDots';
 import { Button } from '@/components/ui/button';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
@@ -90,7 +89,7 @@ export function CohortFilterItem({ filter, event }: CohortFilterItemProps) {
       onRemove={onRemove}
       onChangeOperator={onChangeOperator}
       onChangeCohort={onChangeCohort}
-      className="px-4 py-2 shadow-[inset_6px_0_0] shadow-def-300 first:border-t"
+      className="px-4 py-2 shadow-[inset_6px_0_0] shadow-def-300"
     />
   );
 }
@@ -129,9 +128,10 @@ export function PureCohortFilterItem({
   return (
     <div className={className}>
       <div className="mb-2 flex items-center gap-2">
-        <ColorSquare className="bg-emerald-500">
-          <SlidersHorizontal size={10} />
-        </ColorSquare>
+        <SlidersHorizontal
+          size={14}
+          className="shrink-0 text-muted-foreground"
+        />
         <div className="flex flex-1 ">
           <RenderDots truncate>{filter.name}</RenderDots>
         </div>
