@@ -98,6 +98,40 @@ function SortableSeries({
     </button>
   );
 
+  const isPropertyAgg = chartEvent?.segment.startsWith('property_') ?? false;
+
+  const addFilterButton =
+    chartEvent && showAddFilter ? (
+      <PropertyPicker
+        projectId={projectId}
+        event={chartEvent.name}
+        onSelect={(action) => {
+          dispatch(
+            changeEvent({
+              ...chartEvent,
+              filters: [
+                ...chartEvent.filters,
+                {
+                  id: shortId(),
+                  name: action.value,
+                  operator: action.cohortId ? 'inCohort' : 'is',
+                  value: [],
+                  cohortId: action.cohortId,
+                },
+              ],
+            }),
+          );
+        }}
+      >
+        <button
+          type="button"
+          className="flex h-8 items-center gap-1 rounded-md px-2 text-sm font-medium leading-none text-muted-foreground transition-colors hover:bg-def-200 hover:text-foreground"
+        >
+          <FilterIcon size={12} /> Add filter
+        </button>
+      </PropertyPicker>
+    ) : null;
+
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...props}>
       <div className="flex flex-col gap-2 p-2 group">
@@ -108,76 +142,37 @@ function SortableSeries({
           <FiltersList event={chartEvent} />
         )}
 
-        {/* Aggregate-by + add filter row - only for events */}
+        {/* Aggregate-by row: the property selector sits inline with the
+            aggregate; add filter stays here unless it drops below. */}
         {chartEvent && (showSegment || showAddFilter || showPerUser) && (
-          <div className="flex flex-wrap gap-1">
-            {showSegment && (
-              <ReportSegment
-                value={chartEvent.segment}
-                onChange={(segment) => {
-                  dispatch(
-                    changeEvent({
-                      ...chartEvent,
-                      segment,
-                    }),
-                  );
-                }}
-              />
-            )}
-            {/* Per-user is only meaningful for the Distribution chart (bucket
-                  users by their per-user value); hidden everywhere else. */}
-            {showPerUser && (
-              <ReportPerUser
-                event={chartEvent}
-                onChange={(perUser) => {
-                  dispatch(
-                    changeEvent({
-                      ...chartEvent,
-                      perUser,
-                    }),
-                  );
-                }}
-              />
-            )}
-            {showAddFilter && (
-              <PropertyPicker
-                projectId={projectId}
-                event={chartEvent.name}
-                onSelect={(action) => {
-                  dispatch(
-                    changeEvent({
-                      ...chartEvent,
-                      filters: [
-                        ...chartEvent.filters,
-                        {
-                          id: shortId(),
-                          name: action.value,
-                          operator: action.cohortId ? 'inCohort' : 'is',
-                          value: [],
-                          cohortId: action.cohortId,
-                        },
-                      ],
-                    }),
-                  );
-                }}
-              >
-                <button
-                  type="button"
-                  className="flex h-8 items-center gap-1 rounded-md px-2 text-sm font-medium leading-none text-muted-foreground transition-colors hover:bg-def-200 hover:text-foreground"
-                >
-                  <FilterIcon size={12} /> Add filter
-                </button>
-              </PropertyPicker>
-            )}
+          <div className="flex flex-col">
+            <div className="flex flex-wrap">
+              {showSegment && (
+                <ReportSegment
+                  value={chartEvent.segment}
+                  onChange={(segment) => {
+                    dispatch(changeEvent({ ...chartEvent, segment }));
+                  }}
+                />
+              )}
+              {showSegment && isPropertyAgg && (
+                <EventPropertiesCombobox event={chartEvent} />
+              )}
+              {/* Per-user is only meaningful for the Distribution chart. */}
+              {showPerUser && (
+                <ReportPerUser
+                  event={chartEvent}
+                  onChange={(perUser) => {
+                    dispatch(changeEvent({ ...chartEvent, perUser }));
+                  }}
+                />
+              )}
+              {!isPropertyAgg && addFilterButton}
+            </div>
+            {/* Add filter drops below when aggregating by a property */}
+            {isPropertyAgg && addFilterButton}
           </div>
         )}
-
-        {/* Property selector sits below when aggregating by a property */}
-        {chartEvent &&
-          showSegment &&
-          chartEvent.segment.startsWith('property_') && (
-            <EventPropertiesCombobox event={chartEvent} />
-          )}
       </div>
     </div>
   );
