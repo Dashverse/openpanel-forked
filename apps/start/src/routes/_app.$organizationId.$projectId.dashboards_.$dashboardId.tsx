@@ -13,7 +13,6 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/utils/cn';
 import { createProjectTitle } from '@/utils/title';
 import {
-  Clock,
   CopyIcon,
   LayoutPanelTopIcon,
   MoreHorizontal,
@@ -521,44 +520,9 @@ function Component() {
     <PageContainer fluid>
       <PageHeader
         title={dashboard.name}
-        className="mb-0"
+        className="mb-3"
         actions={
           <>
-            <div className="relative flex items-center">
-              <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
-              <Input
-                placeholder="Search reports..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-48"
-                style={{ paddingLeft: '2rem' }}
-              />
-            </div>
-            <OverviewRange />
-            <OverviewInterval />
-            {lastUpdatedAt && (
-              <div
-                className="flex items-center gap-1.5 px-1 text-xs font-medium text-muted-foreground whitespace-nowrap tabular-nums max-md:hidden"
-                title={`Data last updated ${new Date(lastUpdatedAt).toLocaleString()}`}
-              >
-                <Clock className="size-3.5 shrink-0" />
-                <span>
-                  Updated{' '}
-                  {new Date(lastUpdatedAt).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })}
-                </span>
-              </div>
-            )}
-            <Button
-              variant="outline"
-              icon={RefreshCw}
-              onClick={handleReload}
-              title="Reload reports with fresh data"
-            >
-              <span className="max-sm:hidden">Reload</span>
-            </Button>
             <LinkButton
               from={Route.fullPath}
               to={'/$organizationId/$projectId/reports'}
@@ -608,6 +572,41 @@ function Component() {
           </>
         }
       />
+      <div className="row mb-4 flex-wrap items-center gap-2">
+        <div className="relative flex items-center">
+          <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
+          <Input
+            placeholder="Search reports..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-48"
+            style={{ paddingLeft: '2rem' }}
+          />
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={RefreshCw}
+          onClick={handleReload}
+          title={
+            lastUpdatedAt
+              ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
+              : 'Reload reports with fresh data'
+          }
+          className="text-muted-foreground max-md:hidden"
+        >
+          {lastUpdatedAt
+            ? `Updated ${new Date(lastUpdatedAt).toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+              })}`
+            : 'Reload'}
+        </Button>
+        <div className="row ml-auto gap-2">
+          <OverviewRange />
+          <OverviewInterval />
+        </div>
+      </div>
 
       {allReports.length === 0 ? (
         <FullPageEmptyState title="No reports" icon={LayoutPanelTopIcon}>
