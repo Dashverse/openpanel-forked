@@ -113,14 +113,12 @@ export function EventRowDetails({
 
   return (
     <div className={cn('col gap-3 p-4 bg-def-100 border-t', className)}>
-      <div className="row items-center gap-2 justify-between">
-        <div className="row items-center gap-2">
-          <SegmentedToggle mode={mode} onChange={setMode} />
-          {isLoading && (
-            <Loader2Icon className="size-3 animate-spin text-muted-foreground" />
-          )}
-        </div>
+      <div className="row items-center gap-2">
+        <SegmentedToggle mode={mode} onChange={setMode} />
         {mode === 'json' && !isLoading && <CopyButton value={toJson(event)} />}
+        {isLoading && (
+          <Loader2Icon className="size-3 animate-spin text-muted-foreground" />
+        )}
       </div>
 
       {isError && (

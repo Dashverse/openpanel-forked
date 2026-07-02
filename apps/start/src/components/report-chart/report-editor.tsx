@@ -1,10 +1,8 @@
 import { ReportChart } from '@/components/report-chart';
-import { ReportChartType } from '@/components/report/ReportChartType';
 import { ReportInterval } from '@/components/report/ReportInterval';
 import { ReportLineType } from '@/components/report/ReportLineType';
 import { ReportSaveButton } from '@/components/report/ReportSaveButton';
 import {
-  changeChartType,
   changeDateRanges,
   changeEndDate,
   changeInterval,
@@ -17,23 +15,24 @@ import {
 import { ReportSidebar } from '@/components/report/sidebar/ReportSidebar';
 import { TimeWindowPicker } from '@/components/time-window-picker';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { useAppParams } from '@/hooks/use-app-params';
-import { useDispatch, useSelector } from '@/redux';
 import { useTRPC } from '@/integrations/trpc/react';
+import { useDispatch, useSelector } from '@/redux';
+import { cn } from '@/utils/cn';
 import { bind } from 'bind-event-listener';
 import {
   BellIcon,
   BellPlusIcon,
   ChevronRightIcon,
-  GanttChartSquareIcon,
+  PanelLeftCloseIcon,
+  PanelLeftOpenIcon,
 } from 'lucide-react';
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
-import type { IServiceReport } from '@openpanel/db';
-import { Link, useParams, useSearch } from '@tanstack/react-router';
-import { useQuery } from '@tanstack/react-query';
 import { pushModal } from '@/modals';
+import type { IServiceReport } from '@openpanel/db';
+import { useQuery } from '@tanstack/react-query';
+import { Link, useParams, useSearch } from '@tanstack/react-router';
 import EditReportName from '../report/edit-report-name';
 
 interface ReportEditorProps {
@@ -51,6 +50,7 @@ export default function ReportEditor({
   const dispatch = useDispatch();
   const report = useSelector((state) => state.report);
   const trpc = useTRPC();
+  const [isPanelOpen, setIsPanelOpen] = useState(true);
 
   const { data: notificationRules } = useQuery({
     ...trpc.notification.rules.queryOptions({ projectId }),
@@ -79,11 +79,13 @@ export default function ReportEditor({
   // Set report if reportId exists, applying URL range override in one shot
   useEffect(() => {
     if (initialReport) {
-      dispatch(setReport(
-        rangeOverride
-          ? { ...initialReport, range: rangeOverride as any }
-          : initialReport
-      ));
+      dispatch(
+        setReport(
+          rangeOverride
+            ? { ...initialReport, range: rangeOverride as any }
+            : initialReport,
+        ),
+      );
     } else {
       dispatch(ready());
     }
@@ -94,49 +96,100 @@ export default function ReportEditor({
   }, [initialReport, dispatch, rangeOverride]);
 
   return (
-    <Sheet>
-      <div>
-        <div className="p-4">
-          <div className="flex min-w-0 items-center gap-2">
-            {dashboard && dashboardId && (
-              <>
-                <Link
-                  to="/$organizationId/$projectId/dashboards/$dashboardId"
-                  params={{ organizationId, projectId, dashboardId }}
-                  className="max-w-[45%] shrink-0 truncate text-xl font-medium text-muted-foreground transition-colors hover:text-foreground"
-                  title={dashboard.name}
-                >
-                  {dashboard.name}
-                </Link>
-                <ChevronRightIcon
-                  size={18}
-                  className="shrink-0 text-muted-foreground"
-                />
-              </>
-            )}
-            <EditReportName />
-          </div>
+    <div className="flex h-screen flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          {dashboard && dashboardId && (
+            <>
+              <Link
+                to="/$organizationId/$projectId/dashboards/$dashboardId"
+                params={{ organizationId, projectId, dashboardId }}
+                className="max-w-[45%] shrink-0 truncate text-lg font-medium text-muted-foreground transition-colors hover:text-foreground"
+                title={dashboard.name}
+              >
+                {dashboard.name}
+              </Link>
+              <ChevronRightIcon
+                size={18}
+                className="shrink-0 text-muted-foreground"
+              />
+            </>
+          )}
+          <EditReportName />
         </div>
-        <div className="grid grid-cols-2 gap-2 p-4 pt-0 md:grid-cols-7">
-          <SheetTrigger asChild>
-            <Button
-              icon={GanttChartSquareIcon}
-              variant="cta"
-              className="self-start"
+        <div className="row gap-2 whitespace-nowrap">
+          {reportId &&
+            (existingRule ? (
+              <Button
+                icon={BellIcon}
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  pushModal('AddNotificationRule', {
+                    rule: existingRule,
+                  });
+                }}
+              >
+                Manage
+              </Button>
+            ) : (
+              <Button
+                icon={BellPlusIcon}
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  pushModal('AddNotificationRule', {
+                    reportId,
+                    projectId,
+                  });
+                }}
+              >
+                Add Alert
+              </Button>
+            ))}
+          <ReportSaveButton />
+        </div>
+      </div>
+      <div className="flex min-h-0 flex-1">
+        <aside
+          className={cn(
+            'flex shrink-0 flex-col border-r transition-[width]',
+            isPanelOpen ? 'w-[330px]' : 'w-12',
+          )}
+        >
+          {isPanelOpen && (
+            <div className="min-h-0 flex-1 overflow-y-auto p-4">
+              <ReportSidebar />
+            </div>
+          )}
+          <div
+            className={cn(
+              'mt-auto shrink-0 pb-4 pt-2',
+              isPanelOpen ? 'px-4' : 'px-1',
+            )}
+          >
+            <button
+              type="button"
+              onClick={() => setIsPanelOpen((open) => !open)}
+              title={isPanelOpen ? 'Collapse' : 'Expand'}
+              className={cn(
+                'flex w-full items-center gap-2 rounded-md py-2 text-[13px] font-medium text-muted-foreground transition-all hover:bg-def-200',
+                isPanelOpen ? 'justify-start px-3' : 'justify-center px-0',
+              )}
             >
-              Pick events
-            </Button>
-          </SheetTrigger>
-          <div className="col-span-4 grid grid-cols-2 gap-2 md:grid-cols-4">
-            <ReportChartType
-              className="min-w-0 flex-1"
-              onChange={(type) => {
-                dispatch(changeChartType(type));
-              }}
-              value={report.chartType}
-            />
+              {isPanelOpen ? (
+                <PanelLeftCloseIcon size={18} className="shrink-0" />
+              ) : (
+                <PanelLeftOpenIcon size={18} className="shrink-0" />
+              )}
+              {isPanelOpen && <span>Collapse</span>}
+            </button>
+          </div>
+        </aside>
+        <div className="min-w-0 flex-1 overflow-y-auto">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-3">
             <TimeWindowPicker
-              className="min-w-0 flex-1"
+              segmented
               onChange={(value) => {
                 dispatch(changeDateRanges(value));
               }}
@@ -146,60 +199,28 @@ export default function ReportEditor({
               endDate={report.endDate}
               startDate={report.startDate}
             />
-            <ReportInterval
-              className="min-w-0 flex-1"
-              interval={report.interval}
-              onChange={(newInterval) => dispatch(changeInterval(newInterval))}
-              range={report.range}
-              chartType={report.chartType}
-              startDate={report.startDate}
-              endDate={report.endDate}
-            />
-            <ReportLineType className="min-w-0 flex-1" />
+            <div className="row ml-auto gap-2">
+              <ReportInterval
+                className="min-w-0"
+                interval={report.interval}
+                onChange={(newInterval) =>
+                  dispatch(changeInterval(newInterval))
+                }
+                range={report.range}
+                chartType={report.chartType}
+                startDate={report.startDate}
+                endDate={report.endDate}
+              />
+              <ReportLineType className="min-w-0" />
+            </div>
           </div>
-          <div className="col-start-2 row-start-1 text-right md:col-start-6 md:col-span-2 row gap-2 justify-end flex-nowrap whitespace-nowrap">
-            {reportId && (
-              existingRule ? (
-                <Button
-                  icon={BellIcon}
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    pushModal('AddNotificationRule', {
-                      rule: existingRule,
-                    });
-                  }}
-                >
-                  Manage
-                </Button>
-              ) : (
-                <Button
-                  icon={BellPlusIcon}
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    pushModal('AddNotificationRule', {
-                      reportId,
-                      projectId,
-                    });
-                  }}
-                >
-                  Add Alert
-                </Button>
-              )
+          <div className="flex flex-col gap-4 p-4" id="report-editor">
+            {report.ready && (
+              <ReportChart report={{ ...report, projectId }} isEditMode />
             )}
-            <ReportSaveButton />
           </div>
-        </div>
-        <div className="flex flex-col gap-4 p-4" id="report-editor">
-          {report.ready && (
-            <ReportChart report={{ ...report, projectId }} isEditMode />
-          )}
         </div>
       </div>
-      <SheetContent className="!max-w-lg" side="left">
-        <ReportSidebar />
-      </SheetContent>
-    </Sheet>
+    </div>
   );
 }

@@ -66,7 +66,7 @@ export function ReportSegment({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button
-          variant="outline"
+          variant="ghost"
           icon={Icons[value]}
           className={cn('justify-start text-sm', className)}
         >

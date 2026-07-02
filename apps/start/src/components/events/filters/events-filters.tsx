@@ -1,0 +1,113 @@
+import { PropertyPicker } from '@/components/property-picker';
+import { Button } from '@/components/ui/button';
+import { ComboboxEvents } from '@/components/ui/combobox-events';
+import { useAppParams } from '@/hooks/use-app-params';
+import { useEventNames } from '@/hooks/use-event-names';
+import {
+  useEventQueryFilters,
+  useEventQueryNamesFilter,
+} from '@/hooks/use-event-query-filters';
+import { PlusIcon } from 'lucide-react';
+import { CohortFilterRow } from './cohort-filter-row';
+import { FilterRow } from './filter-row';
+
+export function EventsFilters() {
+  const { projectId } = useAppParams();
+  const [filters, setFilter, , removeFilter] = useEventQueryFilters();
+  const [events, setEvents] = useEventQueryNamesFilter();
+  const {
+    items: eventNames,
+    isLoading,
+    isError,
+    refetch,
+  } = useEventNames({ projectId });
+
+  const selectedEvent = events.length === 1 ? events[0] : undefined;
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[10px] font-semibold uppercase text-muted-foreground">
+          Select event
+        </span>
+        <ComboboxEvents
+          size="sm"
+          className="w-full max-w-xs"
+          value={events}
+          onChange={setEvents}
+          multiple
+          items={eventNames}
+          placeholder="All Events"
+          maxDisplayItems={2}
+          searchable
+          isLoading={isLoading}
+          isError={isError}
+          onRefresh={refetch}
+        />
+      </div>
+      <div className="flex flex-col gap-2">
+        <span className="text-[10px] font-semibold uppercase text-muted-foreground">
+          Filters
+        </span>
+        {filters.map((filter) => {
+          const isCohort =
+            filter.operator === 'inCohort' ||
+            filter.operator === 'notInCohort' ||
+            filter.name.startsWith('cohort:');
+
+          if (isCohort) {
+            return (
+              <CohortFilterRow
+                key={filter.name}
+                projectId={projectId}
+                filter={filter}
+                onChangeOperator={(operator) => {
+                  if (operator !== filter.operator) {
+                    setFilter(filter.name, filter.value, operator);
+                  }
+                }}
+                onRemove={() => removeFilter(filter.name)}
+              />
+            );
+          }
+
+          return (
+            <FilterRow
+              key={filter.name}
+              projectId={projectId}
+              event={selectedEvent}
+              filter={filter}
+              onChangeOperator={(operator) => {
+                if (operator !== filter.operator) {
+                  setFilter(filter.name, filter.value, operator);
+                }
+              }}
+              onChangeValue={(value) =>
+                setFilter(filter.name, value, filter.operator)
+              }
+              onRemove={() => removeFilter(filter.name)}
+            />
+          );
+        })}
+        <div>
+          <PropertyPicker
+            projectId={projectId}
+            event={selectedEvent}
+            onSelect={(action) =>
+              setFilter(action.value, [], action.cohortId ? 'inCohort' : 'is')
+            }
+          >
+            <Button
+              variant="outline"
+              size="sm"
+              icon={PlusIcon}
+              className="border-dashed"
+            >
+              Add
+            </Button>
+          </PropertyPicker>
+        </div>
+      </div>
+    </div>
+  );
+}

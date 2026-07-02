@@ -1,4 +1,5 @@
 import { ColorSquare } from '@/components/color-square';
+import { PropertyPicker } from '@/components/property-picker';
 import { Button } from '@/components/ui/button';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { Input } from '@/components/ui/input';
@@ -41,7 +42,6 @@ import {
   reorderEvents,
 } from '../reportSlice';
 import { EventPropertiesCombobox } from './EventPropertiesCombobox';
-import { PropertiesCombobox } from './PropertiesCombobox';
 import type { ReportEventMoreProps } from './ReportEventMore';
 import { ReportEventMore } from './ReportEventMore';
 import { FiltersList } from './filters/FiltersList';
@@ -53,6 +53,7 @@ function SortableSeries({
   showAddFilter,
   showPerUser,
   isSelectManyEvents,
+  children,
   ...props
 }: {
   event: IChartEventItem | IChartEvent;
@@ -61,8 +62,10 @@ function SortableSeries({
   showAddFilter: boolean;
   showPerUser: boolean;
   isSelectManyEvents: boolean;
-} & React.HTMLAttributes<HTMLDivElement>) {
+  children: (dragHandle: React.ReactNode) => React.ReactNode;
+} & Omit<React.HTMLAttributes<HTMLDivElement>, 'children'>) {
   const dispatch = useDispatch();
+  const { projectId } = useAppParams();
   const eventId = 'type' in event ? event.id : (event as IChartEvent).id;
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id: eventId ?? '' });
@@ -81,91 +84,98 @@ function SortableSeries({
     ? null
     : (normalizedEvent as IChartEventItem & { type: 'event' });
 
+  const dragHandle = (
+    <button
+      type="button"
+      aria-label="Drag to reorder"
+      className="shrink-0 cursor-grab active:cursor-grabbing"
+      {...listeners}
+    >
+      <ColorSquare className="relative">
+        <HandIcon className="size-3 opacity-0 scale-50 group-hover:opacity-100 group-hover:scale-100 transition-all absolute inset-1" />
+        <span className="block group-hover:opacity-0 group-hover:scale-0 transition-all">
+          {alphabetIds[index]}
+        </span>
+      </ColorSquare>
+    </button>
+  );
+
+  const isPropertyAgg = chartEvent?.segment.startsWith('property_') ?? false;
+
+  const addFilterButton =
+    chartEvent && showAddFilter ? (
+      <PropertyPicker
+        projectId={projectId}
+        event={chartEvent.name}
+        onSelect={(action) => {
+          dispatch(
+            changeEvent({
+              ...chartEvent,
+              filters: [
+                ...chartEvent.filters,
+                {
+                  id: shortId(),
+                  name: action.value,
+                  operator: action.cohortId ? 'inCohort' : 'is',
+                  value: [],
+                  cohortId: action.cohortId,
+                },
+              ],
+            }),
+          );
+        }}
+      >
+        <button
+          type="button"
+          className="flex h-8 items-center gap-1 rounded-md px-2 text-sm font-medium leading-none text-muted-foreground transition-colors hover:bg-def-200 hover:text-foreground"
+        >
+          <FilterIcon size={12} /> Add filter
+        </button>
+      </PropertyPicker>
+    ) : null;
+
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...props}>
-      <div className="flex items-center gap-2 p-2 group">
-        <button className="cursor-grab active:cursor-grabbing" {...listeners}>
-          <ColorSquare className="relative">
-            <HandIcon className="size-3 opacity-0 scale-50 group-hover:opacity-100 group-hover:scale-100 transition-all absolute inset-1" />
-            <span className="block group-hover:opacity-0 group-hover:scale-0 transition-all">
-              {alphabetIds[index]}
-            </span>
-          </ColorSquare>
-        </button>
-        {props.children}
-      </div>
+      <div className="flex flex-col gap-2 p-2 group">
+        {children(dragHandle)}
 
-      {/* Segment and Filter buttons - only for events */}
-      {chartEvent && (showSegment || showAddFilter || showPerUser) && (
-        <div className="flex flex-wrap gap-2 p-2 pt-0">
-          {showSegment && (
-            <ReportSegment
-              value={chartEvent.segment}
-              onChange={(segment) => {
-                dispatch(
-                  changeEvent({
-                    ...chartEvent,
-                    segment,
-                  }),
-                );
-              }}
-            />
-          )}
-          {/* Per-user is only meaningful for the Distribution chart (bucket
-              users by their per-user value); hidden everywhere else. */}
-          {showPerUser && (
-            <ReportPerUser
-              event={chartEvent}
-              onChange={(perUser) => {
-                dispatch(
-                  changeEvent({
-                    ...chartEvent,
-                    perUser,
-                  }),
-                );
-              }}
-            />
-          )}
-          {showAddFilter && (
-            <PropertiesCombobox
-              event={chartEvent}
-              onSelect={(action) => {
-                dispatch(
-                  changeEvent({
-                    ...chartEvent,
-                    filters: [
-                      ...chartEvent.filters,
-                      {
-                        id: shortId(),
-                        name: action.value,
-                        operator: 'is',
-                        value: [],
-                      },
-                    ],
-                  }),
-                );
-              }}
-            >
-              {(setOpen) => (
-                <button
-                  onClick={() => setOpen((p) => !p)}
-                  type="button"
-                  className="flex h-8 items-center gap-1 rounded-md border border-border bg-card px-2 text-sm font-medium leading-none"
-                >
-                  <FilterIcon size={12} /> Add filter
-                </button>
+        {/* Filters sit directly under the event when added */}
+        {chartEvent && !isSelectManyEvents && (
+          <FiltersList event={chartEvent} />
+        )}
+
+        {/* Aggregate-by row: the property selector sits inline with the
+            aggregate; add filter stays here unless it drops below. */}
+        {chartEvent && (showSegment || showAddFilter || showPerUser) && (
+          <div className="flex flex-col">
+            <div className="flex flex-wrap">
+              {showSegment && (
+                <ReportSegment
+                  value={chartEvent.segment}
+                  onChange={(segment) => {
+                    dispatch(changeEvent({ ...chartEvent, segment }));
+                  }}
+                />
               )}
-            </PropertiesCombobox>
-          )}
-
-          {showSegment && chartEvent.segment.startsWith('property_') && (
-            <EventPropertiesCombobox event={chartEvent} />
-          )}
-        </div>
-      )}
-
-      {/* Filters - only for events */}
-      {chartEvent && !isSelectManyEvents && <FiltersList event={chartEvent} />}
+              {showSegment && isPropertyAgg && (
+                <EventPropertiesCombobox event={chartEvent} />
+              )}
+              {/* Per-user is only meaningful for the Distribution chart. */}
+              {showPerUser && (
+                <ReportPerUser
+                  event={chartEvent}
+                  onChange={(perUser) => {
+                    dispatch(changeEvent({ ...chartEvent, perUser }));
+                  }}
+                />
+              )}
+              {!isPropertyAgg && addFilterButton}
+            </div>
+            {/* Add filter drops below when aggregating by a property */}
+            {isPropertyAgg && addFilterButton}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -276,10 +286,30 @@ export function ReportSeries() {
                   isSelectManyEvents={isSelectManyEvents}
                   className="rounded-lg border bg-def-100"
                 >
-                  {isFormula ? (
-                    <>
-                      <div className="flex-1 flex flex-col gap-2">
+                  {(dragHandle) =>
+                    isFormula ? (
+                      <>
+                        <div className="flex items-center gap-2">
+                          {dragHandle}
+                          {showDisplayNameInput ? (
+                            <Input
+                              className="h-6 min-w-0 flex-1 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-def-200/60 focus-visible:bg-def-200"
+                              placeholder={`Formula (${alphabetIds[index]})`}
+                              defaultValue={event.displayName}
+                              onChange={(e) => {
+                                dispatchChangeFormula({
+                                  ...event,
+                                  displayName: e.target.value,
+                                });
+                              }}
+                            />
+                          ) : (
+                            <div className="flex-1" />
+                          )}
+                          <ReportEventMore onClick={handleMore(event)} />
+                        </div>
                         <InputEnter
+                          className="w-full"
                           placeholder="eg: A+B"
                           value={event.formula}
                           onChangeValue={(value) => {
@@ -289,96 +319,90 @@ export function ReportSeries() {
                             });
                           }}
                         />
-                        {showDisplayNameInput && (
-                          <Input
-                            placeholder={`Name: Formula (${alphabetIds[index]})`}
-                            defaultValue={event.displayName}
-                            onChange={(e) => {
-                              dispatchChangeFormula({
-                                ...event,
-                                displayName: e.target.value,
-                              });
-                            }}
-                          />
-                        )}
-                      </div>
-                      <ReportEventMore onClick={handleMore(event)} />
-                    </>
-                  ) : (
-                    <>
-                      <ComboboxEvents
-                        className="flex-1"
-                        searchable
-                        multiple={isSelectManyEvents as false}
-                        value={
-                          (isSelectManyEvents
-                            ? ((
-                                event as IChartEventItem & {
-                                  type: 'event';
-                                }
-                              ).filters[0]?.value ?? [])
-                            : (
-                                event as IChartEventItem & {
-                                  type: 'event';
-                                }
-                              ).name) as any
-                        }
-                        onChange={(value) => {
-                          dispatch(
-                            changeEvent(
-                              Array.isArray(value)
-                                ? {
-                                    id: event.id,
-                                    type: 'event',
-                                    segment: 'user',
-                                    filters: [
-                                      {
-                                        name: 'name',
-                                        operator: 'is',
-                                        value: value,
-                                      },
-                                    ],
-                                    name: '*',
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-2">
+                          {dragHandle}
+                          {showDisplayNameInput ? (
+                            <Input
+                              className="h-6 min-w-0 flex-1 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-def-200/60 focus-visible:bg-def-200"
+                              placeholder={
+                                (event as IChartEventItem & { type: 'event' })
+                                  .name
+                                  ? `${(event as IChartEventItem & { type: 'event' }).name} (${alphabetIds[index]})`
+                                  : 'Add a display name'
+                              }
+                              defaultValue={
+                                (event as IChartEventItem & { type: 'event' })
+                                  .displayName
+                              }
+                              onChange={(e) => {
+                                dispatchChangeEvent({
+                                  ...(event as IChartEventItem & {
+                                    type: 'event';
+                                  }),
+                                  displayName: e.target.value,
+                                });
+                              }}
+                            />
+                          ) : (
+                            <div className="flex-1" />
+                          )}
+                          <ReportEventMore onClick={handleMore(event)} />
+                        </div>
+                        <ComboboxEvents
+                          className="w-full"
+                          searchable
+                          multiple={isSelectManyEvents as false}
+                          value={
+                            (isSelectManyEvents
+                              ? ((
+                                  event as IChartEventItem & {
+                                    type: 'event';
                                   }
-                                : {
-                                    ...event,
-                                    type: 'event',
-                                    name: value,
-                                    filters: [],
-                                  },
-                            ),
-                          );
-                        }}
-                        items={eventNames}
-                        placeholder="Select event"
-                        isLoading={isLoadingEventNames}
-                        isError={isErrorEventNames}
-                        onRefresh={refetchEventNames}
-                      />
-                      {showDisplayNameInput && (
-                        <Input
-                          placeholder={
-                            (event as IChartEventItem & { type: 'event' }).name
-                              ? `${(event as IChartEventItem & { type: 'event' }).name} (${alphabetIds[index]})`
-                              : 'Display name'
+                                ).filters[0]?.value ?? [])
+                              : (
+                                  event as IChartEventItem & {
+                                    type: 'event';
+                                  }
+                                ).name) as any
                           }
-                          defaultValue={
-                            (event as IChartEventItem & { type: 'event' })
-                              .displayName
-                          }
-                          onChange={(e) => {
-                            dispatchChangeEvent({
-                              ...(event as IChartEventItem & {
-                                type: 'event';
-                              }),
-                              displayName: e.target.value,
-                            });
+                          onChange={(value) => {
+                            dispatch(
+                              changeEvent(
+                                Array.isArray(value)
+                                  ? {
+                                      id: event.id,
+                                      type: 'event',
+                                      segment: 'user',
+                                      filters: [
+                                        {
+                                          name: 'name',
+                                          operator: 'is',
+                                          value: value,
+                                        },
+                                      ],
+                                      name: '*',
+                                    }
+                                  : {
+                                      ...event,
+                                      type: 'event',
+                                      name: value,
+                                      filters: [],
+                                    },
+                              ),
+                            );
                           }}
+                          items={eventNames}
+                          placeholder="Select event"
+                          isLoading={isLoadingEventNames}
+                          isError={isErrorEventNames}
+                          onRefresh={refetchEventNames}
                         />
-                      )}
-                      <ReportEventMore onClick={handleMore(event)} />
-                    </>
-                  )}
+                      </>
+                    )
+                  }
                 </SortableSeries>
               );
             })}

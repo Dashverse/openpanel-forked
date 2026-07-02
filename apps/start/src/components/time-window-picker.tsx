@@ -1,3 +1,4 @@
+import { CustomDateRangePopover } from '@/components/custom-date-range-popover';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -24,10 +25,11 @@ type Props = {
   value: IChartRange;
   onChange: (value: IChartRange) => void;
   onStartDateChange: (date: string) => void;
-  onEndDateChange: (date: string) => void;
+  onEndDateChange: (date: string | null) => void;
   endDate: string | null;
   startDate: string | null;
   className?: string;
+  segmented?: boolean;
 };
 const VISIBLE_RANGES: IChartRange[] = [
   'lastHour',
@@ -48,6 +50,7 @@ export function TimeWindowPicker({
   endDate,
   onEndDateChange,
   className,
+  segmented,
 }: Props) {
   const isDateRangerPickerOpen = useRef(false);
   useOnPushModal('DateRangerPicker', (open) => {
@@ -83,13 +86,70 @@ export function TimeWindowPicker({
           (tw) => tw.shortcut && event.key === tw.shortcut.toLowerCase(),
         );
         if (match?.key === 'custom') {
-          handleCustom();
+          // Segmented mode uses the anchored popover, opened via click only.
+          if (!segmented) {
+            handleCustom();
+          }
         } else if (match) {
           onChange(match.key);
         }
       },
     });
-  }, [handleCustom]);
+  }, [handleCustom, segmented]);
+
+  if (segmented) {
+    const segments: IChartRange[] = ['today', 'yesterday', '7d', '30d', '3m'];
+    const shortLabel: Partial<Record<IChartRange, string>> = {
+      today: 'Today',
+      yesterday: 'Yesterday',
+      '7d': '7D',
+      '30d': '30D',
+      '3m': '3M',
+    };
+    const segmentClass = (active: boolean) =>
+      cn(
+        'flex h-full items-center rounded-md px-2.5 text-sm font-medium transition-colors',
+        active
+          ? 'bg-def-200 text-foreground'
+          : 'text-muted-foreground hover:text-foreground',
+      );
+    return (
+      <div
+        className={cn(
+          'inline-flex h-8 items-center gap-0.5 rounded-lg border p-0.5',
+          className,
+        )}
+      >
+        {segments.map((key) => (
+          <button
+            key={key}
+            type="button"
+            aria-pressed={value === key}
+            onClick={() => onChange(key)}
+            className={segmentClass(value === key)}
+          >
+            {shortLabel[key]}
+          </button>
+        ))}
+        <CustomDateRangePopover
+          startDate={startDate}
+          endDate={endDate}
+          onApply={(start, end) => {
+            onStartDateChange(start);
+            onEndDateChange(end);
+            onChange('custom');
+          }}
+          className={cn(
+            segmentClass(value === 'custom'),
+            'flex items-center gap-1',
+          )}
+        >
+          <CalendarIcon size={14} />
+          Custom
+        </CustomDateRangePopover>
+      </div>
+    );
+  }
 
   return (
     <DropdownMenu>

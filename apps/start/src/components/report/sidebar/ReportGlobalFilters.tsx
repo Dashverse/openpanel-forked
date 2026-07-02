@@ -6,17 +6,18 @@ import type {
 } from '@openpanel/validation';
 import { FilterIcon } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
+import { PropertyPicker } from '@/components/property-picker';
+import { useAppParams } from '@/hooks/use-app-params';
 import {
   addGlobalFilter,
   changeGlobalFilter,
   removeGlobalFilter,
 } from '../reportSlice';
-import { PropertiesCombobox } from './PropertiesCombobox';
-import { PureFilterItem } from './filters/FilterItem';
 import { PureCohortFilterItem } from './filters/CohortFilterItem';
+import { PureFilterItem } from './filters/FilterItem';
 
 export function ReportGlobalFilters() {
+  const { projectId } = useAppParams();
   const globalFilters = useSelector((state) => state.report.globalFilters);
   const dispatch = useDispatch();
 
@@ -84,7 +85,8 @@ export function ReportGlobalFilters() {
           );
         })}
 
-        <PropertiesCombobox
+        <PropertyPicker
+          projectId={projectId}
           onSelect={(action) => {
             if (action.cohortId) {
               dispatch(
@@ -106,16 +108,13 @@ export function ReportGlobalFilters() {
             }
           }}
         >
-          {(setOpen) => (
-            <button
-              onClick={() => setOpen((p) => !p)}
-              type="button"
-              className="flex h-8 items-center gap-1 rounded-md border border-border bg-card px-2 text-sm font-medium leading-none"
-            >
-              <FilterIcon size={12} /> Add filter
-            </button>
-          )}
-        </PropertiesCombobox>
+          <button
+            type="button"
+            className="flex h-8 items-center gap-1 rounded-md border border-border bg-card px-2 text-sm font-medium leading-none"
+          >
+            <FilterIcon size={12} /> Add filter
+          </button>
+        </PropertyPicker>
       </div>
     </div>
   );

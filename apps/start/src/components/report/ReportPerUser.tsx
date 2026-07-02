@@ -3,6 +3,7 @@ import { DatabaseIcon, UserCogIcon } from 'lucide-react';
 
 import type { IChartEvent, IPerUserAggregation } from '@openpanel/validation';
 
+import { PropertyPicker } from '@/components/property-picker';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,8 +13,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { useAppParams } from '@/hooks/use-app-params';
 import { Button } from '../ui/button';
-import { PropertiesCombobox } from './sidebar/PropertiesCombobox';
 
 // Mixpanel-style per-user (two-level) computed metric. `off` clears it.
 const OPTIONS: { value: IPerUserAggregation | 'off'; label: string }[] = [
@@ -41,6 +42,7 @@ export function ReportPerUser({
   event,
   onChange,
 }: ReportPerUserProps) {
+  const { projectId } = useAppParams();
   const current = event.perUser;
   const value: IPerUserAggregation | 'off' = current?.aggregation ?? 'off';
   const needsProperty = !!current && current.aggregation !== 'count';
@@ -89,9 +91,10 @@ export function ReportPerUser({
         // Only event properties can be aggregated per user (profile properties
         // are one value per user → nothing to aggregate), so restrict to the
         // clean, searchable event-properties list.
-        <PropertiesCombobox
-          event={event}
-          mode="events"
+        <PropertyPicker
+          projectId={projectId}
+          event={event.name}
+          categories={['event']}
           onSelect={(action) => {
             onChange({
               aggregation: current!.aggregation,
@@ -99,22 +102,19 @@ export function ReportPerUser({
             });
           }}
         >
-          {(setOpen) => (
-            <button
-              type="button"
-              onClick={() => setOpen((p) => !p)}
-              className={cn(
-                'flex items-center gap-1 rounded-md border border-border p-1 px-2 text-sm font-medium leading-none',
-                !current?.property && 'border-destructive text-destructive',
-              )}
-            >
-              <DatabaseIcon size={12} />{' '}
-              {current?.property
-                ? `Property: ${current.property}`
-                : 'Select property'}
-            </button>
-          )}
-        </PropertiesCombobox>
+          <button
+            type="button"
+            className={cn(
+              'flex items-center gap-1 rounded-md border border-border p-1 px-2 text-sm font-medium leading-none',
+              !current?.property && 'border-destructive text-destructive',
+            )}
+          >
+            <DatabaseIcon size={12} />{' '}
+            {current?.property
+              ? `Property: ${current.property}`
+              : 'Select property'}
+          </button>
+        </PropertyPicker>
       )}
     </>
   );

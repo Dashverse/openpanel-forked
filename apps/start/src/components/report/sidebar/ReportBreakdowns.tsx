@@ -7,17 +7,21 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useAppParams } from '@/hooks/use-app-params';
-import { useEventProperties } from '@/hooks/use-event-properties';
 import { useCohorts } from '@/hooks/use-cohorts';
 import { useDispatch, useSelector } from '@/redux';
 import { ChevronsUpDownIcon, SplitIcon, UsersIcon } from 'lucide-react';
 
 import type { IChartBreakdown } from '@openpanel/validation';
 
+import { PropertyPicker } from '@/components/property-picker';
 import { Button } from '@/components/ui/button';
 import { InputEnter } from '@/components/ui/input-enter';
-import { addBreakdown, changeBreakdown, changeLimit, removeBreakdown } from '../reportSlice';
-import { PropertiesCombobox } from './PropertiesCombobox';
+import {
+  addBreakdown,
+  changeBreakdown,
+  changeLimit,
+  removeBreakdown,
+} from '../reportSlice';
 import { ReportBreakdownMore } from './ReportBreakdownMore';
 import type { ReportEventMoreProps } from './ReportEventMore';
 
@@ -71,16 +75,24 @@ export function ReportBreakdowns() {
           const isCohortBreakdown =
             item.name.startsWith('cohort:') || !!item.cohortId;
           const cohortId = isCohortBreakdown
-            ? (item.cohortId || item.name.split(':')[1])
+            ? item.cohortId || item.name.split(':')[1]
             : null;
-          const cohort = cohortId ? cohorts.find(c => c.id === cohortId) : null;
-          const displayName = cohort ? cohort.name : item.name;
+          const cohort = cohortId
+            ? cohorts.find((c) => c.id === cohortId)
+            : null;
+          const displayName = isCohortBreakdown
+            ? (cohort?.name ?? cohortId ?? item.name)
+            : item.name;
 
           return (
-            <div key={item.id || item.name} className="rounded-lg border bg-def-100">
+            <div
+              key={item.id || item.name}
+              className="rounded-lg border bg-def-100"
+            >
               <div className="flex items-center gap-2 p-2 px-4">
                 <ColorSquare>{index}</ColorSquare>
-                <PropertiesCombobox
+                <PropertyPicker
+                  projectId={projectId}
                   onSelect={(action) => {
                     dispatch(
                       changeBreakdown({
@@ -91,25 +103,23 @@ export function ReportBreakdowns() {
                     );
                   }}
                 >
-                  {(setOpen) => (
-                    <Button
-                      variant={'outline'}
-                      onClick={() => setOpen((prev) => !prev)}
-                      size={'sm'}
-                      autoHeight
-                      className="flex-1"
-                    >
-                      <div className="row w-full gap-2 items-center">
-                        {isCohortBreakdown
-                          ? <UsersIcon className="size-4" />
-                          : <SplitIcon className="size-4" />
-                        }
-                        {displayName}
-                      </div>
-                      <ChevronsUpDownIcon className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  )}
-                </PropertiesCombobox>
+                  <Button
+                    variant={'outline'}
+                    size={'sm'}
+                    autoHeight
+                    className="flex-1"
+                  >
+                    <div className="row w-full gap-2 items-center">
+                      {isCohortBreakdown ? (
+                        <UsersIcon className="size-4" />
+                      ) : (
+                        <SplitIcon className="size-4" />
+                      )}
+                      {displayName}
+                    </div>
+                    <ChevronsUpDownIcon className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PropertyPicker>
                 <ReportBreakdownMore onClick={handleMore(item)} />
               </div>
 
@@ -165,7 +175,8 @@ export function ReportBreakdowns() {
           </div>
         )}
 
-        <PropertiesCombobox
+        <PropertyPicker
+          projectId={projectId}
           onSelect={(action) => {
             dispatch(
               addBreakdown({
@@ -175,22 +186,14 @@ export function ReportBreakdowns() {
             );
           }}
         >
-          {(setOpen) => (
-            <Button
-              variant={'outline'}
-              onClick={() => setOpen((prev) => !prev)}
-              size={'sm'}
-              autoHeight
-              className="flex-1"
-            >
-              <div className="row w-full gap-2 items-center">
-                <SplitIcon className="size-4" />
-                Select breakdown
-              </div>
-              <ChevronsUpDownIcon className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-            </Button>
-          )}
-        </PropertiesCombobox>
+          <Button variant={'outline'} size={'sm'} autoHeight className="flex-1">
+            <div className="row w-full gap-2 items-center">
+              <SplitIcon className="size-4" />
+              Select breakdown
+            </div>
+            <ChevronsUpDownIcon className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+          </Button>
+        </PropertyPicker>
       </div>
     </div>
   );

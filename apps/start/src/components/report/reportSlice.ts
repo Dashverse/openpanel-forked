@@ -275,7 +275,7 @@ export const reportSlice = createSlice({
     },
 
     // Date range
-    changeEndDate: (state, action: PayloadAction<string>) => {
+    changeEndDate: (state, action: PayloadAction<string | null>) => {
       state.dirty = true;
       state.endDate = action.payload;
 
@@ -334,19 +334,13 @@ export const reportSlice = createSlice({
         ...action.payload,
       });
     },
-    removeGlobalFilter: (
-      state,
-      action: PayloadAction<{ id: string }>,
-    ) => {
+    removeGlobalFilter: (state, action: PayloadAction<{ id: string }>) => {
       state.dirty = true;
       state.globalFilters = state.globalFilters.filter(
         (f) => f.id !== action.payload.id,
       );
     },
-    changeGlobalFilter: (
-      state,
-      action: PayloadAction<IChartEventFilter>,
-    ) => {
+    changeGlobalFilter: (state, action: PayloadAction<IChartEventFilter>) => {
       state.dirty = true;
       state.globalFilters = state.globalFilters.map((f) =>
         f.id === action.payload.id ? action.payload : f,

@@ -131,7 +131,7 @@ export function ComboboxEvents<
 
     const firstValue = selectedValues[0];
     const item = firstValue ? find(firstValue) : null;
-    let label = item?.name || firstValue;
+    let label = firstValue === '*' ? 'All Events' : item?.name || firstValue;
 
     if (multiple && selectedValues.length > 1) {
       label += ` +${selectedValues.length - 1}`;
@@ -175,7 +175,7 @@ export function ComboboxEvents<
       </PopoverTrigger>
       <PopoverPortal>
         <PopoverContent
-          className="w-full max-w-[33em] max-sm:max-w-[100vw] p-0"
+          className="w-full max-w-[26em] max-sm:max-w-[100vw] p-0"
           align={align}
           portal={portal}
         >
@@ -221,36 +221,41 @@ export function ComboboxEvents<
                   })}
                   itemHeight={32}
                   itemKey="value"
-                  className="w-[33em] max-sm:max-w-[100vw]"
+                  className="w-[26em] max-sm:max-w-[100vw]"
                 >
-              {(item) => {
-                return (
-                  <CommandItem
-                    className={cn(
-                      'p-4 py-2.5 gap-4',
-                      selectedValues.includes(item.name as T) && 'bg-accent',
-                    )}
-                    key={item.name}
-                    value={item.name}
-                    onSelect={(currentValue) => {
-                      handleSelection(item.name);
-                    }}
-                  >
-                    {selectedValues.includes(item.name as T) ? (
-                      <CheckIcon className="h-4 w-4 flex-shrink-0" />
-                    ) : (
-                      <EventIcon name={item.name} meta={item.meta} size="sm" />
-                    )}
-                    <span className="font-medium flex-1 truncate">
-                      {item.name === '*' ? 'Any events' : item.name}
-                    </span>
-                    <span className="text-muted-foreground font-mono font-medium">
-                      {number.short(item.count)}
-                    </span>
-                  </CommandItem>
-                );
-              }}
-            </VirtualList>
+                  {(item) => {
+                    return (
+                      <CommandItem
+                        className={cn(
+                          'p-4 py-2.5 gap-4',
+                          selectedValues.includes(item.name as T) &&
+                            'bg-accent',
+                        )}
+                        key={item.name}
+                        value={item.name}
+                        onSelect={(currentValue) => {
+                          handleSelection(item.name);
+                        }}
+                      >
+                        {selectedValues.includes(item.name as T) ? (
+                          <CheckIcon className="h-4 w-4 flex-shrink-0" />
+                        ) : (
+                          <EventIcon
+                            name={item.name}
+                            meta={item.meta}
+                            size="sm"
+                          />
+                        )}
+                        <span className="font-medium flex-1 truncate">
+                          {item.name === '*' ? 'All Events' : item.name}
+                        </span>
+                        <span className="text-muted-foreground font-mono font-medium">
+                          {number.short(item.count)}
+                        </span>
+                      </CommandItem>
+                    );
+                  }}
+                </VirtualList>
               </>
             )}
           </Command>

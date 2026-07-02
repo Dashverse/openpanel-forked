@@ -107,8 +107,8 @@ export function SidebarContainer({
       />
       <div
         className={cn(
-          'group/sidebar fixed left-0 top-0 z-40 flex h-screen w-52 flex-col border-r border-border bg-card transition-transform duration-150',
-          '-translate-x-52 lg:-translate-x-0', // responsive
+          'group/sidebar fixed left-0 top-0 z-40 flex h-screen w-56 flex-col border-r border-border bg-card transition-transform duration-150',
+          '-translate-x-56 lg:-translate-x-0', // responsive
           active && 'translate-x-0', // force active on mobile
           'data-[collapsed=true]:lg:w-16', // icon rail (lg+)
         )}
@@ -125,7 +125,7 @@ export function SidebarContainer({
         </div>
         <div
           className={cn(
-            'flex h-16 shrink-0 items-center gap-2 border-b border-border px-4',
+            'flex h-14 shrink-0 items-center gap-2 border-b border-border px-4',
             'group-data-[collapsed=true]/sidebar:lg:justify-center group-data-[collapsed=true]/sidebar:lg:px-0',
           )}
         >
@@ -147,7 +147,6 @@ export function SidebarContainer({
           ])}
         >
           {children}
-
           <div className="mt-auto w-full pt-6">
             <div
               className={cn(
@@ -171,25 +170,24 @@ export function SidebarContainer({
                 Self-hosted instance, support us!
               </a>
             )}
-            <button
-              type="button"
-              onClick={() => setCollapsed(!collapsed)}
-              title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-              className={cn(
-                'mt-2 hidden w-full lg:flex items-center justify-center gap-2 rounded-md px-3 py-2 text-[13px] font-medium text-muted-foreground transition-all hover:bg-def-200',
-              )}
-            >
-              <PanelLeftCloseIcon
-                size={18}
-                className={cn('shrink-0', SB_HIDE)}
-              />
-              <PanelLeftOpenIcon
-                size={18}
-                className="hidden shrink-0 group-data-[collapsed=true]/sidebar:lg:block"
-              />
-              <span className={SB_HIDE}>Collapse</span>
-            </button>
           </div>
+        </div>
+        <div className="shrink-0 px-4 pb-4 group-data-[collapsed=true]/sidebar:lg:px-0">
+          <button
+            type="button"
+            onClick={() => setCollapsed(!collapsed)}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className={cn(
+              'mt-2 hidden w-full lg:flex items-center justify-center gap-2 rounded-md px-3 py-2 text-[13px] font-medium text-muted-foreground transition-all hover:bg-def-200',
+            )}
+          >
+            <PanelLeftCloseIcon size={18} className={cn('shrink-0', SB_HIDE)} />
+            <PanelLeftOpenIcon
+              size={18}
+              className="hidden shrink-0 group-data-[collapsed=true]/sidebar:lg:block"
+            />
+            <span className={SB_HIDE}>Collapse</span>
+          </button>
         </div>
         <div className="fixed bottom-0 left-0 right-0 pointer-events-none">
           <div className="h-8 w-full bg-gradient-to-t from-card to-card/0" />

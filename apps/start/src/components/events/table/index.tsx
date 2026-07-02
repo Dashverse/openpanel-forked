@@ -1,14 +1,10 @@
+import { EventsFilters } from '@/components/events/filters/events-filters';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
-import {
-  OverviewFilterButton,
-  OverviewFiltersButtons,
-} from '@/components/overview/filters/overview-filters-buttons';
 import { Skeleton } from '@/components/skeleton';
 import { Button } from '@/components/ui/button';
 import { useDataTableColumnVisibility } from '@/components/ui/data-table/data-table-hooks';
 import { DataTableToolbarContainer } from '@/components/ui/data-table/data-table-toolbar';
 import { DataTableViewOptions } from '@/components/ui/data-table/data-table-view-options';
-import { useAppParams } from '@/hooks/use-app-params';
 import { pushModal } from '@/modals';
 import type { RouterInputs, RouterOutputs } from '@/trpc/client';
 import { cn } from '@/utils/cn';
@@ -19,7 +15,7 @@ import { getCoreRowModel, useReactTable } from '@tanstack/react-table';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import type { TRPCInfiniteData } from '@trpc/tanstack-react-query';
 import { format } from 'date-fns';
-import { CalendarIcon, FilterIcon, Loader2Icon } from 'lucide-react';
+import { CalendarIcon, Loader2Icon } from 'lucide-react';
 import { parseAsIsoDateTime, useQueryState } from 'nuqs';
 import { last } from 'ramda';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -45,7 +41,7 @@ interface VirtualizedEventsTableProps {
   table: Table<IServiceEvent>;
   data: IServiceEvent[];
   isLoading: boolean;
-  expandedId: string | null;
+  expandedIds: Set<string>;
   onToggle: (id: string) => void;
 }
 
@@ -165,7 +161,7 @@ const VirtualizedEventsTable = ({
   table,
   data,
   isLoading,
-  expandedId,
+  expandedIds,
   onToggle,
 }: VirtualizedEventsTableProps) => {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -255,7 +251,11 @@ const VirtualizedEventsTable = ({
               headerColumnsHash={headerColumnsHash}
               scrollMargin={rowVirtualizer.options.scrollMargin}
               isLoading={isLoading}
-              isExpanded={!isLoading && row.original?.id === expandedId}
+              isExpanded={
+                !isLoading &&
+                !!row.original?.id &&
+                expandedIds.has(row.original.id)
+              }
               onToggle={onToggle}
             />
           );
@@ -268,9 +268,17 @@ const VirtualizedEventsTable = ({
 export const EventsTable = ({ query }: Props) => {
   const { isLoading } = query;
   const columns = useColumns();
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const onToggle = useCallback((id: string) => {
-    setExpandedId((prev) => (prev === id ? null : id));
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   }, []);
 
   const data = useMemo(() => {
@@ -330,7 +338,7 @@ export const EventsTable = ({ query }: Props) => {
         table={table}
         data={data}
         isLoading={isLoading}
-        expandedId={expandedId}
+        expandedIds={expandedIds}
         onToggle={onToggle}
       />
       <div className="w-full h-10 center-center pt-4" ref={inViewportRef}>
@@ -354,7 +362,6 @@ function EventsTableToolbar({
   query: Props['query'];
   table: Table<IServiceEvent>;
 }) {
-  const { projectId } = useAppParams();
   const [startDate, setStartDate] = useQueryState(
     'startDate',
     parseAsIsoDateTime,
@@ -362,32 +369,33 @@ function EventsTableToolbar({
   const [endDate, setEndDate] = useQueryState('endDate', parseAsIsoDateTime);
 
   return (
-    <DataTableToolbarContainer>
-      <div className="flex flex-1 flex-wrap items-center gap-2">
-        <EventListener onRefresh={() => query.refetch()} />
-        <Button
-          variant="outline"
-          size="sm"
-          icon={CalendarIcon}
-          onClick={() => {
-            pushModal('DateRangerPicker', {
-              onChange: ({ startDate, endDate }) => {
-                setStartDate(startDate);
-                setEndDate(endDate);
-              },
-              startDate: startDate || undefined,
-              endDate: endDate || undefined,
-            });
-          }}
-        >
-          {startDate && endDate
-            ? `${format(startDate, 'MMM d')} - ${format(endDate, 'MMM d')}`
-            : 'Date range'}
-        </Button>
-        <OverviewFilterButton enableEventsFilter />
-        <OverviewFiltersButtons className="justify-end p-0" />
-      </div>
-      <DataTableViewOptions table={table} />
-    </DataTableToolbarContainer>
+    <div className="flex flex-col gap-2 mb-4">
+      <DataTableToolbarContainer className="mb-0">
+        <div className="flex flex-1 flex-wrap items-center gap-2">
+          <EventListener onRefresh={() => query.refetch()} />
+          <Button
+            variant="outline"
+            size="sm"
+            icon={CalendarIcon}
+            onClick={() => {
+              pushModal('DateRangerPicker', {
+                onChange: ({ startDate, endDate }) => {
+                  setStartDate(startDate);
+                  setEndDate(endDate);
+                },
+                startDate: startDate || undefined,
+                endDate: endDate || undefined,
+              });
+            }}
+          >
+            {startDate && endDate
+              ? `${format(startDate, 'MMM d')} - ${format(endDate, 'MMM d')}`
+              : 'Date range'}
+          </Button>
+        </div>
+        <DataTableViewOptions table={table} />
+      </DataTableToolbarContainer>
+      <EventsFilters />
+    </div>
   );
 }

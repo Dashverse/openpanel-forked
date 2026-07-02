@@ -7,6 +7,7 @@ export function OverviewRange() {
 
   return (
     <TimeWindowPicker
+      segmented
       onChange={setRange}
       value={range}
       onStartDateChange={setStartDate}
