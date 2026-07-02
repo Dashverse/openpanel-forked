@@ -1,4 +1,3 @@
-import { RenderDots } from '@/components/ui/RenderDots';
 import { Button } from '@/components/ui/button';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
@@ -105,6 +104,9 @@ export function PureCohortFilterItem({
 
   const { items: cohorts } = useCohorts({ projectId, includeCount: false });
 
+  // Older/saved filters may only carry the id inside the name (cohort:<id>).
+  const cohortId = filter.cohortId ?? filter.name.split(':')[1];
+
   const cohortsCombobox = cohorts.map((cohort) => ({
     value: cohort.id,
     label: cohort.name,
@@ -132,10 +134,16 @@ export function PureCohortFilterItem({
           size={14}
           className="shrink-0 text-muted-foreground"
         />
-        <div className="flex flex-1 ">
-          <RenderDots truncate>{filter.name}</RenderDots>
-        </div>
-        <Button variant="ghost" size="sm" onClick={removeFilter}>
+        <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+          Cohort
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0"
+          aria-label="Remove filter"
+          onClick={removeFilter}
+        >
           <Trash size={16} />
         </Button>
       </div>
@@ -154,7 +162,7 @@ export function PureCohortFilterItem({
         </DropdownMenuComposed>
         <ComboboxAdvanced
           items={cohortsCombobox}
-          value={filter.cohortId ? [filter.cohortId] : []}
+          value={cohortId ? [cohortId] : []}
           className="flex-1"
           onChange={changeCohort}
           placeholder="Select cohort..."
