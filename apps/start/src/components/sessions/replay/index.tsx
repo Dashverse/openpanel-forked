@@ -324,6 +324,7 @@ function ReplayContent({
                 {hasReplay && (
                   <button
                     type="button"
+                    aria-pressed={skipInactive}
                     onClick={() => setSkipInactive((v) => !v)}
                     title={
                       skipInactive

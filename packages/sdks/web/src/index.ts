@@ -69,6 +69,13 @@ export class OpenPanel extends OpenPanelBase {
    */
   private windowId?: string;
 
+  /**
+   * Unsubscribe for the session-rotation listener registered in
+   * maybeStartReplay(). Captured so stopReplay() can detach it — otherwise a
+   * later rotation would restart the recorder after a manual stop.
+   */
+  private replaySessionUnsub?: () => void;
+
   constructor(public options: OpenPanelOptions) {
     super({
       sdk: 'web',
@@ -218,35 +225,10 @@ export class OpenPanel extends OpenPanelBase {
     // start a new one with the fresh id (chunk_index=0 + FullSnapshot).
     let activeSessionId = this.sessionId;
     const bumpActivity = () => this.sessionManager?.bumpActivity();
-    startReplayRecorder(
-      opts,
-      (chunk) => {
-        this.send({
-          type: 'replay',
-          payload: {
-            ...chunk,
-            session_id: activeSessionId,
-          },
-        });
-      },
-      bumpActivity,
-    );
-
-    this.sessionManager.onSessionIdChanged((newId) => {
-      // Match PostHog: a session rotation also mints a fresh window_id. The
-      // recorder restarts with a new FullSnapshot at chunk_index=0, so the
-      // post-rotation recording is fully self-describing — the dashboard
-      // groups by window_id and never stitches pre- and post-idle chunks
-      // into one continuous timeline.
-      this.windowId = this.newUuid();
-      this.log('replay: session rotated, restarting recorder', {
-        from: activeSessionId,
-        to: newId,
-        windowId: this.windowId,
-      });
-      this.sessionId = newId;
-      stopReplayRecorder();
-      activeSessionId = newId;
+    // Shared recorder-start so the initial start and the post-rotation restart
+    // stay in sync (single source of truth for the chunk-send closure).
+    const startForSession = (sessionId: string) => {
+      activeSessionId = sessionId;
       startReplayRecorder(
         opts,
         (chunk) => {
@@ -260,10 +242,33 @@ export class OpenPanel extends OpenPanelBase {
         },
         bumpActivity,
       );
+    };
+
+    startForSession(this.sessionId);
+
+    this.replaySessionUnsub = this.sessionManager.onSessionIdChanged((newId) => {
+      // Match PostHog: a session rotation also mints a fresh window_id. The
+      // recorder restarts with a new FullSnapshot at chunk_index=0, so the
+      // post-rotation recording is fully self-describing — the dashboard
+      // groups by window_id and never stitches pre- and post-idle chunks
+      // into one continuous timeline.
+      this.windowId = this.newUuid();
+      this.log('replay: session rotated, restarting recorder', {
+        from: activeSessionId,
+        to: newId,
+        windowId: this.windowId,
+      });
+      this.sessionId = newId;
+      stopReplayRecorder();
+      startForSession(newId);
     });
   }
 
   public stopReplay() {
+    // Detach the rotation listener first, so a later session rotation can't
+    // restart the recorder after a manual stop.
+    this.replaySessionUnsub?.();
+    this.replaySessionUnsub = undefined;
     stopReplayRecorder();
   }
 

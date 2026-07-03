@@ -83,6 +83,10 @@ export function startReplayRecorder(
   // always captured. lastActivityMs tracks the last real user interaction.
   let isIdle = false;
   let lastActivityMs = Date.now();
+  // MouseMove/Scroll fire many times a second and each onUserActivity() bump
+  // writes localStorage. Throttle the notify to at most once/sec — lastActivityMs
+  // still updates on every interactive event (in-memory, cheap).
+  let lastActivityNotifyMs = 0;
 
   function flush(isFullSnapshot: boolean): void {
     if (buffer.length === 0) return;
@@ -148,7 +152,10 @@ export function startReplayRecorder(
 
       if (interactive) {
         lastActivityMs = event.timestamp;
-        onUserActivity?.();
+        if (event.timestamp - lastActivityNotifyMs >= 1000) {
+          lastActivityNotifyMs = event.timestamp;
+          onUserActivity?.();
+        }
         if (isIdle) {
           // Returning from idle. The player's DOM mirror is stale (we dropped
           // the mutations that happened while idle), so force a fresh
