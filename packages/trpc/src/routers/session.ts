@@ -6,6 +6,7 @@ import {
   getSessionReplayChunksByIndexRange,
   getSessionReplayChunksFrom,
   getSessionReplayMeta,
+  getSessionWindows,
   sessionHasReplay,
   sessionService,
 } from '@openpanel/db';
@@ -82,10 +83,25 @@ export const sessionRouter = createTRPCRouter({
         sessionId: z.string(),
         projectId: z.string(),
         fromIndex: z.number().int().min(0).default(0),
+        // When set, restrict chunks to a single recorder (tab / page-load).
+        // Keeps multi-tab sessions playable — one window's chunk_index
+        // sequence is clean 0..N with no cross-recorder mixing.
+        windowId: z.string().optional(),
       }),
     )
-    .query(({ input: { sessionId, projectId, fromIndex } }) => {
-      return getSessionReplayChunksFrom(sessionId, projectId, fromIndex);
+    .query(({ input: { sessionId, projectId, fromIndex, windowId } }) => {
+      return getSessionReplayChunksFrom(
+        sessionId,
+        projectId,
+        fromIndex,
+        windowId,
+      );
+    }),
+
+  replayWindows: protectedProcedure
+    .input(z.object({ sessionId: z.string(), projectId: z.string() }))
+    .query(({ input: { sessionId, projectId } }) => {
+      return getSessionWindows(sessionId, projectId);
     }),
 
   replayMeta: protectedProcedure
@@ -101,16 +117,20 @@ export const sessionRouter = createTRPCRouter({
         projectId: z.string(),
         fromIndex: z.number().min(0),
         toIndex: z.number().min(0),
+        windowId: z.string().optional(),
       }),
     )
-    .query(({ input: { sessionId, projectId, fromIndex, toIndex } }) => {
-      return getSessionReplayChunksByIndexRange(
-        sessionId,
-        projectId,
-        fromIndex,
-        toIndex,
-      );
-    }),
+    .query(
+      ({ input: { sessionId, projectId, fromIndex, toIndex, windowId } }) => {
+        return getSessionReplayChunksByIndexRange(
+          sessionId,
+          projectId,
+          fromIndex,
+          toIndex,
+          windowId,
+        );
+      },
+    ),
 
   /**
    * Smart seek — given a target wall-clock ms inside the session, returns the
@@ -128,14 +148,18 @@ export const sessionRouter = createTRPCRouter({
         // server-side inside getSessionReplayChunksAroundTime.
         targetMs: z.number().min(0),
         lookaheadMs: z.number().min(0).max(120_000).default(30_000),
+        windowId: z.string().optional(),
       }),
     )
-    .query(({ input: { sessionId, projectId, targetMs, lookaheadMs } }) => {
-      return getSessionReplayChunksAroundTime(
-        sessionId,
-        projectId,
-        targetMs,
-        lookaheadMs,
-      );
-    }),
+    .query(
+      ({ input: { sessionId, projectId, targetMs, lookaheadMs, windowId } }) => {
+        return getSessionReplayChunksAroundTime(
+          sessionId,
+          projectId,
+          targetMs,
+          lookaheadMs,
+          windowId,
+        );
+      },
+    ),
 });

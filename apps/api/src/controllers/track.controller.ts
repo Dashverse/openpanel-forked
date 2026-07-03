@@ -402,6 +402,9 @@ async function handleReplay({
   await replayBuffer.add({
     project_id: projectId,
     session_id: sessionId,
+    // Empty string for older SDKs — CH column defaults to '' so the raw
+    // JSONEachRow passthrough stays valid.
+    window_id: payload.window_id ?? '',
     chunk_index: payload.chunk_index,
     started_at: payload.started_at,
     ended_at: payload.ended_at,

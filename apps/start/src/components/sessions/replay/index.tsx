@@ -1,11 +1,11 @@
 import type { IServiceEvent } from '@openpanel/db';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { FastForwardIcon, Maximize2, Minimize2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserChrome } from './browser-chrome';
 import { ReplayTime } from './replay-controls';
 import { ReplayTimeline } from './replay-timeline';
-import { getEventOffsetMs } from './replay-utils';
+import { formatDuration, getEventOffsetMs } from './replay-utils';
 import {
   ReplayProvider,
   useCurrentTime,
@@ -55,10 +55,12 @@ function ReplayChunkLoader({
   sessionId,
   projectId,
   fromIndex,
+  windowId,
 }: {
   sessionId: string;
   projectId: string;
   fromIndex: number;
+  windowId?: string;
 }) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
@@ -73,6 +75,7 @@ function ReplayChunkLoader({
             sessionId,
             projectId,
             fromIndex,
+            windowId,
           }),
         )
         .then((res) => {
@@ -153,10 +156,12 @@ function ReplayBufferBootstrap({
   sessionId,
   projectId,
   firstBatch,
+  windowId,
 }: {
   sessionId: string;
   projectId: string;
   firstBatch: { chunkIndex: number; startedAtMs: number; endedAtMs: number; events: { type: number; data: unknown; timestamp: number }[] }[];
+  windowId?: string;
 }) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
@@ -181,6 +186,7 @@ function ReplayBufferBootstrap({
           projectId,
           fromIndex,
           toIndex,
+          windowId,
         }),
       );
       return res.data.map((row) => ({
@@ -191,7 +197,7 @@ function ReplayBufferBootstrap({
       }));
     });
     return () => setPrefetchChunks(null);
-  }, [sessionId, projectId, queryClient, trpc, setPrefetchChunks]);
+  }, [sessionId, projectId, windowId, queryClient, trpc, setPrefetchChunks]);
 
   // Register the smart-seek fetcher. Used by seek() to jump to the latest
   // full DOM snapshot before the target time — one round trip, no walking.
@@ -202,6 +208,7 @@ function ReplayBufferBootstrap({
           sessionId,
           projectId,
           targetMs,
+          windowId,
         }),
       );
       return res.data.map((row) => ({
@@ -212,7 +219,7 @@ function ReplayBufferBootstrap({
       }));
     });
     return () => setSeekFetch(null);
-  }, [sessionId, projectId, queryClient, trpc, setSeekFetch]);
+  }, [sessionId, projectId, windowId, queryClient, trpc, setSeekFetch]);
 
   return null;
 }
@@ -220,9 +227,17 @@ function ReplayBufferBootstrap({
 function ReplayContent({
   sessionId,
   projectId,
+  windowId,
+  windowDurationMs,
 }: {
   sessionId: string;
   projectId: string;
+  // When set, only this recorder's (tab's) chunks are loaded — keeps
+  // multi-tab sessions playable. undefined = legacy behaviour (all chunks).
+  windowId?: string;
+  // Per-window duration from the windows list. Overrides the session-wide
+  // replayMeta duration so the timeline matches the selected recording.
+  windowDurationMs?: number;
 }) {
   const trpc = useTRPC();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -242,6 +257,7 @@ function ReplayContent({
       sessionId,
       projectId,
       fromIndex: 0,
+      windowId,
     })
   );
 
@@ -268,6 +284,9 @@ function ReplayContent({
   );
   const hasMore = firstBatch?.hasMore ?? false;
   const hasReplay = playerEvents.length !== 0;
+  // Skip idle periods by default — a mostly-idle recording plays through in
+  // its seconds of real activity instead of frozen minutes. User-toggleable.
+  const [skipInactive, setSkipInactive] = useState(true);
 
   function renderReplay() {
     if (replayLoading) {
@@ -279,7 +298,7 @@ function ReplayContent({
       );
     }
     if (hasReplay) {
-      return <ReplayPlayer events={playerEvents} />;
+      return <ReplayPlayer events={playerEvents} skipInactive={skipInactive} />;
     }
     return (
       <div className="flex h-[320px] items-center justify-center bg-background text-muted-foreground text-sm">
@@ -289,7 +308,9 @@ function ReplayContent({
   }
 
   return (
-    <ReplayProvider totalDurationMs={replayMeta?.totalDurationMs}>
+    <ReplayProvider
+      totalDurationMs={windowDurationMs ?? replayMeta?.totalDurationMs}
+    >
       <div
         className="grid gap-4 lg:grid-cols-[1fr_380px] [&:fullscreen]:flex [&:fullscreen]:flex-col [&:fullscreen]:bg-background [&:fullscreen]:p-4"
         id="replay"
@@ -300,6 +321,25 @@ function ReplayContent({
             right={
               <div className="flex items-center gap-2">
                 {hasReplay && <ReplayTime />}
+                {hasReplay && (
+                  <button
+                    type="button"
+                    onClick={() => setSkipInactive((v) => !v)}
+                    title={
+                      skipInactive
+                        ? 'Skipping inactivity — click to play idle periods too'
+                        : 'Playing everything — click to skip idle periods'
+                    }
+                    className={
+                      skipInactive
+                        ? 'flex items-center gap-1 rounded border border-primary bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary'
+                        : 'flex items-center gap-1 rounded border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground'
+                    }
+                  >
+                    <FastForwardIcon className="size-3" />
+                    Skip idle
+                  </button>
+                )}
                 <FullscreenButton containerRef={containerRef} />
               </div>
             }
@@ -326,6 +366,7 @@ function ReplayContent({
           firstBatch={firstBatchData}
           projectId={projectId}
           sessionId={sessionId}
+          windowId={windowId}
         />
       )}
       {hasReplay && hasMore && (
@@ -333,6 +374,7 @@ function ReplayContent({
           fromIndex={firstBatch?.data?.length ?? 0}
           projectId={projectId}
           sessionId={sessionId}
+          windowId={windowId}
         />
       )}
     </ReplayProvider>
@@ -346,5 +388,69 @@ export function ReplayShell({
   sessionId: string;
   projectId: string;
 }) {
-  return <ReplayContent projectId={projectId} sessionId={sessionId} />;
+  const trpc = useTRPC();
+  const [selectedWindowId, setSelectedWindowId] = useState<string | null>(null);
+
+  // List the distinct recorders (tabs) that wrote to this session. Each is a
+  // separate rrweb recording — the player must play one at a time to avoid
+  // mixing DOM mirror states across concurrent tabs.
+  const { data: windows } = useQuery(
+    trpc.session.replayWindows.queryOptions({ sessionId, projectId }),
+  );
+
+  const hasWindows = (windows?.length ?? 0) > 0;
+  const multiWindow = (windows?.length ?? 0) > 1;
+
+  // Default to the first (earliest) window once the list loads.
+  const activeWindowId =
+    selectedWindowId ?? (hasWindows ? windows![0]!.windowId : null);
+  const activeWindow = windows?.find((w) => w.windowId === activeWindowId);
+
+  return (
+    <div className="flex flex-col gap-3">
+      {multiWindow && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted-foreground">
+            Recorded across {windows!.length} tabs:
+          </span>
+          {windows!.map((w, i) => {
+            const isActive = w.windowId === activeWindowId;
+            return (
+              <button
+                key={w.windowId || 'legacy'}
+                type="button"
+                onClick={() => setSelectedWindowId(w.windowId)}
+                className={
+                  isActive
+                    ? 'rounded-md border border-primary bg-primary/10 px-3 py-1.5 text-sm font-medium text-primary'
+                    : 'rounded-md border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted/50'
+                }
+              >
+                {w.windowId === '' ? 'Legacy' : `Tab ${i + 1}`}
+                <span className="ml-2 font-mono text-xs opacity-70">
+                  {formatDuration(w.durationMs)}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/*
+        Remount ReplayContent on window switch (key) so the rrweb player,
+        chunk buffer, and all internal state reset cleanly to the selected
+        recording. Passing windowId scopes every chunk fetch to that recorder.
+        When there are no window rows yet (query loading) we render without a
+        windowId — legacy behaviour — so single-window/legacy sessions still
+        play immediately.
+      */}
+      <ReplayContent
+        key={activeWindowId ?? 'default'}
+        projectId={projectId}
+        sessionId={sessionId}
+        windowId={activeWindowId ?? undefined}
+        windowDurationMs={activeWindow?.durationMs}
+      />
+    </div>
+  );
 }

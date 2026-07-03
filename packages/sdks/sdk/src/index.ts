@@ -28,6 +28,16 @@ export type TrackHandlerPayload =
 
 export type ReplayPayload = {
   session_id: string;
+  /**
+   * Client-generated UUID unique per tab / per page-load. Regenerated on
+   * every SDK init (not persisted), so a refresh in the same tab starts a
+   * fresh recording. Distinguishes chunks from multiple tabs sharing the
+   * same session_id — server keys chunks on
+   * (project_id, session_id, window_id, chunk_index).
+   *
+   * Optional for backward compat with older SDKs that don't set it.
+   */
+  window_id?: string;
   chunk_index: number;
   events_count: number;
   is_full_snapshot: boolean;
@@ -40,6 +50,20 @@ export type TrackPayload = {
   name: string;
   properties?: Record<string, unknown>;
   profileId?: string;
+  /**
+   * Client-owned session_id. When set, the server trusts this value
+   * verbatim instead of deriving one from (deviceId + Redis lookup).
+   * Web SDK populates this from SessionIdManager (in packages/sdks/web).
+   * Absent from server-side SDKs and older clients — server falls back
+   * to legacy derivation in that case.
+   */
+  session_id?: string;
+  /**
+   * Client-generated UUID unique per tab / per page-load. Regenerated
+   * on every SDK init (not persisted). Same value as ReplayPayload's
+   * window_id so events and chunks from the same tab join correctly.
+   */
+  window_id?: string;
 };
 
 export type TrackProperties = {
@@ -156,6 +180,7 @@ export class OpenPanel {
           ...(this.global ?? {}),
           ...(properties ?? {}),
         },
+        ...(this.sessionId ? { session_id: this.sessionId } : {}),
       },
     });
   }
