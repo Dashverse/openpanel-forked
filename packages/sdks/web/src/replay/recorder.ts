@@ -30,6 +30,15 @@ const ACTIVE_SOURCES = new Set([1, 2, 3, 4, 5, 6, 7, 12]);
 
 const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000; // 5 min (matches PostHog)
 
+// Absolute ceiling for a SINGLE event sent as its own chunk. maxPayloadBytes
+// (default 1 MB) is only the batch-split threshold — a single event that
+// exceeds it is still sent alone, because dropping it corrupts the recording:
+// dropping a FullSnapshot leaves the player with no rebuild anchor (seek
+// lands on "Node not found" → black frame), and dropping a mutation breaks
+// the DOM mirror chain for everything after it. Only beyond this hard cap do
+// we drop, loudly. The ingest API accepts far larger bodies (500 MB).
+const HARD_EVENT_CAP_BYTES = 10 * 1024 * 1024; // 10 MB
+
 /** An event counts as user activity only if it's an interactive incremental. */
 function isInteractiveEvent(event: eventWithTime): boolean {
   return (
@@ -88,30 +97,40 @@ export function startReplayRecorder(
   // still updates on every interactive event (in-memory, cheap).
   let lastActivityNotifyMs = 0;
 
-  function flush(isFullSnapshot: boolean): void {
+  function flush(): void {
     if (buffer.length === 0) return;
 
     const payloadJson = JSON.stringify(buffer);
     const payloadBytes = new TextEncoder().encode(payloadJson).length;
 
-    // Recursively split oversized batches; drop a single event if it alone exceeds the cap
     if (payloadBytes > maxPayloadBytes) {
+      // Recursively split oversized batches so each request stays small.
       if (buffer.length > 1) {
         const mid = Math.floor(buffer.length / 2);
         const firstHalf = buffer.slice(0, mid);
         const secondHalf = buffer.slice(mid);
-        const firstHasFullSnapshot =
-          isFullSnapshot && firstHalf.some((e) => e.type === 2);
         buffer = firstHalf;
-        flush(firstHasFullSnapshot);
+        flush();
         buffer = secondHalf;
-        flush(false);
+        flush();
         return;
       }
-      buffer = [];
-      return;
+      // A single event over the split threshold is sent as its own chunk —
+      // see HARD_EVENT_CAP_BYTES for why dropping it is never acceptable.
+      if (payloadBytes > HARD_EVENT_CAP_BYTES) {
+        console.warn(
+          '[OpenPanel.replay] dropping oversized event — replay may be broken from this point',
+          { type: buffer[0]!.type, bytes: payloadBytes },
+        );
+        buffer = [];
+        return;
+      }
     }
 
+    // A chunk "is" a full snapshot iff it actually contains a type-2 event.
+    // Derived from content — never from the checkout flag — because the
+    // dashboard's seek anchoring queries chunks by this column.
+    const isFullSnapshot = buffer.some((e) => e.type === 2);
     const startedAt = buffer[0]!.timestamp;
     const endedAt = buffer[buffer.length - 1]!.timestamp;
 
@@ -133,13 +152,11 @@ export function startReplayRecorder(
   }
 
   function flushIfNeeded(isCheckout: boolean): void {
-    const isFullSnapshot =
-      isCheckout ||
-      buffer.some((e) => e.type === 2); /* EventType.FullSnapshot */
-    if (buffer.length >= maxEventsPerChunk) {
-      flush(isFullSnapshot);
-    } else if (isCheckout && buffer.length > 0) {
-      flush(true);
+    // On checkout, flush immediately so the FullSnapshot begins a fresh,
+    // cleanly-bounded chunk (the is_full_snapshot column is derived from
+    // chunk content inside flush()).
+    if (buffer.length >= maxEventsPerChunk || (isCheckout && buffer.length > 0)) {
+      flush();
     }
   }
 
@@ -172,9 +189,7 @@ export function startReplayRecorder(
         // No real interaction for idleThresholdMs. Go idle: flush what we have
         // and stop capturing so background churn doesn't grow a ghost recording.
         isIdle = true;
-        if (buffer.length > 0) {
-          flush(buffer.some((e) => e.type === 2));
-        }
+        flush();
       }
 
       // While idle, drop events entirely — no buffering, no chunks.
@@ -199,24 +214,17 @@ export function startReplayRecorder(
   });
 
   flushTimer = setInterval(() => {
-    if (buffer.length > 0) {
-      const hasFullSnapshot = buffer.some((e) => e.type === 2);
-      flush(hasFullSnapshot);
-    }
+    flush();
   }, flushIntervalMs);
 
   function onVisibilityChange(): void {
-    if (document.visibilityState === 'hidden' && buffer.length > 0) {
-      const hasFullSnapshot = buffer.some((e) => e.type === 2);
-      flush(hasFullSnapshot);
+    if (document.visibilityState === 'hidden') {
+      flush();
     }
   }
 
   function onPageHide(): void {
-    if (buffer.length > 0) {
-      const hasFullSnapshot = buffer.some((e) => e.type === 2);
-      flush(hasFullSnapshot);
-    }
+    flush();
   }
 
   document.addEventListener('visibilitychange', onVisibilityChange);
@@ -224,10 +232,7 @@ export function startReplayRecorder(
 
   stopRecording = () => {
     // Final flush before teardown
-    if (buffer.length > 0) {
-      const hasFullSnapshot = buffer.some((e) => e.type === 2);
-      flush(hasFullSnapshot);
-    }
+    flush();
     if (flushTimer) {
       clearInterval(flushTimer);
       flushTimer = null;
