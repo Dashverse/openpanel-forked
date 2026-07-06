@@ -180,7 +180,7 @@ export async function getSessionList({
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
   if (search) {
     const s = sqlstring.escape(`%${search}%`);
-    sb.where.search = `(entry_path ILIKE ${s} OR exit_path ILIKE ${s} OR referrer ILIKE ${s} OR referrer_name ILIKE ${s})`;
+    sb.where.search = `(profile_id ILIKE ${s} OR entry_path ILIKE ${s} OR exit_path ILIKE ${s} OR referrer ILIKE ${s} OR referrer_name ILIKE ${s})`;
   }
   if (filters?.length) {
     Object.assign(sb.where, getEventFiltersWhereClause(filters));
@@ -304,7 +304,8 @@ export async function getSessionsCount({
   }
 
   if (search) {
-    sb.where.search = `(entry_path ILIKE '%${search}%' OR exit_path ILIKE '%${search}%' OR referrer ILIKE '%${search}%' OR referrer_name ILIKE '%${search}%')`;
+    const s = sqlstring.escape(`%${search}%`);
+    sb.where.search = `(profile_id ILIKE ${s} OR entry_path ILIKE ${s} OR exit_path ILIKE ${s} OR referrer ILIKE ${s} OR referrer_name ILIKE ${s})`;
   }
 
   if (filters && filters.length > 0) {

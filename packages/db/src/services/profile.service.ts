@@ -202,7 +202,8 @@ export async function getProfileList({
   sb.offset = Math.max(0, (cursor ?? 0) * take);
   sb.orderBy.created_at = 'created_at DESC';
   if (search) {
-    sb.where.search = `(email ILIKE '%${search}%' OR first_name ILIKE '%${search}%' OR last_name ILIKE '%${search}%')`;
+    const pattern = sqlstring.escape(`%${search}%`);
+    sb.where.search = `(id ILIKE ${pattern} OR email ILIKE ${pattern} OR first_name ILIKE ${pattern} OR last_name ILIKE ${pattern})`;
   }
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
@@ -222,7 +223,8 @@ export async function getProfileListCount({
   sb.where.project_id = `project_id = ${sqlstring.escape(projectId)}`;
   sb.groupBy.project_id = 'project_id';
   if (search) {
-    sb.where.search = `(email ILIKE '%${search}%' OR first_name ILIKE '%${search}%' OR last_name ILIKE '%${search}%')`;
+    const pattern = sqlstring.escape(`%${search}%`);
+    sb.where.search = `(id ILIKE ${pattern} OR email ILIKE ${pattern} OR first_name ILIKE ${pattern} OR last_name ILIKE ${pattern})`;
   }
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
