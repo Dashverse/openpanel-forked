@@ -8,6 +8,7 @@ import {
   startReplayRecorder,
   stopReplayRecorder,
 } from './replay';
+import { SessionIdManager } from './session-id-manager';
 
 export type * from '@openpanel/sdk';
 export { OpenPanel as OpenPanelBase } from '@openpanel/sdk';
@@ -48,6 +49,32 @@ export class OpenPanel extends OpenPanelBase {
   private lastPath = '';
   private debounceTimer: any;
   private pendingRevenues: PendingRevenue[] = [];
+  /**
+   * Client-owned session_id manager. Populated in constructor when running
+   * in a browser context. Stays undefined server-side (SSR / Node).
+   * See docs for the PostHog-style contract this implements.
+   */
+  private sessionManager?: SessionIdManager;
+
+  /**
+   * Client-generated window_id — unique per tab / per page-load. Generated
+   * once in the constructor and never persisted, so:
+   *   - Refresh in same tab → new window_id (new recording)
+   *   - New tab → new window_id (independent recording)
+   *   - Long-lived same tab → same window_id (contiguous recording)
+   *
+   * Included in every track event and every replay chunk. Chunk uniqueness
+   * on the server is (project_id, session_id, window_id, chunk_index), so
+   * multiple tabs / refreshes never collide on chunk_index.
+   */
+  private windowId?: string;
+
+  /**
+   * Unsubscribe for the session-rotation listener registered in
+   * maybeStartReplay(). Captured so stopReplay() can detach it — otherwise a
+   * later rotation would restart the recorder after a manual stop.
+   */
+  private replaySessionUnsub?: () => void;
 
   constructor(public options: OpenPanelOptions) {
     super({
@@ -57,6 +84,15 @@ export class OpenPanel extends OpenPanelBase {
     });
 
     if (!this.isServer()) {
+      // Own the session_id client-side. Every subsequent track/identify/replay
+      // will attach the current session_id from this manager. Server no longer
+      // has to derive one from (deviceId + Redis). Also fixes:
+      //   - Bug 2 (stale closure): recorder is re-notified on idle rotation
+      //   - Bug 3 (late start): session_id is available synchronously
+      this.sessionManager = new SessionIdManager();
+      this.sessionId = this.sessionManager.getSessionId();
+      // Fresh window_id per SDK init — dies with the tab / page-load.
+      this.windowId = this.newUuid();
       try {
         const pending = sessionStorage.getItem('openpanel-pending-revenues');
         if (pending) {
@@ -167,7 +203,7 @@ export class OpenPanel extends OpenPanelBase {
     }
   }
 
-  private async maybeStartReplay() {
+  private maybeStartReplay() {
     const opts = this.options.sessionReplay;
     if (!opts?.enabled) return;
 
@@ -177,36 +213,114 @@ export class OpenPanel extends OpenPanelBase {
       return;
     }
 
-    const startTimeoutMs = opts.startTimeoutMs ?? 10_000;
-    const pollIntervalMs = 500;
-    const start = Date.now();
-
-    // Poll until we have a sessionId (established by track calls) or timeout.
-    while (!this.sessionId && Date.now() - start < startTimeoutMs) {
-      await this.fetchDeviceId().catch(() => undefined);
-      if (this.sessionId) break;
-      await new Promise((r) => setTimeout(r, pollIntervalMs));
-    }
-
-    if (!this.sessionId) {
-      this.log('replay: no sessionId after timeout, not starting recorder');
+    // session_id is available synchronously now — no polling. The manager
+    // read/created it in the constructor.
+    if (!this.sessionManager || !this.sessionId) {
+      this.log('replay: sessionManager unavailable, not starting recorder');
       return;
     }
 
-    const sessionId = this.sessionId;
-    startReplayRecorder(opts, (chunk) => {
-      this.send({
-        type: 'replay',
-        payload: {
-          ...chunk,
-          session_id: sessionId,
+    // Snapshot the id per recorder lifecycle. When SessionIdManager rotates
+    // (30-min idle or 24-hr cap), we tear down the current recorder and
+    // start a new one with the fresh id (chunk_index=0 + FullSnapshot).
+    let activeSessionId = this.sessionId;
+    const bumpActivity = () => this.sessionManager?.bumpActivity();
+    // Shared recorder-start so the initial start and the post-rotation restart
+    // stay in sync (single source of truth for the chunk-send closure).
+    const startForSession = (sessionId: string) => {
+      activeSessionId = sessionId;
+      startReplayRecorder(
+        opts,
+        (chunk) => {
+          this.send({
+            type: 'replay',
+            payload: {
+              ...chunk,
+              session_id: activeSessionId,
+            },
+          });
         },
+        bumpActivity,
+      );
+    };
+
+    startForSession(this.sessionId);
+
+    this.replaySessionUnsub = this.sessionManager.onSessionIdChanged((newId) => {
+      // Match PostHog: a session rotation also mints a fresh window_id. The
+      // recorder restarts with a new FullSnapshot at chunk_index=0, so the
+      // post-rotation recording is fully self-describing — the dashboard
+      // groups by window_id and never stitches pre- and post-idle chunks
+      // into one continuous timeline.
+      this.windowId = this.newUuid();
+      this.log('replay: session rotated, restarting recorder', {
+        from: activeSessionId,
+        to: newId,
+        windowId: this.windowId,
       });
+      this.sessionId = newId;
+      stopReplayRecorder();
+      startForSession(newId);
     });
   }
 
   public stopReplay() {
+    // Detach the rotation listener first, so a later session rotation can't
+    // restart the recorder after a manual stop.
+    this.replaySessionUnsub?.();
+    this.replaySessionUnsub = undefined;
     stopReplayRecorder();
+  }
+
+  /**
+   * Every outbound payload flows through here. We use the entry point to:
+   *   1. Let SessionIdManager decide whether to rotate (lazy check)
+   *   2. Refresh `this.sessionId` so the base class carries the fresh value
+   *   3. Stamp the fresh session_id onto non-replay payloads
+   *   4. Bump last_activity so sibling tabs know this tab is alive
+   *
+   * Replay chunks are NOT restamped here — the recorder's callback closure
+   * already tagged them with the session_id that was active at chunk
+   * creation time. Overwriting with the current session_id would misfile
+   * chunks recorded seconds before a rotation.
+   */
+  async send(payload: import('@openpanel/sdk').TrackHandlerPayload) {
+    if (this.sessionManager) {
+      const currentSessionId = this.sessionManager.getSessionId();
+      this.sessionId = currentSessionId;
+      // Only user-driven payloads count as activity. Replay chunks are NOT
+      // activity — a backgrounded tab flushing chunks from background DOM
+      // churn must not keep the session alive (that produced multi-hour ghost
+      // recordings). Real user interactions bump activity via the recorder's
+      // onUserActivity callback instead (see maybeStartReplay).
+      if (payload.type !== 'replay') {
+        this.sessionManager.bumpActivity();
+      }
+
+      if (payload.type === 'track' && payload.payload) {
+        payload = {
+          ...payload,
+          payload: {
+            ...payload.payload,
+            session_id: currentSessionId,
+            ...(this.windowId ? { window_id: this.windowId } : {}),
+          },
+        };
+      } else if (payload.type === 'replay' && payload.payload) {
+        // Replay chunk already carries session_id (stamped by the recorder
+        // closure at buffer time). Only add window_id here — don't overwrite
+        // session_id: chunks recorded before a rotation should stay under
+        // the session_id that was active at recording time.
+        payload = {
+          ...payload,
+          payload: {
+            ...payload.payload,
+            ...(this.windowId ? { window_id: this.windowId } : {}),
+          },
+        };
+      }
+    }
+    return super.send(payload);
   }
 
   private debounce(func: () => void, delay: number) {

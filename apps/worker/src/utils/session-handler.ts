@@ -29,6 +29,20 @@ export async function createSessionEndJob({
 }: {
   payload: IServiceCreateEventPayload;
 }) {
+  const jobId = getSessionEndJobId(payload.projectId, payload.deviceId);
+  // The job is keyed by deviceId, and BullMQ's add() is a no-op when a job
+  // with the same id already exists. When a client rotates its session_id
+  // (Phase 5) a stale delayed job still carries the OLD session's payload —
+  // without replacing it, later events keep matching the old session and
+  // spawn duplicate session_start events. Remove any existing delayed job so
+  // the new one carries the current session's payload.
+  const existing = await sessionsQueue.getJob(jobId);
+  if (existing) {
+    await existing.remove().catch(() => {
+      // Job may be active/locked — remove can throw. Fall back to the add
+      // below (a no-op if the id is still present); non-fatal.
+    });
+  }
   return sessionsQueue.add(
     'session',
     {
@@ -37,7 +51,7 @@ export async function createSessionEndJob({
     },
     {
       delay: SESSION_TIMEOUT,
-      jobId: getSessionEndJobId(payload.projectId, payload.deviceId),
+      jobId,
       attempts: 3,
       backoff: {
         type: 'exponential',

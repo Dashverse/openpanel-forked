@@ -172,9 +172,20 @@ export async function incomingEvent(
       })
     : null;
 
+  // Client-owned session_id (Phase 5): if the SDK sent one, trust it verbatim.
+  // Falls back to the legacy server-derived path for older SDK versions that
+  // don't send it. When the client's session_id differs from the server's
+  // existing session_end job (e.g. client rotated on 30-min idle), we treat
+  // this as a NEW session — create session_start + a new session_end job.
+  const clientSessionId = body.session_id;
+  const usingSessionId =
+    clientSessionId ?? sessionEnd?.sessionId ?? uuid();
+  const isNewSession =
+    !sessionEnd || (!!clientSessionId && clientSessionId !== sessionEnd.sessionId);
+
   const payload: IServiceCreateEventPayload = merge(baseEvent, {
     deviceId: sessionEnd?.deviceId ?? currentDeviceId,
-    sessionId: sessionEnd?.sessionId ?? uuid(),
+    sessionId: usingSessionId,
     referrer: sessionEnd?.referrer ?? baseEvent.referrer,
     referrerName: sessionEnd?.referrerName ?? baseEvent.referrerName,
     referrerType: sessionEnd?.referrerType ?? baseEvent.referrerType,
@@ -183,7 +194,7 @@ export async function incomingEvent(
     origin: baseEvent.origin || lastScreenView?.exit_origin || '',
   } as Partial<IServiceCreateEventPayload>) as IServiceCreateEventPayload;
 
-  if (!sessionEnd) {
+  if (isNewSession) {
     logger.info('Creating session start event', { event: payload });
     await createSessionStart({ payload }).catch((error) => {
       logger.error('Error creating session start event', { event: payload });
@@ -193,7 +204,7 @@ export async function incomingEvent(
 
   const event = await createEventAndNotify(payload, logger);
 
-  if (!sessionEnd) {
+  if (isNewSession) {
     logger.info('Creating session end job', { event: payload });
     await createSessionEndJob({ payload }).catch((error) => {
       logger.error('Error creating session end job', { event: payload });

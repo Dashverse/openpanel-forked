@@ -385,10 +385,20 @@ export async function getSessionReplayChunksFrom(
   sessionId: string,
   projectId: string,
   fromIndex: number,
+  windowId?: string,
 ) {
-  // LIMIT 1 BY chunk_index dedupes duplicate rows at the same chunk_index
-  // (legacy recorder restart bug) by keeping the earliest one — same semantics
-  // as argMin but without holding every payload in memory.
+  // When a windowId is supplied, scope chunks to that single recorder
+  // (one tab / one page-load). This is what keeps multi-tab sessions
+  // playable: each window's chunk_index sequence is clean 0..N, so feeding
+  // one window at a time never mixes rrweb mirror states across recorders.
+  //
+  // Without a windowId (legacy / single-window sessions) we fall back to
+  // the old behaviour: LIMIT 1 BY chunk_index dedupes duplicate rows at the
+  // same chunk_index by keeping the earliest one.
+  const windowFilter =
+    windowId !== undefined
+      ? `AND window_id = ${sqlstring.escape(windowId)}`
+      : '';
   const rows = await chQuery<ReplayChunkRow>(
     `SELECT chunk_index,
             payload,
@@ -397,6 +407,7 @@ export async function getSessionReplayChunksFrom(
      FROM ${TABLE_NAMES.session_replay_chunks}
      WHERE session_id = ${sqlstring.escape(sessionId)}
        AND project_id = ${sqlstring.escape(projectId)}
+       ${windowFilter}
      ORDER BY chunk_index, started_at
      LIMIT 1 BY chunk_index
      LIMIT ${REPLAY_CHUNKS_PAGE_SIZE + 1}
@@ -411,6 +422,62 @@ export async function getSessionReplayChunksFrom(
     data: items,
     hasMore: rows.length > REPLAY_CHUNKS_PAGE_SIZE,
   };
+}
+
+export type SessionReplayWindow = {
+  windowId: string;
+  chunkCount: number;
+  fullSnapshotCount: number;
+  startedAtMs: number;
+  endedAtMs: number;
+  durationMs: number;
+};
+
+/**
+ * Lists the distinct recorders (windows) that wrote to a session. Each row is
+ * one tab / page-load, identified by window_id. The session detail page uses
+ * this to render a "Recording 1 / Recording 2 / ..." selector so the player
+ * can play one window at a time instead of mixing chunks from concurrent tabs.
+ *
+ * Legacy chunks (recorded before window_id existed) have window_id = '' and
+ * collapse into a single "legacy" entry.
+ */
+export async function getSessionWindows(
+  sessionId: string,
+  projectId: string,
+): Promise<SessionReplayWindow[]> {
+  const rows = await chQuery<{
+    window_id: string;
+    chunk_count: string;
+    full_snapshot_count: string;
+    started_at_ms: string;
+    ended_at_ms: string;
+  }>(
+    `SELECT
+       window_id,
+       toString(count(DISTINCT chunk_index)) AS chunk_count,
+       toString(countIf(is_full_snapshot)) AS full_snapshot_count,
+       toUnixTimestamp64Milli(min(started_at)) AS started_at_ms,
+       toUnixTimestamp64Milli(max(ended_at)) AS ended_at_ms
+     FROM ${TABLE_NAMES.session_replay_chunks}
+     WHERE session_id = ${sqlstring.escape(sessionId)}
+       AND project_id = ${sqlstring.escape(projectId)}
+     GROUP BY window_id
+     ORDER BY started_at_ms`,
+  );
+
+  return rows.map((row) => {
+    const startedAtMs = Number(row.started_at_ms);
+    const endedAtMs = Number(row.ended_at_ms);
+    return {
+      windowId: row.window_id,
+      chunkCount: Number(row.chunk_count),
+      fullSnapshotCount: Number(row.full_snapshot_count),
+      startedAtMs,
+      endedAtMs,
+      durationMs: Math.max(0, endedAtMs - startedAtMs),
+    };
+  });
 }
 
 /**
@@ -470,7 +537,12 @@ export async function getSessionReplayChunksAroundTime(
   projectId: string,
   targetMs: number,
   lookaheadMs = 30_000,
+  windowId?: string,
 ) {
+  const windowFilter =
+    windowId !== undefined
+      ? `AND window_id = ${sqlstring.escape(windowId)}`
+      : '';
   // Find the anchor chunk_index — the most recent full snapshot at or before
   // the target. If none exists (shouldn't happen — every session starts with
   // a full snapshot at chunk 0), fall back to chunk 0.
@@ -479,6 +551,7 @@ export async function getSessionReplayChunksAroundTime(
      FROM ${TABLE_NAMES.session_replay_chunks}
      WHERE session_id = ${sqlstring.escape(sessionId)}
        AND project_id = ${sqlstring.escape(projectId)}
+       ${windowFilter}
        AND is_full_snapshot = true
        AND toUnixTimestamp64Milli(started_at) <= ${Math.floor(targetMs)}`,
   );
@@ -495,6 +568,7 @@ export async function getSessionReplayChunksAroundTime(
      FROM ${TABLE_NAMES.session_replay_chunks}
      WHERE session_id = ${sqlstring.escape(sessionId)}
        AND project_id = ${sqlstring.escape(projectId)}
+       ${windowFilter}
        AND chunk_index >= ${anchorIndex}
        AND toUnixTimestamp64Milli(started_at) <= ${Math.floor(targetMs + lookaheadMs)}
      ORDER BY chunk_index, started_at
@@ -513,10 +587,15 @@ export async function getSessionReplayChunksByIndexRange(
   projectId: string,
   fromIndex: number,
   toIndex: number,
+  windowId?: string,
 ) {
   if (toIndex < fromIndex) {
     return { data: [] as ReplayChunkItem[] };
   }
+  const windowFilter =
+    windowId !== undefined
+      ? `AND window_id = ${sqlstring.escape(windowId)}`
+      : '';
   const rows = await chQuery<ReplayChunkRow>(
     `SELECT chunk_index,
             payload,
@@ -525,6 +604,7 @@ export async function getSessionReplayChunksByIndexRange(
      FROM ${TABLE_NAMES.session_replay_chunks}
      WHERE session_id = ${sqlstring.escape(sessionId)}
        AND project_id = ${sqlstring.escape(projectId)}
+       ${windowFilter}
        AND chunk_index BETWEEN ${Math.floor(fromIndex)} AND ${Math.floor(toIndex)}
      ORDER BY chunk_index, started_at
      LIMIT 1 BY chunk_index`,

@@ -4,6 +4,13 @@ import { BaseBuffer } from './base-buffer';
 export interface IClickhouseSessionReplayChunk {
   project_id: string;
   session_id: string;
+  /**
+   * Client-generated per-tab / per-page-load UUID. Distinguishes chunks from
+   * multiple recorders sharing the same session_id (multi-tab, refresh).
+   * Empty string for chunks from older SDKs that don't send it — CH column
+   * defaults to '' so the raw JSONEachRow passthrough stays valid either way.
+   */
+  window_id: string;
   chunk_index: number;
   started_at: string;
   ended_at: string;

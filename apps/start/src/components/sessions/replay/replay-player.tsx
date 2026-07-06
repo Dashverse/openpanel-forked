@@ -40,8 +40,13 @@ function calcDimensions(
 
 export function ReplayPlayer({
   events,
+  skipInactive = true,
 }: {
   events: Array<{ type: number; data: unknown; timestamp: number }>;
+  // When true, rrweb fast-forwards through periods with no recorded
+  // activity — so a mostly-idle recording (e.g. a backgrounded tab) plays
+  // through in its few seconds of real activity instead of frozen minutes.
+  skipInactive?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<ReplayPlayerInstance | null>(null);
@@ -93,7 +98,7 @@ export function ReplayPlayer({
             showController: false,
             speedOption: [0.5, 1, 2, 4, 8],
             UNSAFE_replayCanvas: true,
-            skipInactive: false,
+            skipInactive,
           },
         }) as ReplayPlayerInstance;
 
@@ -182,6 +187,13 @@ export function ReplayPlayer({
       onPlayerDestroy();
     };
   }, [events, recordedDimensions, onPlayerReady, onPlayerDestroy, setCurrentTime, setIsPlaying, refreshDuration]);
+
+  // Toggle skip-inactive live without recreating the player. rrweb-player is
+  // a Svelte component — $set updates the reactive prop, which internally
+  // calls the Replayer's setConfig({ skipInactive }).
+  useEffect(() => {
+    playerRef.current?.$set?.({ skipInactive });
+  }, [skipInactive]);
 
   if (importError) {
     return (
