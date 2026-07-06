@@ -154,6 +154,24 @@ interface GetProfileListOptions {
   isExternal?: boolean;
 }
 
+// Single-token identifiers (firebase uids, uuids, cuids): no spaces or "@",
+// 16+ chars. ID-shaped searches resolve via the (project_id, id) primary key
+// instead of ILIKE-scanning email/name columns, which times out on projects
+// with tens of millions of profiles.
+export function looksLikeProfileId(search: string) {
+  return /^[A-Za-z0-9_.:-]{16,}$/.test(search);
+}
+
+function getProfileSearchWhereClause(search: string) {
+  if (looksLikeProfileId(search)) {
+    // Prefix LIKE (no leading wildcard) is primary-key-prunable and also
+    // covers exact matches. The id regex excludes LIKE metacharacters.
+    return `id LIKE ${sqlstring.escape(`${search}%`)}`;
+  }
+  const pattern = sqlstring.escape(`%${search}%`);
+  return `(email ILIKE ${pattern} OR first_name ILIKE ${pattern} OR last_name ILIKE ${pattern})`;
+}
+
 export async function getProfiles(ids: string[], projectId: string) {
   const filteredIds = uniq(ids.filter((id) => id !== ''));
 
@@ -202,8 +220,7 @@ export async function getProfileList({
   sb.offset = Math.max(0, (cursor ?? 0) * take);
   sb.orderBy.created_at = 'created_at DESC';
   if (search) {
-    const pattern = sqlstring.escape(`%${search}%`);
-    sb.where.search = `(id ILIKE ${pattern} OR email ILIKE ${pattern} OR first_name ILIKE ${pattern} OR last_name ILIKE ${pattern})`;
+    sb.where.search = getProfileSearchWhereClause(search);
   }
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
@@ -223,8 +240,7 @@ export async function getProfileListCount({
   sb.where.project_id = `project_id = ${sqlstring.escape(projectId)}`;
   sb.groupBy.project_id = 'project_id';
   if (search) {
-    const pattern = sqlstring.escape(`%${search}%`);
-    sb.where.search = `(id ILIKE ${pattern} OR email ILIKE ${pattern} OR first_name ILIKE ${pattern} OR last_name ILIKE ${pattern})`;
+    sb.where.search = getProfileSearchWhereClause(search);
   }
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
