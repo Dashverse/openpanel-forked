@@ -15,7 +15,7 @@ Concrete: on 2026-07-07 the `logIn + type='truecaller'` 30-day query took **52.4
 
 **But `profile_event_property_summary_mv` already exists and has EXACTLY the right sort key for this query shape:**
 
-```
+```sql
 ORDER BY (project_id, name, property_key, property_value, profile_id, event_date)
 ```
 
@@ -55,6 +55,7 @@ Gate (intentionally conservative for MVP):
 - Interval: `day` / `week` / `month`
 - Event name is explicit (not `*`)
 - Date range within a rolling ~92-day cutoff (`startDate >= today - 92 days`, recomputed per request)
+
 Anything outside the gate falls through unchanged.
 
 ### What this doesn't cover (yet)
@@ -176,7 +177,7 @@ Dashboard user experience: error/timeout instead of slow response.
 
 The dynamic cohort path used `profile_event_summary_mv` for "did event X" queries. Its sort key is:
 
-```
+```sql
 ORDER BY (project_id, profile_id, name, event_date)
 ```
 
@@ -184,7 +185,7 @@ This is good for "what events did profile P do" lookups. But cohort queries filt
 
 `cohort_events_mv` exists (since 2024-10-15) with a different sort key:
 
-```
+```sql
 ORDER BY (project_id, name, created_at, profile_id)
 ```
 
@@ -417,7 +418,7 @@ Halves every conversion query universally. Compatible with TTC and multi-breakdo
 
 Verified via `system.query_log` at 2026-05-12 11:26:31 — the same SQL with #271 applied was killed by `max_execution_time`. ProfileEvents on the killed query:
 
-```
+```text
 type:               ExceptionWhileProcessing
 duration:           40.7s (killed)
 read_rows:          484M

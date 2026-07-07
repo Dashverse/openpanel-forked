@@ -504,7 +504,6 @@ function canUsePropertyMV(
 
   const validSegments = ['user', 'event'];
   if (!validSegments.includes(event.segment ?? 'event')) return false;
-  if (event.segment === 'one_event_per_user') return false;
 
   if (breakdowns.length > 0) return false;
 
@@ -548,10 +547,14 @@ function getChartSqlFromPropertyMV({
 }): string {
   const filter = event.filters![0]!;
   const propKey = extractEventPropertyKey(filter.name)!;
-  // filter.value is already validated non-empty in the gate. Escape each
-  // value; sqlstring.escape handles ' and other SQL-special chars.
+  // filter.value is already validated non-empty in the gate. Trim before
+  // escape to match the sibling MV builder in cohort.service.ts (which
+  // trims the same values before writing to profile_event_property_summary_mv
+  // scans). Without matching normalization, an incidental trailing space in
+  // a dashboard value would silently miss rows via this route while the
+  // cohort path would still find them.
   const valueList = filter.value!
-    .map((v) => sqlstring.escape(String(v)))
+    .map((v) => sqlstring.escape(String(v).trim()))
     .join(', ');
 
   const dateSelect =
