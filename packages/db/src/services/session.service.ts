@@ -102,6 +102,10 @@ export interface GetSessionListOptions {
   endDate?: Date;
   search?: string;
   cursor?: Cursor | null;
+  /** When true, only return sessions that have a replay recording. Powers the
+   *  Session Replays tab. Implemented as a `session_id IN (…)` subquery against
+   *  session_replay_chunks, scoped to the same date window as the list. */
+  onlyReplays?: boolean;
 }
 
 export function transformSession(session: IClickhouseSession): IServiceSession {
@@ -156,6 +160,39 @@ type Cursor = {
   id: string;
 };
 
+/**
+ * Build the session-list WHERE clause for a free-text search. Matches page
+ * paths + referrer (PostHog-style) AND the user (profile name / email) —
+ * resolved to profile_ids since the sessions table doesn't carry names.
+ */
+async function buildSessionSearchWhere(
+  search: string,
+  projectId: string,
+): Promise<string> {
+  const s = sqlstring.escape(`%${search}%`);
+  const conditions = [
+    `entry_path ILIKE ${s}`,
+    `exit_path ILIKE ${s}`,
+    `referrer ILIKE ${s}`,
+    `referrer_name ILIKE ${s}`,
+  ];
+  const profileRows = await chQuery<{ id: string }>(
+    `SELECT DISTINCT id
+     FROM ${TABLE_NAMES.profiles}
+     WHERE project_id = ${sqlstring.escape(projectId)}
+       AND (first_name ILIKE ${s}
+            OR last_name ILIKE ${s}
+            OR email ILIKE ${s}
+            OR concat(first_name, ' ', last_name) ILIKE ${s})
+     LIMIT 1000`,
+  );
+  if (profileRows.length > 0) {
+    const ids = profileRows.map((r) => sqlstring.escape(r.id)).join(', ');
+    conditions.push(`profile_id IN (${ids})`);
+  }
+  return `(${conditions.join(' OR ')})`;
+}
+
 export async function getSessionList({
   cursor,
   take,
@@ -165,6 +202,7 @@ export async function getSessionList({
   startDate,
   endDate,
   search,
+  onlyReplays,
 }: GetSessionListOptions) {
   const { sb, getSql } = createSqlBuilder();
 
@@ -179,8 +217,7 @@ export async function getSessionList({
   if (profileId)
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
   if (search) {
-    const s = sqlstring.escape(`%${search}%`);
-    sb.where.search = `(entry_path ILIKE ${s} OR exit_path ILIKE ${s} OR referrer ILIKE ${s} OR referrer_name ILIKE ${s})`;
+    sb.where.search = await buildSessionSearchWhere(search, projectId);
   }
   if (filters?.length) {
     Object.assign(sb.where, getEventFiltersWhereClause(filters));
@@ -193,6 +230,18 @@ export async function getSessionList({
     organization?.subscriptionPeriodEventsLimit > 1_000_000
       ? 1
       : 360;
+
+  if (onlyReplays) {
+    // Keep only sessions with a replay recording. The subquery reads just the
+    // (cheap, ZSTD) session_id column from session_replay_chunks, scoped to the
+    // project + the same date window, so it stays fast on the large table.
+    sb.where.hasReplay = `id IN (
+      SELECT DISTINCT session_id
+      FROM ${TABLE_NAMES.session_replay_chunks}
+      WHERE project_id = ${sqlstring.escape(projectId)}
+        AND started_at > now() - INTERVAL ${dateIntervalInDays} DAY
+    )`;
+  }
 
   if (cursor) {
     const cAt = sqlstring.escape(cursor.createdAt);
@@ -260,11 +309,20 @@ export async function getSessionList({
   const map = new Map<string, IServiceProfile>(profiles.map((p) => [p.id, p]));
 
   const sessionIds = data.map((s) => s.id);
-  const replaySet = await batchSessionHasReplay(sessionIds, projectId);
+  const [replaySet, replayDurations] = await Promise.all([
+    batchSessionHasReplay(sessionIds, projectId),
+    onlyReplays
+      ? batchSessionReplayDuration(sessionIds, projectId)
+      : Promise.resolve(undefined),
+  ]);
 
   const items = data.map(transformSession).map((item) => ({
     ...item,
     hasReplay: replaySet.has(item.id),
+    // On the replays list, show the RECORDING length (what the player plays),
+    // not the tracked-event span — the recorder starts before the first event
+    // and runs past the last, so the two legitimately differ.
+    duration: replayDurations?.get(item.id) ?? item.duration,
     profile: map.get(item.profileId) ?? {
       id: item.profileId,
       email: '',
@@ -288,12 +346,28 @@ export async function getSessionsCount({
   startDate,
   endDate,
   search,
+  onlyReplays,
 }: Omit<GetSessionListOptions, 'take' | 'cursor'>) {
   const { sb, getSql } = createSqlBuilder();
 
   sb.select.count = 'count(*) as count';
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   sb.where.sign = 'sign = 1';
+
+  if (onlyReplays) {
+    const organization = await getOrganizationByProjectIdCached(projectId);
+    const days =
+      organization?.subscriptionPeriodEventsLimit &&
+      organization.subscriptionPeriodEventsLimit > 1_000_000
+        ? 1
+        : 360;
+    sb.where.hasReplay = `id IN (
+      SELECT DISTINCT session_id
+      FROM ${TABLE_NAMES.session_replay_chunks}
+      WHERE project_id = ${sqlstring.escape(projectId)}
+        AND started_at > now() - INTERVAL ${days} DAY
+    )`;
+  }
 
   if (profileId) {
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
@@ -304,7 +378,7 @@ export async function getSessionsCount({
   }
 
   if (search) {
-    sb.where.search = `(entry_path ILIKE '%${search}%' OR exit_path ILIKE '%${search}%' OR referrer ILIKE '%${search}%' OR referrer_name ILIKE '%${search}%')`;
+    sb.where.search = await buildSessionSearchWhere(search, projectId);
   }
 
   if (filters && filters.length > 0) {
@@ -633,6 +707,36 @@ export async function batchSessionHasReplay(
     return new Set(rows.map((r) => r.session_id));
   } catch {
     return new Set();
+  }
+}
+
+/**
+ * Recording length (ms) per session = max(ended_at) − min(started_at) over its
+ * replay chunks. This is the duration the player shows, which differs from the
+ * sessions table `duration` (span of tracked events): the recorder starts
+ * before the first event and keeps capturing DOM activity after the last one.
+ * Scoped to a small IN-list of session_ids, so it stays cheap on the big table.
+ */
+export async function batchSessionReplayDuration(
+  sessionIds: string[],
+  projectId: string,
+): Promise<Map<string, number>> {
+  if (sessionIds.length === 0) return new Map();
+  try {
+    const inList = sessionIds.map((id) => sqlstring.escape(id)).join(',');
+    const rows = await chQuery<{ session_id: string; duration_ms: string }>(
+      `SELECT session_id,
+              toUnixTimestamp64Milli(max(ended_at)) - toUnixTimestamp64Milli(min(started_at)) AS duration_ms
+       FROM ${TABLE_NAMES.session_replay_chunks}
+       WHERE project_id = ${sqlstring.escape(projectId)}
+         AND session_id IN (${inList})
+       GROUP BY session_id`,
+    );
+    return new Map(
+      rows.map((r) => [r.session_id, Math.max(0, Number(r.duration_ms))]),
+    );
+  } catch {
+    return new Map();
   }
 }
 

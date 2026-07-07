@@ -17,6 +17,7 @@ import {
   LayersIcon,
   LayoutDashboardIcon,
   LayoutPanelTopIcon,
+  MonitorPlayIcon,
   PlusIcon,
   SparklesIcon,
   TargetIcon,
@@ -56,6 +57,11 @@ export default function SidebarProjectMenu({
       <SidebarLink icon={LayersIcon} label="Pages" href={'/pages'} />
       <SidebarLink icon={Globe2Icon} label="Realtime" href={'/realtime'} />
       <SidebarLink icon={UsersRoundIcon} label="Sessions" href={'/sessions'} />
+      <SidebarLink
+        icon={MonitorPlayIcon}
+        label="Session Replays"
+        href={'/session-replays'}
+      />
       <SidebarLink
         icon={CircleUserRoundIcon}
         label="Profiles"

@@ -23,19 +23,21 @@ function getRecordedDimensions(
 }
 
 function calcDimensions(
-  containerWidth: number,
+  box: HTMLDivElement,
   aspectRatio: number,
-): { width: number; height: number } {
-  // In fullscreen, claim almost the full viewport (leave ~120px for the
-  // BrowserChrome header + the timeline strip). Otherwise cap at 70% of the
-  // viewport so the player doesn't push the rest of the page off-screen.
+): { width: number; height: number; boxHeight: number } {
+  const containerWidth = box.offsetWidth;
   const isFullscreen = !!document.fullscreenElement;
-  const maxHeight = isFullscreen
+  // boxHeight = the dark player box's height: from its top edge down to the
+  // bottom of the viewport, minus room for the timeline strip below it. The
+  // box fills the pane; the video is letterboxed to fit inside it.
+  const rect = box.getBoundingClientRect();
+  const boxHeight = isFullscreen
     ? window.innerHeight - 120
-    : window.innerHeight * 0.7;
-  const height = Math.min(Math.round(containerWidth / aspectRatio), maxHeight);
+    : Math.max(260, window.innerHeight - rect.top - 92);
+  const height = Math.min(Math.round(containerWidth / aspectRatio), boxHeight);
   const width = Math.min(containerWidth, Math.round(height * aspectRatio));
-  return { width, height };
+  return { width, height, boxHeight };
 }
 
 export function ReplayPlayer({
@@ -49,6 +51,9 @@ export function ReplayPlayer({
   skipInactive?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // The dark player "box" that fills the pane; the video is letterboxed inside.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [boxHeight, setBoxHeight] = useState<number | undefined>(undefined);
   const playerRef = useRef<ReplayPlayerInstance | null>(null);
   const {
     onPlayerReady,
@@ -78,10 +83,12 @@ export function ReplayPlayer({
       ? recordedDimensions.width / recordedDimensions.height
       : 16 / 9;
 
-    const { width, height } = calcDimensions(
-      containerRef.current.offsetWidth,
+    const initial = calcDimensions(
+      boxRef.current ?? containerRef.current,
       aspectRatio,
     );
+    const { width, height } = initial;
+    setBoxHeight(initial.boxHeight);
 
     import('rrweb-player')
       .then((module) => {
@@ -147,31 +154,69 @@ export function ReplayPlayer({
         const meta = player.getMetaData();
         onPlayerReady(player, meta.startTime);
         refreshDuration();
+        // Re-measure after the layout has settled — the initial size is
+        // computed at construction when the surrounding panes may not have
+        // their final dimensions yet, which otherwise leaves the player small.
+        requestAnimationFrame(() => {
+          if (mounted) onWindowResize();
+        });
+        setTimeout(() => {
+          if (mounted) onWindowResize();
+        }, 150);
       })
       .catch(() => {
         if (mounted) setImportError(true);
       });
 
+    let lastW = 0;
+    let lastH = 0;
     const onWindowResize = () => {
-      if (!containerRef.current || !mounted || !playerRef.current?.$set) return;
-      const { width: w, height: h } = calcDimensions(
-        containerRef.current.offsetWidth,
+      const box = boxRef.current;
+      if (!box || !mounted || !playerRef.current?.$set) return;
+      const { width: w, height: h, boxHeight: bh } = calcDimensions(
+        box,
         aspectRatio,
       );
+      setBoxHeight(bh);
+      // Only re-apply the video size when it actually changed — avoids churn.
+      if (w === lastW && h === lastH) return;
+      lastW = w;
+      lastH = h;
       playerRef.current.$set({ width: w, height: h });
     };
     window.addEventListener('resize', onWindowResize);
+    // Re-measure whenever the box settles/changes size, instead of relying on
+    // one-shot timers (which fired inconsistently before the panes had their
+    // final dimensions — "sometimes big, sometimes small"). We observe the box,
+    // whose WIDTH is layout-driven; the video it contains changes independently.
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(() => onWindowResize())
+        : null;
+    if (resizeObserver && boxRef.current) {
+      resizeObserver.observe(boxRef.current);
+    }
     // Recompute dimensions when the user enters/exits fullscreen — the window
     // doesn't fire a `resize` event for the fullscreen transition. Wait a
     // frame so the browser has time to flush the fullscreen layout before we
     // read containerRef.offsetWidth.
+    const fullscreenResizeTimers: ReturnType<typeof setTimeout>[] = [];
     const onFullscreenChange = () => {
+      // Entering/exiting fullscreen reflows over several frames — a single
+      // recompute reads a stale width and leaves the player mis-sized on the
+      // way back to normal. Recompute now and again after the layout settles.
       requestAnimationFrame(onWindowResize);
+      fullscreenResizeTimers.push(
+        setTimeout(onWindowResize, 120),
+        setTimeout(onWindowResize, 350),
+      );
     };
     document.addEventListener('fullscreenchange', onFullscreenChange);
 
     return () => {
       mounted = false;
+      for (const t of fullscreenResizeTimers) clearTimeout(t);
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', onWindowResize);
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       if (handleVisibilityChange) {
@@ -204,12 +249,12 @@ export function ReplayPlayer({
   }
 
   return (
-    <div className="relative flex w-full justify-center overflow-hidden">
-      <div
-        ref={containerRef}
-        className="w-full"
-        style={{ maxHeight: '70vh' }}
-      />
+    <div
+      ref={boxRef}
+      className="relative flex w-full items-center justify-center overflow-hidden bg-neutral-950 [&_.rr-player]:!rounded-none [&_.rr-player]:!bg-transparent [&_.rr-player]:!shadow-none [&_.rr-player__frame]:!rounded-none"
+      style={boxHeight ? { height: `${boxHeight}px` } : undefined}
+    >
+      <div ref={containerRef} className="flex items-center justify-center" />
     </div>
   );
 }
