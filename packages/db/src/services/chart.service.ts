@@ -522,8 +522,6 @@ function canUsePropertyMV(
   const validSegments = ['user', 'event'];
   if (!validSegments.includes(event.segment ?? 'event')) return false;
 
-  if (breakdowns.length > 0) return false;
-
   if (event.name === '*') return false;
 
   const hasCohortFilter = event.filters?.some(
@@ -534,11 +532,27 @@ function canUsePropertyMV(
   );
   if (hasCohortFilter) return false;
 
-  if (!event.filters || event.filters.length !== 1) return false;
-  const f = event.filters[0]!;
-  if (f.operator !== 'is') return false;
-  if (!f.value || f.value.length === 0) return false;
-  if (!extractEventPropertyKey(f.name)) return false;
+  const filters = event.filters ?? [];
+  const numFilters = filters.length;
+  const numBreakdowns = breakdowns.length;
+
+  // Filter XOR breakdown, each at most one property. Combined
+  // (filter AND breakdown) needs an intersection JOIN of two MV rows for
+  // the same event — deferred to the multi-property PR. Zero of both
+  // means the events_daily_stats route handles it (no reason to be here).
+  if (numFilters + numBreakdowns !== 1) return false;
+
+  if (numFilters === 1) {
+    const f = filters[0]!;
+    if (f.operator !== 'is') return false;
+    if (!f.value || f.value.length === 0) return false;
+    if (!extractEventPropertyKey(f.name)) return false;
+  } else {
+    const b = breakdowns[0]!;
+    // Cohort breakdowns need cohort membership joins, not this MV
+    if (b.cohortId || b.name.startsWith('cohort:')) return false;
+    if (!extractEventPropertyKey(b.name)) return false;
+  }
 
   // Date-only comparison. startDate is a DateTime string like
   // '2026-04-07 00:00:00'; slice off the time so a same-day cutoff
@@ -550,29 +564,40 @@ function canUsePropertyMV(
 
 function getChartSqlFromPropertyMV({
   event,
+  breakdowns,
   interval,
   startDate,
   endDate,
   projectId,
 }: {
   event: IGetChartDataInput['event'];
+  breakdowns: IGetChartDataInput['breakdowns'];
   interval: IGetChartDataInput['interval'];
   startDate: string;
   endDate: string;
   projectId: string;
   timezone: string;
 }): string {
-  const filter = event.filters![0]!;
-  const propKey = extractEventPropertyKey(filter.name)!;
-  // filter.value is already validated non-empty in the gate. Trim before
-  // escape to match the sibling MV builder in cohort.service.ts (which
-  // trims the same values before writing to profile_event_property_summary_mv
-  // scans). Without matching normalization, an incidental trailing space in
-  // a dashboard value would silently miss rows via this route while the
-  // cohort path would still find them.
-  const valueList = filter.value!
-    .map((v) => sqlstring.escape(String(v).trim()))
-    .join(', ');
+  // Gate guarantees XOR(filter, breakdown): exactly one is present.
+  // Both bind the same property_key on the MV; filter pins property_value,
+  // breakdown returns it as the b_0 aggregation dimension.
+  const filter = event.filters?.[0];
+  const breakdown = breakdowns[0];
+  const isBreakdown = !filter && !!breakdown;
+
+  const propKey = isBreakdown
+    ? extractEventPropertyKey(breakdown!.name)!
+    : extractEventPropertyKey(filter!.name)!;
+
+  // Filter mode only — breakdown returns all values.
+  // Trim before escape to match the sibling MV builder in cohort.service.ts
+  // (which trims the same values before writing to
+  // profile_event_property_summary_mv scans). Without matching normalization,
+  // an incidental trailing space in a dashboard value would silently miss
+  // rows via this route while the cohort path would still find them.
+  const valueList = isBreakdown
+    ? ''
+    : filter!.value!.map((v) => sqlstring.escape(String(v).trim())).join(', ');
 
   const dateSelect =
     interval === 'day'
@@ -604,20 +629,41 @@ function getChartSqlFromPropertyMV({
         ? `WITH FILL FROM toDateTime(toStartOfWeek(toDate(${sqlstring.escape(startDate)}), 1)) TO toDateTime(toStartOfWeek(toDate(${sqlstring.escape(endDate)}), 1)) STEP toIntervalWeek(1)`
         : `WITH FILL FROM toDateTime(toStartOfMonth(toDate(${sqlstring.escape(startDate)}))) TO toDateTime(toStartOfMonth(toDate(${sqlstring.escape(endDate)}))) STEP toIntervalMonth(1)`;
 
+  // Breakdown mode emits property_value AS b_0; groups by (b_0, date) so
+  // each series is one property_value. Note MV is populated with
+  // `property_value != ''` — events with an empty value for the breakdown
+  // key are absent from the MV under this key, so the breakdown result
+  // omits the "no-value" bucket. Events-table path would show it as a
+  // '' bucket. Dashboards typically want distinct-value buckets, so this
+  // is desirable more often than not.
+  const breakdownSelect = isBreakdown ? '\n      t.property_value AS b_0,' : '';
+  const breakdownGroupBy = isBreakdown ? 'b_0, ' : '';
+  const valueClause = isBreakdown
+    ? ''
+    : `\n      AND t.property_value IN (${valueList})`;
+
+  // ORDER BY / WITH FILL layout: in filter mode the sort has one column
+  // (date), so the fill clause goes at the end. In breakdown mode the sort
+  // has two columns (date then b_0); WITH FILL applies to whichever ORDER
+  // BY column it directly follows, and CH errors on filling a String
+  // column with a day step. Interleave the fill INSIDE the ORDER BY,
+  // right after the date column, then continue with b_0.
+  const orderByClause = isBreakdown
+    ? `ORDER BY ${dateGroupBy} ASC ${fillClause}, b_0 ASC`
+    : `ORDER BY ${dateGroupBy} ASC\n    ${fillClause}`;
+
   const sql = `SELECT
-      ${sqlstring.escape(event.name)} as label_0,
+      ${sqlstring.escape(event.name)} as label_0,${breakdownSelect}
       ${countExpr},
       ${dateSelect}
     FROM profile_event_property_summary_mv t
     WHERE t.project_id = ${sqlstring.escape(projectId)}
       AND t.name = ${sqlstring.escape(event.name)}
-      AND t.property_key = ${sqlstring.escape(propKey)}
-      AND t.property_value IN (${valueList})
+      AND t.property_key = ${sqlstring.escape(propKey)}${valueClause}
       AND t.event_date >= toDateTime(${sqlstring.escape(startDate)})
       AND t.event_date <= toDateTime(${sqlstring.escape(endDate)})
-    GROUP BY ${dateGroupBy}
-    ORDER BY ${dateGroupBy} ASC
-    ${fillClause}`;
+    GROUP BY ${breakdownGroupBy}${dateGroupBy}
+    ${orderByClause}`;
 
   return sql;
 }
@@ -948,6 +994,7 @@ export async function getChartSql({
   ) {
     return getChartSqlFromPropertyMV({
       event,
+      breakdowns,
       interval,
       startDate,
       endDate,
