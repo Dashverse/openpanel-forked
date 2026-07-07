@@ -60,6 +60,9 @@ interface ReplayContextValue {
   pause: () => void;
   toggle: () => void;
   seek: (timeMs: number) => void;
+  // Current playback speed — canonical source of truth so any control stays in
+  // sync (rather than tracking a parallel local copy).
+  speed: number;
   setSpeed: (speed: number) => void;
   // Lazy chunk loading
   addEvent: (event: { type: number; data: unknown; timestamp: number }) => void;
@@ -167,6 +170,7 @@ export function ReplayProvider({
   const [isReady, setIsReady] = useState(false);
   const [loadedUpToMs, setLoadedUpToMs] = useState(0);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [speed, setSpeedState] = useState(1);
 
   const setIsPlayingWithRef = useCallback((playing: boolean) => {
     isPlayingRef.current = playing;
@@ -415,6 +419,7 @@ export function ReplayProvider({
   const setSpeed = useCallback((s: number) => {
     if (!SPEED_OPTIONS.includes(s as (typeof SPEED_OPTIONS)[number])) return;
     playerRef.current?.setSpeed(s);
+    setSpeedState(s);
   }, []);
 
   const value: ReplayContextValue = {
@@ -430,6 +435,7 @@ export function ReplayProvider({
     pause,
     toggle,
     seek,
+    speed,
     setSpeed,
     addEvent,
     refreshDuration,

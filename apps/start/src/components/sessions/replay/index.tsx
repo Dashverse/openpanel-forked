@@ -1,6 +1,7 @@
 import type { IServiceEvent } from '@openpanel/db';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { FastForwardIcon, Maximize2, Minimize2 } from 'lucide-react';
+import type { MutableRefObject } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserChrome } from './browser-chrome';
 import { ReplayTime } from './replay-controls';
@@ -14,6 +15,7 @@ import {
 import { ReplayEventFeed } from '@/components/sessions/replay/replay-event-feed';
 import { ReplayPlayer } from '@/components/sessions/replay/replay-player';
 import { useTRPC } from '@/integrations/trpc/react';
+import { cn } from '@/utils/cn';
 
 function BrowserUrlBar({ events }: { events: IServiceEvent[] }) {
   const { startTime } = useReplayContext();
@@ -224,11 +226,41 @@ function ReplayBufferBootstrap({
   return null;
 }
 
+export type ReplaySeekControls = { seekToWallMs: (wallMs: number) => void };
+
+/**
+ * Bridges the player's seek out to consumers (the Session Replays event list),
+ * so clicking an event can jump the player to that timestamp. Must render
+ * inside <ReplayProvider>.
+ */
+function SeekBridge({
+  controlsRef,
+}: {
+  controlsRef?: MutableRefObject<ReplaySeekControls | null>;
+}) {
+  const { seek, startTime } = useReplayContext();
+  useEffect(() => {
+    if (!controlsRef) return;
+    controlsRef.current = {
+      seekToWallMs: (wallMs: number) => {
+        if (startTime == null) return;
+        seek(Math.max(0, wallMs - startTime));
+      },
+    };
+    return () => {
+      if (controlsRef) controlsRef.current = null;
+    };
+  }, [seek, startTime, controlsRef]);
+  return null;
+}
+
 function ReplayContent({
   sessionId,
   projectId,
   windowId,
   windowDurationMs,
+  showEventFeed = true,
+  controlsRef,
 }: {
   sessionId: string;
   projectId: string;
@@ -238,6 +270,12 @@ function ReplayContent({
   // Per-window duration from the windows list. Overrides the session-wide
   // replayMeta duration so the timeline matches the selected recording.
   windowDurationMs?: number;
+  // When false, render the player full-width without the side event feed.
+  // Used by the Session Replays tab, which keeps events in its own left list.
+  showEventFeed?: boolean;
+  // Populated with the player's seek controls so external UIs (the replays
+  // event list) can jump the player to an event's timestamp.
+  controlsRef?: MutableRefObject<ReplaySeekControls | null>;
 }) {
   const trpc = useTRPC();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -289,11 +327,23 @@ function ReplayContent({
   const [skipInactive, setSkipInactive] = useState(true);
 
   function renderReplay() {
+    // On the Session Replays tab (showEventFeed=false) the loading + empty
+    // states use the same dark, tall box as the player, so the UI doesn't jump
+    // (small light box → big dark player) once chunks arrive. On the session
+    // detail page they stay compact.
+    const placeholder = showEventFeed
+      ? 'h-[320px] bg-background'
+      : 'h-[calc(100vh-11rem)] bg-neutral-950';
     if (replayLoading) {
       return (
-        <div className="col h-[320px] items-center justify-center gap-4 bg-background">
-          <div className="h-8 w-8 animate-pulse rounded-full bg-muted" />
-          <div>Loading session replay</div>
+        <div
+          className={cn(
+            'flex flex-col items-center justify-center gap-3 text-sm text-muted-foreground',
+            placeholder,
+          )}
+        >
+          <div className="size-8 animate-pulse rounded-full bg-muted" />
+          Loading session replay…
         </div>
       );
     }
@@ -301,7 +351,12 @@ function ReplayContent({
       return <ReplayPlayer events={playerEvents} skipInactive={skipInactive} />;
     }
     return (
-      <div className="flex h-[320px] items-center justify-center bg-background text-muted-foreground text-sm">
+      <div
+        className={cn(
+          'flex items-center justify-center text-sm text-muted-foreground',
+          placeholder,
+        )}
+      >
         No replay data available for this session.
       </div>
     );
@@ -311,8 +366,12 @@ function ReplayContent({
     <ReplayProvider
       totalDurationMs={windowDurationMs ?? replayMeta?.totalDurationMs}
     >
+      <SeekBridge controlsRef={controlsRef} />
       <div
-        className="grid gap-4 lg:grid-cols-[1fr_380px] [&:fullscreen]:flex [&:fullscreen]:flex-col [&:fullscreen]:bg-background [&:fullscreen]:p-4"
+        className={cn(
+          'grid gap-4 [&:fullscreen]:flex [&:fullscreen]:flex-col [&:fullscreen]:bg-background [&:fullscreen]:p-4',
+          showEventFeed ? 'lg:grid-cols-[1fr_380px]' : 'grid-cols-1',
+        )}
         id="replay"
         ref={containerRef}
       >
@@ -356,11 +415,13 @@ function ReplayContent({
             {hasReplay && <ReplayTimeline events={events} />}
           </BrowserChrome>
         </div>
-        <div className="relative hidden lg:block">
-          <div className="absolute inset-0">
-            <ReplayEventFeed events={events} replayLoading={replayLoading} />
+        {showEventFeed && (
+          <div className="relative hidden lg:block">
+            <div className="absolute inset-0">
+              <ReplayEventFeed events={events} replayLoading={replayLoading} />
+            </div>
           </div>
-        </div>
+        )}
       </div>
       {hasReplay && (
         <ReplayBufferBootstrap
@@ -385,9 +446,17 @@ function ReplayContent({
 export function ReplayShell({
   sessionId,
   projectId,
+  showEventFeed = true,
+  tabsOnRight = false,
+  controlsRef,
 }: {
   sessionId: string;
   projectId: string;
+  showEventFeed?: boolean;
+  // When true (Session Replays tab), the multi-window switcher renders as a
+  // vertical column to the RIGHT of the player instead of a row on top.
+  tabsOnRight?: boolean;
+  controlsRef?: MutableRefObject<ReplaySeekControls | null>;
 }) {
   const trpc = useTRPC();
   const [selectedWindowId, setSelectedWindowId] = useState<string | null>(null);
@@ -407,51 +476,77 @@ export function ReplayShell({
     selectedWindowId ?? (hasWindows ? windows![0]!.windowId : null);
   const activeWindow = windows?.find((w) => w.windowId === activeWindowId);
 
+  const windowButtons = multiWindow
+    ? windows!.map((w, i) => {
+        const isActive = w.windowId === activeWindowId;
+        return (
+          <button
+            key={w.windowId || 'legacy'}
+            type="button"
+            onClick={() => setSelectedWindowId(w.windowId)}
+            className={cn(
+              'flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors',
+              tabsOnRight ? 'w-full justify-between' : 'shrink-0',
+              isActive
+                ? 'border-primary bg-primary/10 font-medium text-primary'
+                : 'text-muted-foreground hover:bg-muted/50',
+            )}
+          >
+            <span>{w.windowId === '' ? 'Legacy' : `Tab ${i + 1}`}</span>
+            <span className="font-mono opacity-70">
+              {formatDuration(w.durationMs)}
+            </span>
+          </button>
+        );
+      })
+    : null;
+
+  // Remount ReplayContent on window switch (key) so the rrweb player, chunk
+  // buffer, and all internal state reset cleanly to the selected recording.
+  const player = (
+    <ReplayContent
+      key={activeWindowId ?? 'default'}
+      projectId={projectId}
+      sessionId={sessionId}
+      windowId={activeWindowId ?? undefined}
+      windowDurationMs={activeWindow?.durationMs}
+      showEventFeed={showEventFeed}
+      controlsRef={controlsRef}
+    />
+  );
+
+  // Session Replays tab: player fills the space, tabs are a vertical rail on
+  // the right (uses the otherwise-empty horizontal space).
+  if (tabsOnRight) {
+    return (
+      <div className="flex gap-3">
+        <div className="min-w-0 flex-1">{player}</div>
+        {multiWindow && (
+          <div className="flex max-h-[82vh] w-32 shrink-0 flex-col gap-1.5 overflow-y-auto">
+            <span className="px-0.5 text-xs font-medium text-muted-foreground">
+              {windows!.length} tabs
+            </span>
+            {windowButtons}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Session detail page: switcher as a horizontal scroll row above the player.
   return (
     <div className="flex flex-col gap-3">
       {multiWindow && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm text-muted-foreground">
-            Recorded across {windows!.length} tabs:
+        <div className="flex items-center gap-2">
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {windows!.length} tabs
           </span>
-          {windows!.map((w, i) => {
-            const isActive = w.windowId === activeWindowId;
-            return (
-              <button
-                key={w.windowId || 'legacy'}
-                type="button"
-                onClick={() => setSelectedWindowId(w.windowId)}
-                className={
-                  isActive
-                    ? 'rounded-md border border-primary bg-primary/10 px-3 py-1.5 text-sm font-medium text-primary'
-                    : 'rounded-md border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted/50'
-                }
-              >
-                {w.windowId === '' ? 'Legacy' : `Tab ${i + 1}`}
-                <span className="ml-2 font-mono text-xs opacity-70">
-                  {formatDuration(w.durationMs)}
-                </span>
-              </button>
-            );
-          })}
+          <div className="flex flex-nowrap gap-1.5 overflow-x-auto pb-1">
+            {windowButtons}
+          </div>
         </div>
       )}
-
-      {/*
-        Remount ReplayContent on window switch (key) so the rrweb player,
-        chunk buffer, and all internal state reset cleanly to the selected
-        recording. Passing windowId scopes every chunk fetch to that recorder.
-        When there are no window rows yet (query loading) we render without a
-        windowId — legacy behaviour — so single-window/legacy sessions still
-        play immediately.
-      */}
-      <ReplayContent
-        key={activeWindowId ?? 'default'}
-        projectId={projectId}
-        sessionId={sessionId}
-        windowId={activeWindowId ?? undefined}
-        windowDurationMs={activeWindow?.durationMs}
-      />
+      {player}
     </div>
   );
 }

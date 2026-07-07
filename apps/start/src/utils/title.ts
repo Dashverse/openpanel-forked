@@ -80,6 +80,7 @@ export const PAGE_TITLES = {
   DASHBOARD: 'Dashboard',
   EVENTS: 'Events',
   SESSIONS: 'Sessions',
+  SESSION_REPLAYS: 'Session Replays',
   PAGES: 'Pages',
   REPORTS: 'Reports',
   NOTIFICATIONS: 'Notifications',

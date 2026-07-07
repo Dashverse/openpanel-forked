@@ -7,6 +7,7 @@ import {
   getSessionReplayChunksFrom,
   getSessionReplayMeta,
   getSessionWindows,
+  getSessionsCount,
   sessionHasReplay,
   sessionService,
 } from '@openpanel/db';
@@ -49,6 +50,7 @@ export const sessionRouter = createTRPCRouter({
         endDate: z.date().optional(),
         search: z.string().optional(),
         take: z.number().default(50),
+        onlyReplays: z.boolean().optional(),
       }),
     )
     .query(async ({ input }) => {
@@ -63,6 +65,21 @@ export const sessionRouter = createTRPCRouter({
           next: data.meta.next ? encodeCursor(data.meta.next) : undefined,
         },
       };
+    }),
+
+  // Total number of sessions that have a replay recording — the "N replays"
+  // header on the Session Replays tab.
+  replayCount: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.string(),
+        startDate: z.date().optional(),
+        endDate: z.date().optional(),
+        search: z.string().optional(),
+      }),
+    )
+    .query(async ({ input }) => {
+      return getSessionsCount({ ...input, onlyReplays: true });
     }),
 
   byId: protectedProcedure

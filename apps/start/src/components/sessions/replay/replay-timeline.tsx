@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { EventIcon } from '@/components/events/event-icon';
 import { cn } from '@/utils/cn';
 import { Loader2 } from 'lucide-react';
-import { ReplayPlayPauseButton } from './replay-controls';
+import { ReplayPlayPauseButton, ReplaySpeedControl } from './replay-controls';
 import { formatDuration, getEventOffsetMs } from './replay-utils';
 
 export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
@@ -156,6 +156,7 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
     <TooltipProvider delayDuration={300}>
       <div className="row items-center gap-4 p-4">
         <ReplayPlayPauseButton />
+        <ReplaySpeedControl />
         <div className={cn('col gap-4 flex-1 px-2 relative')}>
           <AnimatePresence>
             {isBuffering && (

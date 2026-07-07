@@ -34,6 +34,7 @@ import { Route as StepsOnboardingProjectIdConnectRouteImport } from './routes/_s
 import { Route as AppOrganizationIdMembersTabsRouteImport } from './routes/_app.$organizationId.members._tabs'
 import { Route as AppOrganizationIdIntegrationsTabsRouteImport } from './routes/_app.$organizationId.integrations._tabs'
 import { Route as AppOrganizationIdProjectIdSessionsRouteImport } from './routes/_app.$organizationId.$projectId.sessions'
+import { Route as AppOrganizationIdProjectIdSessionReplaysRouteImport } from './routes/_app.$organizationId.$projectId.session-replays'
 import { Route as AppOrganizationIdProjectIdReportsRouteImport } from './routes/_app.$organizationId.$projectId.reports'
 import { Route as AppOrganizationIdProjectIdReferencesRouteImport } from './routes/_app.$organizationId.$projectId.references'
 import { Route as AppOrganizationIdProjectIdRealtimeRouteImport } from './routes/_app.$organizationId.$projectId.realtime'
@@ -250,6 +251,12 @@ const AppOrganizationIdProjectIdSessionsRoute =
   AppOrganizationIdProjectIdSessionsRouteImport.update({
     id: '/sessions',
     path: '/sessions',
+    getParentRoute: () => AppOrganizationIdProjectIdRoute,
+  } as any)
+const AppOrganizationIdProjectIdSessionReplaysRoute =
+  AppOrganizationIdProjectIdSessionReplaysRouteImport.update({
+    id: '/session-replays',
+    path: '/session-replays',
     getParentRoute: () => AppOrganizationIdProjectIdRoute,
   } as any)
 const AppOrganizationIdProjectIdReportsRoute =
@@ -522,6 +529,7 @@ export interface FileRoutesByFullPath {
   '/$organizationId/$projectId/realtime': typeof AppOrganizationIdProjectIdRealtimeRoute
   '/$organizationId/$projectId/references': typeof AppOrganizationIdProjectIdReferencesRoute
   '/$organizationId/$projectId/reports': typeof AppOrganizationIdProjectIdReportsRoute
+  '/$organizationId/$projectId/session-replays': typeof AppOrganizationIdProjectIdSessionReplaysRoute
   '/$organizationId/$projectId/sessions': typeof AppOrganizationIdProjectIdSessionsRoute
   '/$organizationId/integrations': typeof AppOrganizationIdIntegrationsTabsRouteWithChildren
   '/$organizationId/members': typeof AppOrganizationIdMembersTabsRouteWithChildren
@@ -582,6 +590,7 @@ export interface FileRoutesByTo {
   '/$organizationId/$projectId/realtime': typeof AppOrganizationIdProjectIdRealtimeRoute
   '/$organizationId/$projectId/references': typeof AppOrganizationIdProjectIdReferencesRoute
   '/$organizationId/$projectId/reports': typeof AppOrganizationIdProjectIdReportsRoute
+  '/$organizationId/$projectId/session-replays': typeof AppOrganizationIdProjectIdSessionReplaysRoute
   '/$organizationId/$projectId/sessions': typeof AppOrganizationIdProjectIdSessionsRoute
   '/$organizationId/integrations': typeof AppOrganizationIdIntegrationsTabsIndexRoute
   '/$organizationId/members': typeof AppOrganizationIdMembersTabsIndexRoute
@@ -642,6 +651,7 @@ export interface FileRoutesById {
   '/_app/$organizationId/$projectId/realtime': typeof AppOrganizationIdProjectIdRealtimeRoute
   '/_app/$organizationId/$projectId/references': typeof AppOrganizationIdProjectIdReferencesRoute
   '/_app/$organizationId/$projectId/reports': typeof AppOrganizationIdProjectIdReportsRoute
+  '/_app/$organizationId/$projectId/session-replays': typeof AppOrganizationIdProjectIdSessionReplaysRoute
   '/_app/$organizationId/$projectId/sessions': typeof AppOrganizationIdProjectIdSessionsRoute
   '/_app/$organizationId/integrations': typeof AppOrganizationIdIntegrationsRouteWithChildren
   '/_app/$organizationId/integrations/_tabs': typeof AppOrganizationIdIntegrationsTabsRouteWithChildren
@@ -713,6 +723,7 @@ export interface FileRouteTypes {
     | '/$organizationId/$projectId/realtime'
     | '/$organizationId/$projectId/references'
     | '/$organizationId/$projectId/reports'
+    | '/$organizationId/$projectId/session-replays'
     | '/$organizationId/$projectId/sessions'
     | '/$organizationId/integrations'
     | '/$organizationId/members'
@@ -773,6 +784,7 @@ export interface FileRouteTypes {
     | '/$organizationId/$projectId/realtime'
     | '/$organizationId/$projectId/references'
     | '/$organizationId/$projectId/reports'
+    | '/$organizationId/$projectId/session-replays'
     | '/$organizationId/$projectId/sessions'
     | '/$organizationId/integrations'
     | '/$organizationId/members'
@@ -832,6 +844,7 @@ export interface FileRouteTypes {
     | '/_app/$organizationId/$projectId/realtime'
     | '/_app/$organizationId/$projectId/references'
     | '/_app/$organizationId/$projectId/reports'
+    | '/_app/$organizationId/$projectId/session-replays'
     | '/_app/$organizationId/$projectId/sessions'
     | '/_app/$organizationId/integrations'
     | '/_app/$organizationId/integrations/_tabs'
@@ -1094,6 +1107,13 @@ declare module '@tanstack/react-router' {
       path: '/sessions'
       fullPath: '/$organizationId/$projectId/sessions'
       preLoaderRoute: typeof AppOrganizationIdProjectIdSessionsRouteImport
+      parentRoute: typeof AppOrganizationIdProjectIdRoute
+    }
+    '/_app/$organizationId/$projectId/session-replays': {
+      id: '/_app/$organizationId/$projectId/session-replays'
+      path: '/session-replays'
+      fullPath: '/$organizationId/$projectId/session-replays'
+      preLoaderRoute: typeof AppOrganizationIdProjectIdSessionReplaysRouteImport
       parentRoute: typeof AppOrganizationIdProjectIdRoute
     }
     '/_app/$organizationId/$projectId/reports': {
@@ -1597,6 +1617,7 @@ interface AppOrganizationIdProjectIdRouteChildren {
   AppOrganizationIdProjectIdRealtimeRoute: typeof AppOrganizationIdProjectIdRealtimeRoute
   AppOrganizationIdProjectIdReferencesRoute: typeof AppOrganizationIdProjectIdReferencesRoute
   AppOrganizationIdProjectIdReportsRoute: typeof AppOrganizationIdProjectIdReportsRoute
+  AppOrganizationIdProjectIdSessionReplaysRoute: typeof AppOrganizationIdProjectIdSessionReplaysRoute
   AppOrganizationIdProjectIdSessionsRoute: typeof AppOrganizationIdProjectIdSessionsRoute
   AppOrganizationIdProjectIdIndexRoute: typeof AppOrganizationIdProjectIdIndexRoute
   AppOrganizationIdProjectIdDashboardsDashboardIdRoute: typeof AppOrganizationIdProjectIdDashboardsDashboardIdRoute
@@ -1624,6 +1645,8 @@ const AppOrganizationIdProjectIdRouteChildren: AppOrganizationIdProjectIdRouteCh
       AppOrganizationIdProjectIdReferencesRoute,
     AppOrganizationIdProjectIdReportsRoute:
       AppOrganizationIdProjectIdReportsRoute,
+    AppOrganizationIdProjectIdSessionReplaysRoute:
+      AppOrganizationIdProjectIdSessionReplaysRoute,
     AppOrganizationIdProjectIdSessionsRoute:
       AppOrganizationIdProjectIdSessionsRoute,
     AppOrganizationIdProjectIdIndexRoute: AppOrganizationIdProjectIdIndexRoute,
