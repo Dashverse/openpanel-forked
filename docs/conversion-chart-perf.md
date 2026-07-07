@@ -54,8 +54,7 @@ Gate (intentionally conservative for MVP):
 - Segment: `user` or `event` (MV has profile_id + countState; no session-uniq state)
 - Interval: `day` / `week` / `month`
 - Event name is explicit (not `*`)
-- Date range within MV coverage (`startDate >= 2026-04-01`)
-
+- Date range within a rolling ~92-day cutoff (`startDate >= today - 92 days`, recomputed per request)
 Anything outside the gate falls through unchanged.
 
 ### What this doesn't cover (yet)
