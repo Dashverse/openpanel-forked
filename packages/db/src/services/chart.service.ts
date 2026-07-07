@@ -432,6 +432,180 @@ function canUseMaterializedView(
   );
 }
 
+// profile_event_property_summary_mv retention window. The MV keeps ~last
+// 3 months of data (verified 2026-07-07: 202603 = 424 MiB near-empty,
+// 202604 onward = TiB-range fully-populated). Compute the floor as a
+// rolling cutoff rather than hardcoding a date — the gate stays correct
+// as the retention window slides forward, no re-deploy needed.
+//
+// Cutoff is returned as `YYYY-MM-DD` (10 chars). Callers must compare the
+// date portion only — comparing full DateTime strings would reject a
+// dashboard-emitted `2026-04-07 00:00:00` against a same-day cutoff whose
+// time-of-day is later (`2026-04-07 21:XX:XX`). Bug caught on 2026-07-07
+// prod smoke test.
+//
+// Using 92 days (~3 months + a couple-day safety margin) so the "3m"
+// dashboard preset always fits: user picks range=3m → startDate = today
+// - 90d, and 92 > 90 so the gate accepts. Bump if the preset widens.
+function getPropertyMVCutoffDate(): string {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 92);
+  return formatClickhouseDate(cutoff).slice(0, 10);
+}
+
+// Extract property key from filter.name for MV routing.
+// Dashboard filters on event properties come through as 'properties.<key>'.
+// A filter targeting a bare materialized column (name = '<key>' with no
+// 'properties.' prefix) is out of scope for this router — that path already
+// goes through the events table with skip index / projection pruning
+// (measured 8s for 30-day country='US' — acceptable, doesn't need MV routing).
+function extractEventPropertyKey(filterName: string): string | null {
+  if (filterName.startsWith('properties.')) {
+    return filterName.slice('properties.'.length);
+  }
+  return null;
+}
+
+// Gate for routing to profile_event_property_summary_mv (sort key
+// `(project_id, name, property_key, property_value, profile_id, event_date)`
+// — extreme prefix selectivity for event-scoped property filters).
+//
+// Prod measurement (2026-07-07, dashreels 30-day logIn + type='truecaller'):
+//   events table (no skip idx on `type`): 52.4s, 6.68 B rows, 152 GiB
+//   this MV route:                         0.38s,  1.4 M rows, 128 MiB
+//   → ~140x speedup with matching numbers.
+//
+// Intentionally conservative for MVP:
+//   - ONE event-level property filter (multi-property AND works too via
+//     INNER JOIN of matching CTEs at ~0.4s — deferred to follow-up)
+//   - operator = 'is' only (list values via 'is' with multi-value array is OK
+//     since MV supports `property_value IN (...)` cheaply via prefix scan)
+//   - No breakdowns (property breakdowns would need JOIN with sibling MV rows;
+//     name/cohort breakdowns are best handled elsewhere)
+//   - Segment: 'user' or 'event' (MV has profile_id + countState; no
+//     session-uniq state → session segment falls through)
+//   - Date range start >= rolling 3-month cutoff (MV retention window)
+//   - Event name is explicit (MV sort key needs the name; '*' can't prefix-scan)
+//
+// MV filter (`profile_id != device_id`): only identified-user events are
+// stored. For events like logIn / purchase / subscribeStart / etc. this is
+// 100% coverage; for anonymous-heavy events this MV would under-count and
+// the caller must NOT route here. In practice event-property-filter charts
+// on the dashboard are on identified events; if we hit a false positive we
+// widen the gate.
+function canUsePropertyMV(
+  event: IGetChartDataInput['event'],
+  breakdowns: IGetChartDataInput['breakdowns'],
+  interval: IGetChartDataInput['interval'],
+  startDate: string,
+): boolean {
+  const validIntervals = ['day', 'week', 'month'];
+  if (!validIntervals.includes(interval)) return false;
+
+  const validSegments = ['user', 'event'];
+  if (!validSegments.includes(event.segment ?? 'event')) return false;
+  if (event.segment === 'one_event_per_user') return false;
+
+  if (breakdowns.length > 0) return false;
+
+  if (event.name === '*') return false;
+
+  const hasCohortFilter = event.filters?.some(
+    (f) =>
+      f.operator === 'inCohort' ||
+      f.operator === 'notInCohort' ||
+      !!f.cohortId,
+  );
+  if (hasCohortFilter) return false;
+
+  if (!event.filters || event.filters.length !== 1) return false;
+  const f = event.filters[0]!;
+  if (f.operator !== 'is') return false;
+  if (!f.value || f.value.length === 0) return false;
+  if (!extractEventPropertyKey(f.name)) return false;
+
+  // Date-only comparison. startDate is a DateTime string like
+  // '2026-04-07 00:00:00'; slice off the time so a same-day cutoff
+  // doesn't reject the query on hour-of-day.
+  if (startDate.slice(0, 10) < getPropertyMVCutoffDate()) return false;
+
+  return true;
+}
+
+function getChartSqlFromPropertyMV({
+  event,
+  interval,
+  startDate,
+  endDate,
+  projectId,
+}: {
+  event: IGetChartDataInput['event'];
+  interval: IGetChartDataInput['interval'];
+  startDate: string;
+  endDate: string;
+  projectId: string;
+  timezone: string;
+}): string {
+  const filter = event.filters![0]!;
+  const propKey = extractEventPropertyKey(filter.name)!;
+  // filter.value is already validated non-empty in the gate. Escape each
+  // value; sqlstring.escape handles ' and other SQL-special chars.
+  const valueList = filter.value!
+    .map((v) => sqlstring.escape(String(v)))
+    .join(', ');
+
+  const dateSelect =
+    interval === 'day'
+      ? 'toStartOfDay(toDateTime(t.event_date)) as date'
+      : interval === 'week'
+        ? 'toDateTime(toStartOfWeek(t.event_date, 1)) as date'
+        : 'toDateTime(toStartOfMonth(t.event_date)) as date';
+  const dateGroupBy =
+    interval === 'day'
+      ? 'toStartOfDay(toDateTime(t.event_date))'
+      : interval === 'week'
+        ? 'toDateTime(toStartOfWeek(t.event_date, 1))'
+        : 'toDateTime(toStartOfMonth(t.event_date))';
+
+  // User segment: distinct profile_id across matching (profile, date) rows.
+  // uniqExact is accurate; the MV holds one row per (project, profile, name,
+  // key, value, day) so cardinality is bounded and the exact aggregate is
+  // cheap.
+  // Event segment: countMerge on the AggregateFunction(count) column.
+  const countExpr =
+    event.segment === 'user'
+      ? 'uniqExact(t.profile_id) as count'
+      : 'countMerge(t.event_count) as count';
+
+  const fillClause =
+    interval === 'day'
+      ? `WITH FILL FROM toStartOfDay(toDateTime(${sqlstring.escape(startDate)})) TO toStartOfDay(toDateTime(${sqlstring.escape(endDate)})) STEP toIntervalDay(1)`
+      : interval === 'week'
+        ? `WITH FILL FROM toDateTime(toStartOfWeek(toDate(${sqlstring.escape(startDate)}), 1)) TO toDateTime(toStartOfWeek(toDate(${sqlstring.escape(endDate)}), 1)) STEP toIntervalWeek(1)`
+        : `WITH FILL FROM toDateTime(toStartOfMonth(toDate(${sqlstring.escape(startDate)}))) TO toDateTime(toStartOfMonth(toDate(${sqlstring.escape(endDate)}))) STEP toIntervalMonth(1)`;
+
+  const sql = `SELECT
+      ${sqlstring.escape(event.name)} as label_0,
+      ${countExpr},
+      ${dateSelect}
+    FROM profile_event_property_summary_mv t
+    WHERE t.project_id = ${sqlstring.escape(projectId)}
+      AND t.name = ${sqlstring.escape(event.name)}
+      AND t.property_key = ${sqlstring.escape(propKey)}
+      AND t.property_value IN (${valueList})
+      AND t.event_date >= toDateTime(${sqlstring.escape(startDate)})
+      AND t.event_date <= toDateTime(${sqlstring.escape(endDate)})
+    GROUP BY ${dateGroupBy}
+    ORDER BY ${dateGroupBy} ASC
+    ${fillClause}`;
+
+  console.log('-- Using profile_event_property_summary_mv --');
+  console.log(sql.replaceAll(/[\n\r]/g, ' '));
+  console.log('-- End --');
+
+  return sql;
+}
+
 /**
  * Build the inner (per-user) aggregation expression.
  * Reduces all of a single user's events to one value.
@@ -737,6 +911,26 @@ export async function getChartSql({
   // Custom events cannot use materialized views (for now)
   if (!customEvent && canUseMaterializedView(event, breakdowns, interval)) {
     return getChartSqlFromMaterializedView({
+      event,
+      interval,
+      startDate,
+      endDate,
+      projectId,
+      timezone,
+    });
+  }
+
+  // Second MV route — when the query has a single event-level property
+  // filter (e.g. `type='truecaller'`) that events_daily_stats can't answer
+  // because it lacks the property dimension. profile_event_property_summary_mv
+  // has (project_id, name, property_key, property_value, ...) as sort-key
+  // prefix — ~140x faster than the events-table skip-index scan (0.38s vs
+  // 52.4s measured on dashreels 30-day logIn + type='truecaller').
+  if (
+    !customEvent &&
+    canUsePropertyMV(event, breakdowns, interval, startDate)
+  ) {
+    return getChartSqlFromPropertyMV({
       event,
       interval,
       startDate,
