@@ -62,8 +62,34 @@ Anything outside the gate falls through unchanged.
 
 - Multi-property AND (2-3 filters) — works via intersection JOIN, measured 0.39s in the same session. Deferred to next PR to keep this MVP tight.
 - Property breakdown (chart's breakdown-by-property, not filter-by-property) — needs a JOIN with sibling MV rows, adds complexity.
-- Anonymous-heavy events (where `profile_id == device_id`) — MV excludes them via its WHERE clause; if we ever route an anonymous-heavy event we'd under-count. Only routing on filter-present shapes limits exposure — most filtered charts are on identified events (logIn, purchase, subscribeStart, etc.).
 - Conversion / funnel queries — separate services, separate PR.
+
+### Known safety boundary: anonymous-heavy events + filter/breakdown
+
+**Both MVs (`profile_event_property_summary_mv` and `profile_event_summary_mv`) are built with `WHERE profile_id != device_id` — anonymous events (pre-identify, where `profile_id == device_id`) are excluded from the MV at write time.**
+
+Empirical verification on dashreels, last 24 hours (2026-07-07):
+
+| Source | `installReferrer` count | Anonymous | Identified |
+|---|---|---|---|
+| `events` (raw) | 122,355 | **121,595 (99.4%)** | 760 (0.6%) |
+| `profile_event_summary_mv` | 405 | 0 | 405 |
+
+The MV is missing **99.4%** of `installReferrer` events. Same story for `first_open`, `deepLinkCaptured`, `screenVisible`, and other pre-identify events.
+
+**What this means for the router:**
+- `installReferrer` chart with NO filter/breakdown → routes to `events_daily_stats` (existing MV that includes anonymous events) → CORRECT.
+- `installReferrer` chart WITH filter or breakdown → routes to `profile_event_property_summary_mv` → **would under-count by ~100×**.
+
+**Why we're not fixing this in code:** the actual dashboard usage pattern doesn't hit the bug window. Users don't filter or break down `installReferrer` events — those events don't carry the properties (`type`, `plan`, etc.) that users typically filter/breakdown on. Post-identify events (`logIn`, `purchase`, `subscribeStart`, etc.) — which are the ones users actually filter on — are FULLY covered by the MV.
+
+**If someone builds a filtered chart on an anonymous-heavy event and sees a suspiciously low line:**
+1. The router matched the shape (filter/breakdown present).
+2. The MV under-counts because it excludes anonymous events.
+3. Fix options (in order of complexity):
+   - Remove the filter/breakdown from the chart — falls through to `events_daily_stats` which has the correct count.
+   - Add the event name to a blacklist in `canUsePropertyMV` — one-line code change.
+   - Long-term: rebuild the MV without the `profile_id != device_id` filter (weeks of storage + backfill).
 
 ### Follow-ups
 
