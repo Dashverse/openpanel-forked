@@ -642,14 +642,16 @@ function getChartSqlFromPropertyMV({
     ? ''
     : `\n      AND t.property_value IN (${valueList})`;
 
-  // ORDER BY / WITH FILL layout: in filter mode the sort has one column
-  // (date), so the fill clause goes at the end. In breakdown mode the sort
-  // has two columns (date then label_1); WITH FILL applies to whichever ORDER
-  // BY column it directly follows, and CH errors on filling a String
-  // column with a day step. Interleave the fill INSIDE the ORDER BY,
-  // right after the date column, then continue with label_1.
+  // ORDER BY / WITH FILL layout:
+  // - Filter mode: single-column sort (date). Fill clause at the end.
+  // - Breakdown mode: sort by (label_1, date) and apply WITH FILL to the
+  //   trailing date column. This produces per-series fill — each
+  //   distinct label_1 value gets its own contiguous timeline. Putting
+  //   date first with WITH FILL and label_1 as a secondary key would
+  //   fill the date column globally and leave gap-days without a
+  //   label_1, breaking per-series semantics in the frontend.
   const orderByClause = isBreakdown
-    ? `ORDER BY ${dateGroupBy} ASC ${fillClause}, label_1 ASC`
+    ? `ORDER BY label_1 ASC, ${dateGroupBy} ASC ${fillClause}`
     : `ORDER BY ${dateGroupBy} ASC\n    ${fillClause}`;
 
   const sql = `SELECT
