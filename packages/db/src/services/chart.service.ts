@@ -563,7 +563,7 @@ function getChartSqlFromPropertyMV({
 }): string {
   // Gate guarantees XOR(filter, breakdown): exactly one is present.
   // Both bind the same property_key on the MV; filter pins property_value,
-  // breakdown returns it as the b_0 aggregation dimension.
+  // breakdown returns it as the label_1 aggregation dimension.
   const filter = event.filters?.[0];
   const breakdown = breakdowns[0];
   const isBreakdown = !filter && !!breakdown;
@@ -612,27 +612,27 @@ function getChartSqlFromPropertyMV({
         ? `WITH FILL FROM toDateTime(toStartOfWeek(toDate(${sqlstring.escape(startDate)}), 1)) TO toDateTime(toStartOfWeek(toDate(${sqlstring.escape(endDate)}), 1)) STEP toIntervalWeek(1)`
         : `WITH FILL FROM toDateTime(toStartOfMonth(toDate(${sqlstring.escape(startDate)}))) TO toDateTime(toStartOfMonth(toDate(${sqlstring.escape(endDate)}))) STEP toIntervalMonth(1)`;
 
-  // Breakdown mode emits property_value AS b_0; groups by (b_0, date) so
+  // Breakdown mode emits property_value AS label_1; groups by (label_1, date) so
   // each series is one property_value. Note MV is populated with
   // `property_value != ''` — events with an empty value for the breakdown
   // key are absent from the MV under this key, so the breakdown result
   // omits the "no-value" bucket. Events-table path would show it as a
   // '' bucket. Dashboards typically want distinct-value buckets, so this
   // is desirable more often than not.
-  const breakdownSelect = isBreakdown ? '\n      t.property_value AS b_0,' : '';
-  const breakdownGroupBy = isBreakdown ? 'b_0, ' : '';
+  const breakdownSelect = isBreakdown ? '\n      t.property_value AS label_1,' : '';
+  const breakdownGroupBy = isBreakdown ? 'label_1, ' : '';
   const valueClause = isBreakdown
     ? ''
     : `\n      AND t.property_value IN (${valueList})`;
 
   // ORDER BY / WITH FILL layout: in filter mode the sort has one column
   // (date), so the fill clause goes at the end. In breakdown mode the sort
-  // has two columns (date then b_0); WITH FILL applies to whichever ORDER
+  // has two columns (date then label_1); WITH FILL applies to whichever ORDER
   // BY column it directly follows, and CH errors on filling a String
   // column with a day step. Interleave the fill INSIDE the ORDER BY,
-  // right after the date column, then continue with b_0.
+  // right after the date column, then continue with label_1.
   const orderByClause = isBreakdown
-    ? `ORDER BY ${dateGroupBy} ASC ${fillClause}, b_0 ASC`
+    ? `ORDER BY ${dateGroupBy} ASC ${fillClause}, label_1 ASC`
     : `ORDER BY ${dateGroupBy} ASC\n    ${fillClause}`;
 
   const sql = `SELECT
