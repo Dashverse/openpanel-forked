@@ -193,6 +193,33 @@ async function buildSessionSearchWhere(
   return `(${conditions.join(' OR ')})`;
 }
 
+/**
+ * Rolling lookback window (days) for session queries. Big organizations get a
+ * tight 1-day window for performance; everyone else 360. Shared by
+ * getSessionList and getSessionsCount so their date/replay windows can't drift.
+ */
+async function getSessionLookbackDays(projectId: string): Promise<number> {
+  const organization = await getOrganizationByProjectIdCached(projectId);
+  return organization?.subscriptionPeriodEventsLimit &&
+    organization.subscriptionPeriodEventsLimit > 1_000_000
+    ? 1
+    : 360;
+}
+
+/**
+ * WHERE fragment keeping only sessions that have a replay recording within the
+ * lookback window. Reads just the cheap, ZSTD-compressed session_id column from
+ * session_replay_chunks, so it stays fast on the large table.
+ */
+function buildHasReplayWhere(projectId: string, days: number): string {
+  return `id IN (
+      SELECT DISTINCT session_id
+      FROM ${TABLE_NAMES.session_replay_chunks}
+      WHERE project_id = ${sqlstring.escape(projectId)}
+        AND started_at > now() - INTERVAL ${days} DAY
+    )`;
+}
+
 export async function getSessionList({
   cursor,
   take,
@@ -223,24 +250,12 @@ export async function getSessionList({
     Object.assign(sb.where, getEventFiltersWhereClause(filters));
   }
 
-  const organization = await getOrganizationByProjectIdCached(projectId);
   // This will speed up the query quite a lot for big organizations
-  const dateIntervalInDays =
-    organization?.subscriptionPeriodEventsLimit &&
-    organization?.subscriptionPeriodEventsLimit > 1_000_000
-      ? 1
-      : 360;
+  const dateIntervalInDays = await getSessionLookbackDays(projectId);
 
   if (onlyReplays) {
-    // Keep only sessions with a replay recording. The subquery reads just the
-    // (cheap, ZSTD) session_id column from session_replay_chunks, scoped to the
-    // project + the same date window, so it stays fast on the large table.
-    sb.where.hasReplay = `id IN (
-      SELECT DISTINCT session_id
-      FROM ${TABLE_NAMES.session_replay_chunks}
-      WHERE project_id = ${sqlstring.escape(projectId)}
-        AND started_at > now() - INTERVAL ${dateIntervalInDays} DAY
-    )`;
+    // Keep only sessions with a replay recording, within the same date window.
+    sb.where.hasReplay = buildHasReplayWhere(projectId, dateIntervalInDays);
   }
 
   if (cursor) {
@@ -355,18 +370,8 @@ export async function getSessionsCount({
   sb.where.sign = 'sign = 1';
 
   if (onlyReplays) {
-    const organization = await getOrganizationByProjectIdCached(projectId);
-    const days =
-      organization?.subscriptionPeriodEventsLimit &&
-      organization.subscriptionPeriodEventsLimit > 1_000_000
-        ? 1
-        : 360;
-    sb.where.hasReplay = `id IN (
-      SELECT DISTINCT session_id
-      FROM ${TABLE_NAMES.session_replay_chunks}
-      WHERE project_id = ${sqlstring.escape(projectId)}
-        AND started_at > now() - INTERVAL ${days} DAY
-    )`;
+    const days = await getSessionLookbackDays(projectId);
+    sb.where.hasReplay = buildHasReplayWhere(projectId, days);
   }
 
   if (profileId) {

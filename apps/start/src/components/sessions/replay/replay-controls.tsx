@@ -5,7 +5,6 @@ import {
 } from '@/components/sessions/replay/replay-context';
 import { Button } from '@/components/ui/button';
 import { Pause, Play } from 'lucide-react';
-import { useState } from 'react';
 import { formatDuration } from './replay-utils';
 
 // Cycle order for the speed button (0.5× lives in SPEED_OPTIONS but isn't in
@@ -13,15 +12,15 @@ import { formatDuration } from './replay-utils';
 const SPEED_CYCLE = SPEED_OPTIONS.filter((s) => s >= 1);
 
 export function ReplaySpeedControl() {
-  const { setSpeed, isReady } = useReplayContext();
-  const [speed, setSpeedState] = useState(1);
+  // Read the canonical speed from context (single source of truth) rather than
+  // tracking a parallel local copy that could desync from other controls.
+  const { speed, setSpeed, isReady } = useReplayContext();
 
   if (!isReady) return null;
 
   const cycle = () => {
     const idx = SPEED_CYCLE.indexOf(speed as (typeof SPEED_CYCLE)[number]);
     const next = SPEED_CYCLE[(idx + 1) % SPEED_CYCLE.length]!;
-    setSpeedState(next);
     setSpeed(next);
   };
 
