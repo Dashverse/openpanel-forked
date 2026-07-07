@@ -11,7 +11,11 @@ import { clix } from '../clickhouse/query-builder';
 import { createSqlBuilder } from '../sql-builder';
 import { getEventFiltersWhereClause } from './chart.service';
 import { getOrganizationByProjectIdCached } from './organization.service';
-import { type IServiceProfile, getProfilesCached } from './profile.service';
+import {
+  type IServiceProfile,
+  getProfilesCached,
+  looksLikeProfileId,
+} from './profile.service';
 
 export type IClickhouseSession = {
   id: string;
@@ -179,8 +183,12 @@ export async function getSessionList({
   if (profileId)
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
   if (search) {
-    const s = sqlstring.escape(`%${search}%`);
-    sb.where.search = `(entry_path ILIKE ${s} OR exit_path ILIKE ${s} OR referrer ILIKE ${s} OR referrer_name ILIKE ${s})`;
+    if (looksLikeProfileId(search)) {
+      sb.where.search = `profile_id LIKE ${sqlstring.escape(`${search}%`)}`;
+    } else {
+      const s = sqlstring.escape(`%${search}%`);
+      sb.where.search = `(entry_path ILIKE ${s} OR exit_path ILIKE ${s} OR referrer ILIKE ${s} OR referrer_name ILIKE ${s})`;
+    }
   }
   if (filters?.length) {
     Object.assign(sb.where, getEventFiltersWhereClause(filters));
@@ -304,7 +312,12 @@ export async function getSessionsCount({
   }
 
   if (search) {
-    sb.where.search = `(entry_path ILIKE '%${search}%' OR exit_path ILIKE '%${search}%' OR referrer ILIKE '%${search}%' OR referrer_name ILIKE '%${search}%')`;
+    if (looksLikeProfileId(search)) {
+      sb.where.search = `profile_id LIKE ${sqlstring.escape(`${search}%`)}`;
+    } else {
+      const s = sqlstring.escape(`%${search}%`);
+      sb.where.search = `(entry_path ILIKE ${s} OR exit_path ILIKE ${s} OR referrer ILIKE ${s} OR referrer_name ILIKE ${s})`;
+    }
   }
 
   if (filters && filters.length > 0) {
