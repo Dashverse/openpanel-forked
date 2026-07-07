@@ -161,21 +161,15 @@ type Cursor = {
 };
 
 /**
- * Build the session-list WHERE clause for a free-text search. Matches page
- * paths + referrer (PostHog-style) AND the user (profile name / email) —
- * resolved to profile_ids since the sessions table doesn't carry names.
+ * Build the session-list WHERE clause for a free-text search. Matches the user
+ * (profile name / email) — resolved to profile_ids since the sessions table
+ * doesn't carry names. Path/referrer search is intentionally omitted for now.
  */
 async function buildSessionSearchWhere(
   search: string,
   projectId: string,
 ): Promise<string> {
   const s = sqlstring.escape(`%${search}%`);
-  const conditions = [
-    `entry_path ILIKE ${s}`,
-    `exit_path ILIKE ${s}`,
-    `referrer ILIKE ${s}`,
-    `referrer_name ILIKE ${s}`,
-  ];
   const profileRows = await chQuery<{ id: string }>(
     `SELECT DISTINCT id
      FROM ${TABLE_NAMES.profiles}
@@ -186,11 +180,10 @@ async function buildSessionSearchWhere(
             OR concat(first_name, ' ', last_name) ILIKE ${s})
      LIMIT 1000`,
   );
-  if (profileRows.length > 0) {
-    const ids = profileRows.map((r) => sqlstring.escape(r.id)).join(', ');
-    conditions.push(`profile_id IN (${ids})`);
-  }
-  return `(${conditions.join(' OR ')})`;
+  // No matching users → match no sessions (search is user-only for now).
+  if (profileRows.length === 0) return '0';
+  const ids = profileRows.map((r) => sqlstring.escape(r.id)).join(', ');
+  return `profile_id IN (${ids})`;
 }
 
 /**
