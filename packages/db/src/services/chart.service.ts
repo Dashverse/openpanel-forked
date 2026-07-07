@@ -619,10 +619,6 @@ function getChartSqlFromPropertyMV({
     ORDER BY ${dateGroupBy} ASC
     ${fillClause}`;
 
-  console.log('-- Using profile_event_property_summary_mv --');
-  console.log(sql.replaceAll(/[\n\r]/g, ' '));
-  console.log('-- End --');
-
   return sql;
 }
 
