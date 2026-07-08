@@ -22,6 +22,23 @@ if (process.env.NITRO) {
       preset: 'node-server',
       compatibilityDate: '2025-10-21',
       serveStatic: true,
+      routeRules: {
+        // Content-hashed build assets: a new build produces new URLs,
+        // so these are safe to cache forever at the edge and browser.
+        '/assets/**': {
+          headers: {
+            'cache-control': 'public, max-age=31536000, immutable',
+          },
+        },
+        // SSR HTML and unhashed public files change in place between
+        // deploys; force revalidation so releases show up without a
+        // Cloudflare purge.
+        '/**': {
+          headers: {
+            'cache-control': 'no-cache',
+          },
+        },
+      },
     }),
   );
 } else {
