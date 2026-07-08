@@ -116,9 +116,16 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
     [listQuery.data],
   );
 
-  // Default the selection to the first replay in the list.
+  // Default the selection to the first replay — but ONLY once, when the list
+  // first loads. Re-defaulting whenever `selectedSessionId` clears would fight
+  // the router: navigating away (e.g. to /realtime) drops the ?session param,
+  // which would re-trigger this effect and immediately revert you back to the
+  // replays tab — trapping you on the page. The ref makes it fire at most once.
+  const didAutoSelectRef = useRef(false);
   useEffect(() => {
+    if (didAutoSelectRef.current) return;
     if (!selectedSessionId && sessions[0]) {
+      didAutoSelectRef.current = true;
       void setSelectedSessionId(sessions[0].id);
     }
   }, [sessions, selectedSessionId, setSelectedSessionId]);
