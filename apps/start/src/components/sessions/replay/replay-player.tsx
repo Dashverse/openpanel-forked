@@ -177,7 +177,13 @@ export function ReplayPlayer({
         box,
         aspectRatio,
       );
-      setBoxHeight(bh);
+      // Guard against a ResizeObserver feedback loop: this observer watches the
+      // box, and boxHeight is derived from the box's own position, so writing it
+      // on every callback for sub-pixel drift can re-trigger the observer
+      // indefinitely (freezes the page). Only commit meaningful changes.
+      setBoxHeight((prev) =>
+        prev != null && Math.abs(prev - bh) < 2 ? prev : bh,
+      );
       // Only re-apply the video size when it actually changed — avoids churn.
       if (w === lastW && h === lastH) return;
       lastW = w;
