@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@openpanel/sdk": "workspace:1.0.3-local"
+    "@openpanel/sdk": "workspace:*"
   },
   "devDependencies": {
     "@openpanel/tsconfig": "workspace:*",
