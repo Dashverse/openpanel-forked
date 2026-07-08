@@ -6,7 +6,11 @@ import {
   kafkaLogger,
   type KafkaMessage,
 } from '@openpanel/queue';
-import { kafkaReprocessedTotal } from '../metrics';
+import {
+  kafkaConsumeErrorsTotal,
+  kafkaEventsConsumedTotal,
+  kafkaReprocessedTotal,
+} from '../metrics';
 import { logger } from '../utils/logger';
 import { incomingEvent } from './events.incoming-event';
 
@@ -161,10 +165,16 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
               if (payload) {
                 try {
                   await incomingEvent(payload);
+                  kafkaEventsConsumedTotal.inc({
+                    partition: String(batch.partition),
+                  });
                 } catch (err) {
                   // Match the GroupMQ behaviour: log and ack. At-most-once on
                   // handler exceptions; failures here would otherwise block the
                   // partition.
+                  kafkaConsumeErrorsTotal.inc({
+                    partition: String(batch.partition),
+                  });
                   logger.error('kafka incomingEvent handler failed', {
                     error: err,
                     partition: batch.partition,

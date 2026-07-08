@@ -34,6 +34,25 @@ export const kafkaReprocessedTotal = new client.Counter({
 
 register.registerMetric(kafkaReprocessedTotal);
 
+// Events successfully handed to incomingEvent() from the Kafka consumer.
+// Compare against Event Hubs "IncomingMessages" (portal) to see produce→consume
+// throughput and spot the consumer falling behind during the migration.
+export const kafkaEventsConsumedTotal = new client.Counter({
+  name: 'kafka_events_consumed_total',
+  help: 'Kafka event messages processed by the consumer',
+  labelNames: ['partition'],
+});
+
+// incomingEvent() threw for a Kafka message (logged + acked, at-most-once).
+export const kafkaConsumeErrorsTotal = new client.Counter({
+  name: 'kafka_consume_errors_total',
+  help: 'Kafka events whose incomingEvent handler threw',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(kafkaEventsConsumedTotal);
+register.registerMetric(kafkaConsumeErrorsTotal);
+
 queues.forEach((queue) => {
   register.registerMetric(
     new client.Gauge({
