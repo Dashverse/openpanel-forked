@@ -103,7 +103,32 @@ const buildSasl = (): SASLOptions | undefined => {
 
 export const isKafkaConfigured = (): boolean => KAFKA_BROKERS.length > 0;
 
-export const shouldUseKafka = (): boolean => isKafkaConfigured();
+// ─── TEMPORARY: per-project rollout gate ────────────────────────────────────
+// Lets us migrate one project at a time (frameo → … → *) instead of a big-bang
+// cutover. Mirrors REPLAY_ENABLED_PROJECT_IDS. Once every project is on Kafka,
+// DELETE the allow-list below and collapse this to:
+//   export const shouldUseKafka = (): boolean => isKafkaConfigured();
+// and drop the projectId arg at the two call sites (track/event controller).
+const kafkaProjectIdsEnv = (process.env.KAFKA_PROJECT_IDS || '').trim();
+const kafkaAllowAllProjects = kafkaProjectIdsEnv === '*';
+const kafkaProjectIdAllowList = new Set<string>(
+  kafkaProjectIdsEnv && !kafkaAllowAllProjects
+    ? kafkaProjectIdsEnv
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean)
+    : [],
+);
+
+export const shouldUseKafka = (projectId: string): boolean => {
+  if (!isKafkaConfigured()) {
+    return false;
+  }
+  if (kafkaAllowAllProjects) {
+    return true;
+  }
+  return kafkaProjectIdAllowList.has(projectId);
+};
 
 let kafka: Kafka | null = null;
 const getKafka = (): Kafka => {

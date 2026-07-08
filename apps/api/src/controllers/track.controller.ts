@@ -345,7 +345,7 @@ async function track({
   // partition; falls back to a random id only for the (unused) empty-group case.
   const partitionKey = groupId || generateId();
 
-  if (shouldUseKafka()) {
+  if (shouldUseKafka(projectId)) {
     await produceIncomingEvent(queueData, partitionKey);
   } else {
     await getEventsGroupQueueShard(partitionKey).add({
