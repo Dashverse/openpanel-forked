@@ -70,6 +70,7 @@ export interface IClickhouseEvent {
   profile_id: string;
   project_id: string;
   session_id: string;
+  window_id: string;
   path: string;
   origin: string;
   referrer: string;
@@ -201,6 +202,7 @@ export interface IServiceEvent {
   profileId: string;
   projectId: string;
   sessionId: string;
+  windowId?: string;
   properties: Record<string, unknown> & {
     hash?: string;
     query?: Record<string, unknown>;
@@ -363,6 +365,7 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
     profile_id: payload.profileId ? String(payload.profileId) : '',
     project_id: payload.projectId,
     session_id: payload.sessionId,
+    window_id: payload.windowId ?? '',
     properties: toDots(payload.properties),
     path: payload.path ?? '',
     origin: payload.origin ?? '',

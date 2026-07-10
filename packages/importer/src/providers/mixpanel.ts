@@ -334,6 +334,7 @@ export class MixpanelProvider extends BaseImportProvider<MixpanelRawEvent> {
       profile_id: profileId,
       project_id: projectId,
       session_id: '', // Will be generated in SQL after import
+      window_id: '', // No browser window for imported events
       properties: toDots(properties), // Flatten nested objects/arrays to Map(String, String)
       created_at: new Date(props.time * 1000).toISOString(),
       country,
