@@ -5,40 +5,47 @@ import {
 import { getIsCluster } from './helpers';
 
 /**
- * Backfill `profile_event_property_summary_v2` from `events`, one chunk at a time.
+ * Backfill `profile_event_property_summary_v2` via the Null-engine staging pattern.
  *
- * v2 is the anonymous-inclusive rebuild of `profile_event_property_summary_mv`
- * — same schema minus the `WHERE profile_id != device_id` filter at the ARRAY JOIN.
- * See `/Users/dhruvsharma/.claude/plans/hazy-churning-parrot.md` for the full context.
+ * Why: the previous chunked `INSERT INTO v2 SELECT ... FROM events GROUP BY ...`
+ * approach forced ClickHouse to load the entire per-chunk aggregation state into
+ * RAM at merge time, hitting Aiven's ~23 GiB per-query cap on 6h afternoon
+ * chunks and causing MEMORY_LIMIT_EXCEEDED. Cutting to 3h chunks fixed memory
+ * but still peaked CPU at 77%. Root cause is architectural, not per-chunk size:
+ * one big aggregation always accumulates state in memory.
  *
- * v2 target table + MV writer live on prod since 2026-07-10 08:53:40 UTC (via
- * `openpanel/drop-and-recreate-property-mv-v2.sql`). Live writer captures new
- * INSERTs from that moment onward; this migration backfills history before it.
+ * Fix (per ClickHouse official docs `data-modeling/backfilling`): route source
+ * events through a `Null`-engine staging table with a chained MV. The MV
+ * processes events BLOCK-BY-BLOCK (~1M rows per block) — each block gets its
+ * own bounded aggregation, and AggregatingMergeTree merges the partial states
+ * in the background. Peak memory becomes ~200 MB per block regardless of total
+ * scan size. Null-engine discards blocks after the MV consumes them, so zero
+ * storage cost for the staging path.
  *
- * Chunk = a time window. 6-hour chunks are the sweet spot for the current cluster
- * size (Aiven 32-CPU, 3-replica): each chunk runs at max_threads=8 (25% of one
- * node), external group by spills to disk at 4 GiB, stays under Aiven's ~28 GiB
- * per-query memory cap. Reference: 6h chunk ≈ 13-15 min wall-clock.
+ * Live writer safety: the live `_v2_mv` is bound to `events` (source). The
+ * backfill MV is bound to `events_backfill_null` (different source). Same v2
+ * target, different write paths — no double-fire on any single INSERT.
+ *
+ * Setup is idempotent (`CREATE ... IF NOT EXISTS`) so the same call can be
+ * fired repeatedly to advance one day at a time. Manual cleanup at the end:
+ *   DROP TABLE default.profile_event_property_summary_v2_backfill_mv ON CLUSTER default SYNC;
+ *   DROP TABLE default.events_backfill_null ON CLUSTER default SYNC;
  *
  * Usage:
- *   Dry-run one chunk:
- *     pnpm migrate:deploy:code -- 21 --cluster --dry \
- *       --start="2026-07-08 06:00:00" --end="2026-07-08 12:00:00" --no-record
+ *   Dry-run one day:
+ *     pnpm migrate:deploy:code -- 22 --cluster --dry \
+ *       --start="2026-07-05 00:00:00" --end="2026-07-06 00:00:00" --no-record
+ *   Execute one day:
+ *     pnpm migrate:deploy:code -- 22 --cluster \
+ *       --start="2026-07-05 00:00:00" --end="2026-07-06 00:00:00" --no-record
  *
- *   Execute one chunk:
- *     pnpm migrate:deploy:code -- 21 --cluster \
- *       --start="2026-07-08 06:00:00" --end="2026-07-08 12:00:00" --no-record
- *
- * Loop multiple chunks via a k8s Job — see
+ * Loop by day via the k8s Job at
  * openpanel/backfill-profile-event-property-summary-mv-v2.yaml
- *
- * Idempotency: this migration does NOT guard against double-runs. Re-running the
- * same window doubles the countState() aggregate for the affected keys. Verify
- * once at the end via events-vs-v2 event_count comparison; if inflated, DROP
- * PARTITION 'YYYYMM' on v2 and re-backfill that month.
  */
 
 const V2_TABLE = 'profile_event_property_summary_v2';
+const NULL_TABLE = 'events_backfill_null';
+const BACKFILL_MV = 'profile_event_property_summary_v2_backfill_mv';
 
 function parseArgs() {
   const args = process.argv;
@@ -56,37 +63,73 @@ function parseArgs() {
   };
 }
 
-export async function up() {
-  const { start, end, isDry } = parseArgs();
+async function ensureSetup(isCluster: boolean): Promise<void> {
+  const onCluster = isCluster ? 'ON CLUSTER default' : '';
 
-  // Manual per-chunk migration. If run without --start/--end (e.g. the automatic
-  // migrate:deploy loop imports it during deploy), no-op so it never crashes.
+  // Null-engine staging: same schema as events (via `AS default.events`), discards
+  // rows on INSERT, chained MV consumes them first. Zero storage.
+  const nullTableSql = `
+    CREATE TABLE IF NOT EXISTS default.${NULL_TABLE} ${onCluster}
+    AS default.events
+    ENGINE = Null`;
+
+  // Backfill MV: same SELECT as the live _v2_mv, but source = Null table.
+  // Same v2 target, so partial states from live + backfill are merged by the
+  // AggregatingMergeTree background merge scheduler.
+  const backfillMvSql = `
+    CREATE MATERIALIZED VIEW IF NOT EXISTS default.${BACKFILL_MV} ${onCluster}
+    TO default.${V2_TABLE}
+    AS SELECT
+        project_id,
+        profile_id,
+        name,
+        property_key,
+        property_value,
+        toStartOfDay(created_at) AS event_date,
+        countState() AS event_count,
+        minState(created_at) AS first_event_time,
+        maxState(created_at) AS last_event_time
+    FROM default.${NULL_TABLE}
+    ARRAY JOIN
+        mapKeys(properties) AS property_key,
+        mapValues(properties) AS property_value
+    WHERE property_key != '' AND property_value != ''
+    GROUP BY project_id, profile_id, name, property_key, property_value, event_date`;
+
+  await runClickhouseMigrationCommands([nullTableSql, backfillMvSql]);
+}
+
+export async function up() {
+  const { start, end, isCluster, isDry } = parseArgs();
+
+  // Manual per-window migration. No-op if the auto migrate:deploy loop imports
+  // it during deploy so it never crashes CI.
   if (!start || !end) {
     console.log(
-      '[21-backfill-v2] No --start/--end provided — manual per-chunk migration, skipping.',
+      '[22-null-backfill] No --start/--end provided — manual per-window migration, skipping.',
     );
     console.log(
-      '   Run via: pnpm migrate:deploy:code -- 21 --cluster \\',
+      '   Run via: pnpm migrate:deploy:code -- 22 --cluster \\',
     );
     console.log(
-      '     --start="2026-07-08 06:00:00" --end="2026-07-08 12:00:00" --no-record',
+      '     --start="2026-07-05 00:00:00" --end="2026-07-06 00:00:00" --no-record',
     );
     return;
   }
 
   console.log('='.repeat(60));
-  console.log(`  BACKFILL ${V2_TABLE}`);
+  console.log(`  BACKFILL ${V2_TABLE} (via Null-engine staging)`);
   console.log(`  From: ${start}`);
   console.log(`  To:   ${end}`);
   console.log(`  Mode: ${isDry ? 'DRY RUN' : 'EXECUTE'}`);
   console.log('='.repeat(60));
 
-  // Step 0: source event count for the window (sanity)
+  // Source count sanity check
   console.log(`\n[Step 0] Source events in [${start}, ${end}):`);
   const srcResult = await chMigrationClient.query({
     query: `
       SELECT count() AS total
-      FROM events
+      FROM default.events
       WHERE created_at >= toDateTime('${start}')
         AND created_at < toDateTime('${end}')`,
     format: 'JSONEachRow',
@@ -101,34 +144,29 @@ export async function up() {
     return;
   }
 
+  // Ensure Null-engine staging + backfill MV are in place (idempotent)
+  console.log(`\n[Step 1] Ensuring Null-engine staging + backfill MV exist...`);
+  await ensureSetup(isCluster);
+  console.log('  OK');
+
+  // The actual backfill: block-by-block via the Null-engine pipeline.
+  //   - Blocks of ~1M rows / ~10 MiB flow through the Null table
+  //   - Backfill MV aggregates each block into partial states → v2
+  //   - Peak memory: ~200 MB per block (not per-window), way under Aiven's cap
+  //   - `optimize_trivial_insert_select=1` aligns SELECT parallelism with insert
+  //   - `max_threads=4` and `max_insert_threads=4` keep CPU under ~40-50%
   const insertSql = `
-    INSERT INTO ${V2_TABLE}
-    SELECT
-        project_id,
-        profile_id,
-        name,
-        property_key,
-        property_value,
-        toStartOfDay(created_at) AS event_date,
-        countState() AS event_count,
-        minState(created_at) AS first_event_time,
-        maxState(created_at) AS last_event_time
-    FROM events
-    ARRAY JOIN
-        mapKeys(properties) AS property_key,
-        mapValues(properties) AS property_value
-    WHERE
-        created_at >= toDateTime('${start}')
-        AND created_at < toDateTime('${end}')
-        AND property_key != ''
-        AND property_value != ''
-    GROUP BY
-        project_id, profile_id, name, property_key, property_value, event_date
+    INSERT INTO default.${NULL_TABLE}
+    SELECT * FROM default.events
+    WHERE created_at >= toDateTime('${start}')
+      AND created_at <  toDateTime('${end}')
     SETTINGS
-        max_threads = 8,
-        max_memory_usage = 25000000000,
-        max_bytes_before_external_group_by = 4000000000,
-        max_execution_time = 3600`;
+      max_insert_threads = 4,
+      max_threads = 4,
+      min_insert_block_size_bytes_for_materialized_views = 10485760,
+      min_insert_block_size_rows_for_materialized_views = 1000000,
+      optimize_trivial_insert_select = 1,
+      max_execution_time = 7200`;
 
   if (isDry) {
     console.log('\n[DRY RUN] SQL that would execute:');
@@ -137,7 +175,7 @@ export async function up() {
   }
 
   console.log(
-    `\n[Step 1] Running INSERT (throttled to max_threads=8)...`,
+    `\n[Step 2] Running INSERT (block-by-block via Null pipeline)...`,
   );
   const startTime = Date.now();
   await runClickhouseMigrationCommands([insertSql]);
@@ -147,7 +185,7 @@ export async function up() {
   );
 
   console.log('\n' + '='.repeat(60));
-  console.log('  CHUNK COMPLETE');
+  console.log('  WINDOW COMPLETE');
   console.log('='.repeat(60));
 }
 
