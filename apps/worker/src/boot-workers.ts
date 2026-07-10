@@ -7,7 +7,6 @@ import {
   cronQueue,
   eventsGroupQueues,
   importQueue,
-  isKafkaConfigured,
   miscQueue,
   notificationQueue,
   queueLogger,
@@ -21,7 +20,6 @@ import { Worker as GroupWorker } from 'groupmq';
 
 import { cronJob } from './jobs/cron';
 import { incomingEvent } from './jobs/events.incoming-event';
-import { startKafkaEventsConsumer } from './jobs/events.kafka-consumer';
 import { importJob } from './jobs/import';
 import { miscJob } from './jobs/misc';
 import { notificationJob } from './jobs/notification';
@@ -162,24 +160,8 @@ export async function bootWorkers() {
     : getEnabledQueues();
 
   const workers: (Worker | GroupWorker<any>)[] = [];
-  const extraStops: Array<() => Promise<unknown>> = [];
 
-  // Does this pod handle event ingestion at all? (the events statefulset —
-  // NOT the cron/import deployments, which set ENABLED_QUEUES=cron / import).
-  // Gates the Kafka consumer so cron/import pods don't also consume events when
-  // KAFKA_BROKERS is set in the shared configmap.
-  const handlesEvents =
-    enabledQueues.includes('events') ||
-    enabledQueues.includes('events_kafka') ||
-    enabledQueues.some((q) => /^events_\d+$/.test(q));
-
-  // Start GroupMQ event workers based on enabled queues.
-  // DUAL-CONSUME during the per-project Kafka migration: GroupMQ keeps running
-  // for the projects NOT yet in KAFKA_PROJECT_IDS, while the Kafka consumer
-  // (below) handles the allow-listed ones. We intentionally do NOT skip GroupMQ
-  // when Kafka is configured. Once migration hits KAFKA_PROJECT_IDS=* these
-  // shards just poll empty (harmless); after full migration this whole
-  // dual-path is removed.
+  // Start event workers based on enabled queues
   const eventQueuesToStart: number[] = [];
 
   if (enabledQueues.includes('events')) {
@@ -221,24 +203,6 @@ export async function bootWorkers() {
     worker.run();
     workers.push(worker);
     logger.info(`Started worker for ${queueName}`, { concurrency });
-  }
-
-  // Start the Kafka events consumer ALONGSIDE the GroupMQ workers above
-  // (dual-consume). It processes whatever the API produced to Kafka for the
-  // allow-listed projects; GroupMQ handles the rest. Only the events pod runs
-  // it — cron/import pods (handlesEvents=false) never consume.
-  if (isKafkaConfigured() && handlesEvents) {
-    // Fail-fast: if the consumer can't start, abort boot so k8s restarts the
-    // pod and retries. Swallowing it would leave allow-listed projects'
-    // events piling up unconsumed in Kafka (GroupMQ doesn't drain the topic).
-    try {
-      const handle = await startKafkaEventsConsumer();
-      logger.info('Started Kafka events consumer');
-      extraStops.push(() => handle.stop());
-    } catch (err) {
-      logger.error('Failed to start Kafka events consumer', { err });
-      throw err;
-    }
   }
 
   // Start sessions worker
@@ -388,14 +352,7 @@ export async function bootWorkers() {
         await waitForQueueToEmpty(cronQueue);
       }
 
-      await Promise.all([
-        ...workers.map((worker) => worker.close()),
-        ...extraStops.map((stop) =>
-          stop().catch((err) => {
-            logger.error('extra stop handler error', { err });
-          }),
-        ),
-      ]);
+      await Promise.all(workers.map((worker) => worker.close()));
 
       logger.info('workers closed successfully', {
         elapsed: performance.now() - time,

@@ -1367,9 +1367,6 @@ importers:
       groupmq:
         specifier: 'catalog:'
         version: 1.1.1-next.2(ioredis@5.8.2)
-      kafkajs:
-        specifier: ^2.2.4
-        version: 2.2.4
     devDependencies:
       '@openpanel/sdk':
         specifier: workspace:*
@@ -1434,7 +1431,7 @@ importers:
   packages/sdks/astro:
     dependencies:
       '@openpanel/web':
-        specifier: workspace:*
+        specifier: workspace:1.1.0-local
         version: link:../web
     devDependencies:
       astro:
@@ -1447,7 +1444,7 @@ importers:
         specifier: workspace:*
         version: link:../../common
       '@openpanel/sdk':
-        specifier: workspace:*
+        specifier: workspace:1.0.3-local
         version: link:../sdk
       express:
         specifier: ^4.17.0 || ^5.0.0
@@ -1472,7 +1469,7 @@ importers:
   packages/sdks/nextjs:
     dependencies:
       '@openpanel/web':
-        specifier: workspace:*
+        specifier: workspace:1.1.0-local
         version: link:../web
       next:
         specifier: ^12.0.0 || ^13.0.0 || ^14.0.0 || ^15.0.0 || ^16.0.0
@@ -1500,7 +1497,7 @@ importers:
   packages/sdks/react-native:
     dependencies:
       '@openpanel/sdk':
-        specifier: workspace:*
+        specifier: workspace:1.0.3-local
         version: link:../sdk
       expo-application:
         specifier: 5 - 6
@@ -1543,7 +1540,7 @@ importers:
   packages/sdks/web:
     dependencies:
       '@openpanel/sdk':
-        specifier: workspace:*
+        specifier: workspace:1.0.3-local
         version: link:../sdk
       rrweb:
         specifier: 2.0.0-alpha.20
@@ -12182,10 +12179,6 @@ packages:
 
   jws@3.2.2:
     resolution: {integrity: sha512-YHlZCB6lMTllWDtSPHz/ZXTsi8S00usEV6v1tjq8tOUZzw7DpSDWVXjXDre6ed1w/pd495ODpHZYSdkRTsa0HA==}
-
-  kafkajs@2.2.4:
-    resolution: {integrity: sha512-j/YeapB1vfPT2iOIUn/vxdyKEuhuY2PxMBvf5JWux6iSaukAccrMtXEY/Lb7OvavDhOWME589bpLrEdnVHjfjA==}
-    engines: {node: '>=14.0.0'}
 
   katex@0.16.21:
     resolution: {integrity: sha512-XvqR7FgOHtWupfMiigNzmh+MgUVmDGU2kXZm899ZkPfcuoPuFxyHmXsgATDpFZDAXCI8tvinaVcDo8PIIJSo4A==}
@@ -28740,8 +28733,6 @@ snapshots:
     dependencies:
       jwa: 1.4.1
       safe-buffer: 5.2.1
-
-  kafkajs@2.2.4: {}
 
   katex@0.16.21:
     dependencies:

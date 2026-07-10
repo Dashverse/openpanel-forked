@@ -13,13 +13,7 @@ import {
   upsertProfile,
 } from '@openpanel/db';
 import { type GeoLocation, getGeoLocation } from '@openpanel/geo';
-import {
-  type EventsQueuePayloadIncomingEvent,
-  getEventsGroupQueueShard,
-  getQueueName,
-  produceIncomingEvent,
-  shouldUseKafka,
-} from '@openpanel/queue';
+import { getEventsGroupQueueShard, getQueueName } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
 import type {
   DecrementPayload,
@@ -327,34 +321,24 @@ async function track({
   ]
     .filter(Boolean)
     .join('-');
-  const queueData: EventsQueuePayloadIncomingEvent['payload'] = {
-    projectId,
-    headers,
-    event: {
-      ...payload,
-      timestamp,
-      isTimestampFromThePast,
+  await getEventsGroupQueueShard(groupId).add({
+    orderMs: timestamp,
+    data: {
+      projectId,
+      headers,
+      event: {
+        ...payload,
+        timestamp,
+        isTimestampFromThePast,
+      },
+      uaInfo,
+      geo,
+      currentDeviceId,
+      previousDeviceId,
     },
-    uaInfo,
-    geo,
-    currentDeviceId,
-    previousDeviceId,
-  };
-
-  // Partition key = groupId so a device's events keep their order on one
-  // partition; falls back to a random id only for the (unused) empty-group case.
-  const partitionKey = groupId || generateId();
-
-  if (shouldUseKafka(projectId)) {
-    await produceIncomingEvent(queueData, partitionKey);
-  } else {
-    await getEventsGroupQueueShard(partitionKey).add({
-      orderMs: timestamp,
-      data: queueData,
-      groupId,
-      jobId,
-    });
-  }
+    groupId,
+    jobId,
+  });
 }
 
 async function handleReplay({
