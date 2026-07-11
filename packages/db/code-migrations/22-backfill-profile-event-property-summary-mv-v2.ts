@@ -154,19 +154,26 @@ export async function up() {
   //   - Backfill MV aggregates each block into partial states → v2
   //   - Peak memory: ~200 MB per block (not per-window), way under Aiven's cap
   //   - `optimize_trivial_insert_select=1` aligns SELECT parallelism with insert
-  //   - `max_threads=4` and `max_insert_threads=4` keep CPU under ~40-50%
+  //   - `max_threads=8`, `max_insert_threads=8` — measured peak memory at
+  //     4 threads was 3.9 GiB (6× headroom vs Aiven's 23 GB cap); 8 threads
+  //     estimated ~6 GiB. Trades 4→8 CPU for ~2× read throughput. Needed
+  //     because 4-thread rate (~13K rows/sec) would take 3+ hours per day,
+  //     blowing past `max_execution_time`.
+  //   - `max_execution_time=18000` (5h) — safety ceiling. At 8 threads a
+  //     150M-event day should run ~90 min. 5h gives ample slack for peak
+  //     traffic days without letting a stuck query run indefinitely.
   const insertSql = `
     INSERT INTO default.${NULL_TABLE}
     SELECT * FROM default.events
     WHERE created_at >= toDateTime('${start}')
       AND created_at <  toDateTime('${end}')
     SETTINGS
-      max_insert_threads = 4,
-      max_threads = 4,
+      max_insert_threads = 8,
+      max_threads = 8,
       min_insert_block_size_bytes_for_materialized_views = 10485760,
       min_insert_block_size_rows_for_materialized_views = 1000000,
       optimize_trivial_insert_select = 1,
-      max_execution_time = 7200`;
+      max_execution_time = 18000`;
 
   if (isDry) {
     console.log('\n[DRY RUN] SQL that would execute:');
