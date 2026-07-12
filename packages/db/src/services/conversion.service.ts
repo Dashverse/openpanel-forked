@@ -310,7 +310,18 @@ export class ConversionService {
     // per bucket (hour / day / week / month). Previously bucketed by `toDate(o)`
     // and then re-bucketed with `toStartOfHour(toDate(...))`, which always
     // collapses hourly views to 00:00. See #<PR>.
-    const bucketExpr = clix.toStartOf('o', interval || 'day');
+    const bucketInterval = interval || 'day';
+    const bucketExpr = clix.toStartOf('o', bucketInterval);
+
+    // Ensure the result contains a row for every bucket in [startTs, endTs).
+    // Without this, empty hour/minute buckets are omitted, and the resolver in
+    // `packages/trpc/src/routers/chart.ts` (`previous?.[sIndex]?.data?.[dIndex]?.rate`)
+    // aligns previous-period rates by array INDEX — a sparse current series
+    // would pair to the wrong previous bucket. `WITH FILL` fills the gaps
+    // server-side so downstream index-based pairing stays correct.
+    const fillStart = clix.toStartOf(startTs, bucketInterval);
+    const fillEnd = clix.toStartOf(endTs, bucketInterval);
+    const fillStep = `INTERVAL 1 ${bucketInterval.toUpperCase()}`;
 
     // Hoist event filters to a `filtered_profiles` pre-CTE so proj_funnel
     // stays selected for the main scan. Filters in groupArrayIf force CH
@@ -406,6 +417,7 @@ export class ConversionService {
       FROM per_user_per_bucket
       GROUP BY event_day
       ORDER BY event_day ASC
+      WITH FILL FROM ${fillStart} TO ${fillEnd} STEP ${fillStep}
     `;
   }
 
