@@ -309,9 +309,16 @@ export class ConversionService {
     // Bucket each open by the requested interval so we get one row per user
     // per bucket (hour / day / week / month). Previously bucketed by `toDate(o)`
     // and then re-bucketed with `toStartOfHour(toDate(...))`, which always
-    // collapses hourly views to 00:00. See #<PR>.
+    // collapses hourly views to 00:00. See #368.
+    //
+    // `toDateTime(o)` normalizes to `DateTime` so the ORDER BY column type
+    // matches the `WITH FILL FROM/TO` bounds (`clix.toStartOf(<toDateTime(...)>)`
+    // returns DateTime). Same-type = no reliance on implicit DateTime64→DateTime
+    // coercion for hour/minute, and label formatting is consistent everywhere.
+    // `first_open` stays DateTime64(3) via `arrayMin(opens)` — window precision
+    // preserved.
     const bucketInterval = interval || 'day';
-    const bucketExpr = clix.toStartOf('o', bucketInterval);
+    const bucketExpr = clix.toStartOf('toDateTime(o)', bucketInterval);
 
     // Ensure the result contains a row for every bucket in [startTs, endTs).
     // Without this, empty hour/minute buckets are omitted, and the resolver in
