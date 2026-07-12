@@ -306,7 +306,11 @@ export class ConversionService {
     const projectLiteral = projectId.replace(/'/g, "''");
     const firstNameLiteral = firstEvent.name.replace(/'/g, "''");
     const lastNameLiteral = lastEvent.name.replace(/'/g, "''");
-    const toStartOf = clix.toStartOf('toDateTime(open_day)', interval || 'day');
+    // Bucket each open by the requested interval so we get one row per user
+    // per bucket (hour / day / week / month). Previously bucketed by `toDate(o)`
+    // and then re-bucketed with `toStartOfHour(toDate(...))`, which always
+    // collapses hourly views to 00:00. See #<PR>.
+    const bucketExpr = clix.toStartOf('o', interval || 'day');
 
     // Hoist event filters to a `filtered_profiles` pre-CTE so proj_funnel
     // stays selected for the main scan. Filters in groupArrayIf force CH
@@ -377,16 +381,16 @@ export class ConversionService {
         GROUP BY resolved_pid
         HAVING length(opens) > 0
       ),
-      per_user_per_day AS (
+      per_user_per_bucket AS (
         SELECT
           resolved_pid,
-          arrayJoin(arrayDistinct(arrayMap(o -> toDate(o), opens))) AS open_day,
-          arrayMin(arrayFilter(o -> toDate(o) = open_day, opens)) AS first_open,
+          arrayJoin(arrayDistinct(arrayMap(o -> ${bucketExpr}, opens))) AS open_bucket,
+          arrayMin(arrayFilter(o -> ${bucketExpr} = open_bucket, opens)) AS first_open,
           finishes
         FROM user_events
       )
       SELECT
-        ${toStartOf} AS event_day,
+        open_bucket AS event_day,
         count() AS total_first,
         countIf(arrayExists(
           f -> f >= first_open AND f <= first_open + INTERVAL ${funnelWindowSeconds} SECOND,
@@ -399,7 +403,7 @@ export class ConversionService {
           )) / count(),
           2
         ) AS conversion_rate_percentage
-      FROM per_user_per_day
+      FROM per_user_per_bucket
       GROUP BY event_day
       ORDER BY event_day ASC
     `;
