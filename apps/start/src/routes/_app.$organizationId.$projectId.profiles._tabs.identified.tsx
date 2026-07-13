@@ -1,12 +1,12 @@
 import { EventsFilters } from '@/components/events/filters/events-filters';
-import { OverviewRange } from '@/components/overview/overview-range';
-import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
+import { LastSeenRange } from '@/components/profiles/last-seen-range';
 import { ProfilesTable } from '@/components/profiles/table';
 import { useDataTablePagination } from '@/components/ui/data-table/data-table-hooks';
 import {
   useEventQueryFilters,
   useEventQueryNamesFilter,
 } from '@/hooks/use-event-query-filters';
+import { useProfilesSort } from '@/hooks/use-profiles-sort';
 import { useSearchQueryState } from '@/hooks/use-search-query-state';
 import { useTRPC } from '@/integrations/trpc/react';
 import { PAGE_TITLES, createEntityTitle } from '@/utils/title';
@@ -36,7 +36,7 @@ function Component() {
   const { debouncedSearch } = useSearchQueryState();
   const [filters] = useEventQueryFilters();
   const [events] = useEventQueryNamesFilter();
-  const { range, startDate, endDate } = useOverviewOptions();
+  const { dir, seenStart, seenEnd } = useProfilesSort();
 
   const query = useQuery(
     trpc.profile.list.queryOptions(
@@ -48,9 +48,13 @@ function Component() {
         isExternal: true,
         filters,
         events,
-        range,
-        startDate,
-        endDate,
+        // Single date control: the "Last seen" window bounds both the profile
+        // list (created_at) and the behavioral event subquery.
+        startDate: seenStart,
+        endDate: seenEnd,
+        lastSeenDir: dir === 'asc' ? 'ASC' : 'DESC',
+        lastSeenStart: seenStart,
+        lastSeenEnd: seenEnd,
       },
       {
         placeholderData: keepPreviousData,
@@ -59,35 +63,29 @@ function Component() {
   );
 
   const count = query.data?.meta.count;
-  // `['*']` is the "All Events" wildcard — not a real behavioral selection, so
-  // the date range (which only bounds the behavioral filter) shouldn't show.
-  const hasEventSelected = events.some((e) => e && e !== '*');
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Total (or filtered) profile count — Mixpanel-style, top-left. Prominent
-          and flush-left with the title/card. Skeleton while (re)fetching so it
-          visibly tracks the filter. */}
-      <div className="flex h-7 items-baseline gap-1.5 tabular-nums">
-        {query.isFetching ? (
-          <span className="h-6 w-40 self-center animate-pulse rounded bg-muted" />
-        ) : typeof count === 'number' ? (
-          <>
-            <span className="text-lg font-semibold text-foreground">
-              {count.toLocaleString()}
-            </span>
-            <span className="text-sm font-medium text-muted-foreground">
-              profiles
-            </span>
-          </>
-        ) : null}
+      {/* Count (Mixpanel-style, top-left) + the "Last seen" window control on
+          the right. Skeleton while (re)fetching so the count tracks the filter. */}
+      <div className="flex h-7 items-center justify-between gap-2">
+        <div className="flex items-baseline gap-1.5 tabular-nums">
+          {query.isFetching ? (
+            <span className="h-6 w-40 self-center animate-pulse rounded bg-muted" />
+          ) : typeof count === 'number' ? (
+            <>
+              <span className="text-lg font-semibold text-foreground">
+                {count.toLocaleString()}
+              </span>
+              <span className="text-sm font-medium text-muted-foreground">
+                profiles
+              </span>
+            </>
+          ) : null}
+        </div>
+        <LastSeenRange />
       </div>
-      {/* Date range lives inside the filter card, next to the event selector,
-          and only when an event is selected (it only bounds the behavioral
-          filter — otherwise a default like "Today" is misleading). */}
-      <EventsFilters
-        rangeSlot={hasEventSelected ? <OverviewRange /> : undefined}
-      />
+      <EventsFilters />
       <ProfilesTable type="profiles" query={query} />
     </div>
   );

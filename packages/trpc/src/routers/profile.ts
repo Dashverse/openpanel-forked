@@ -88,6 +88,9 @@ export const profileRouter = createTRPCRouter({
         range: z.string().optional(),
         startDate: z.string().nullish(),
         endDate: z.string().nullish(),
+        lastSeenDir: z.enum(['ASC', 'DESC']).optional(),
+        lastSeenStart: z.string().nullish(),
+        lastSeenEnd: z.string().nullish(),
       }),
     )
     .query(async ({ input }) => {

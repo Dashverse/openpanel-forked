@@ -15,6 +15,7 @@ import {
   formatClickhouseDate,
 } from '../clickhouse/client';
 import { createSqlBuilder } from '../sql-builder';
+import { getOrganizationByProjectIdCached } from './organization.service';
 
 export type IProfileMetrics = {
   lastSeen: Date;
@@ -157,6 +158,11 @@ interface GetProfileListOptions {
   endDate?: string | null;
   search?: string;
   isExternal?: boolean;
+  /** Sort direction for the "Last seen" (created_at) column. Default DESC. */
+  lastSeenDir?: 'ASC' | 'DESC';
+  /** Optional last-seen window (hour-precise) bounding profiles.created_at. */
+  lastSeenStart?: string | null;
+  lastSeenEnd?: string | null;
 }
 
 // Rough range→days map for the behavioral subquery's time bound (v1). Custom
@@ -176,12 +182,16 @@ const RANGE_TO_DAYS: Record<string, number> = {
 };
 
 function behavioralTimeClause(
-  range?: string,
-  startDate?: string | null,
-  endDate?: string | null,
+  range: string | undefined,
+  startDate: string | null | undefined,
+  endDate: string | null | undefined,
+  tz: string,
 ): string {
   if (startDate && endDate) {
-    return `created_at BETWEEN toDateTime('${formatClickhouseDate(startDate)}') AND toDateTime('${formatClickhouseDate(endDate)}')`;
+    // The picker gives a naive wall-clock the user reads in the project's
+    // timezone. toDateTime(str, tz) interprets it there and yields the correct
+    // UTC instant to compare against created_at (stored UTC).
+    return `created_at BETWEEN toDateTime(${sqlstring.escape(startDate)}, ${sqlstring.escape(tz)}) AND toDateTime(${sqlstring.escape(endDate)}, ${sqlstring.escape(tz)})`;
   }
   const days = RANGE_TO_DAYS[range ?? '30d'] ?? 30;
   return `created_at >= now() - INTERVAL ${days} DAY`;
@@ -283,11 +293,23 @@ export async function getProfileList({
   range,
   startDate,
   endDate,
+  lastSeenDir,
+  lastSeenStart,
+  lastSeenEnd,
 }: GetProfileListOptions) {
   // `['*']` (and '') is the "All Events" wildcard from the event picker — it
   // means "no behavioral filter", NOT an event literally named `*`. Strip it,
   // otherwise `name IN ('*')` matches nothing and returns 0 profiles.
   const eventNames = events?.filter((e) => e && e !== '*');
+  // "Last seen" (created_at) sort + optional window. Default DESC. A window
+  // bounds created_at (partition-pruned to the month(s)) so both directions run
+  // in ~1.4s; only unbounded ASC is slow (full-table FINAL dedup, ~10s).
+  const orderDir = lastSeenDir === 'ASC' ? 'ASC' : 'DESC';
+  const hasSeenRange = !!(lastSeenStart && lastSeenEnd);
+  // Project timezone: the date picker gives a naive wall-clock the user reads in
+  // this tz. Cached 24h, so effectively free.
+  const tz =
+    (await getOrganizationByProjectIdCached(projectId))?.timezone || 'UTC';
   const buildSql = (opts: {
     recentOnly?: boolean;
     searchMode?: 'id' | 'fuzzy';
@@ -299,12 +321,18 @@ export async function getProfileList({
     // Prune to the most recent monthly partition(s). The newest profiles are by
     // definition the most recent, so this reads a tiny slice of history instead
     // of every version ever (~114M rows on dashreels).
-    if (opts.recentOnly) {
+    if (opts.recentOnly && !hasSeenRange) {
       sb.where.recent = 'created_at >= now() - INTERVAL 1 MONTH';
+    }
+    // Explicit last-seen window replaces the implicit month window. Monthly
+    // partitioning prunes to the month(s); the BETWEEN narrows within (down to
+    // the hour) for free.
+    if (hasSeenRange) {
+      sb.where.seen = `created_at BETWEEN toDateTime(${sqlstring.escape(lastSeenStart!)}, ${sqlstring.escape(tz)}) AND toDateTime(${sqlstring.escape(lastSeenEnd!)}, ${sqlstring.escape(tz)})`;
     }
     sb.limit = take;
     sb.offset = Math.max(0, (cursor ?? 0) * take);
-    sb.orderBy.created_at = 'created_at DESC';
+    sb.orderBy.created_at = `created_at ${orderDir}`;
     if (opts.searchMode === 'id') {
       // Exact profile-id match: a primary-key point lookup (id is in the sort
       // key `(project_id, id)`), so it's ~instant regardless of table size.
@@ -326,7 +354,7 @@ export async function getProfileList({
       const parts = [
         `project_id = ${sqlstring.escape(projectId)}`,
         `name IN (${names})`,
-        behavioralTimeClause(range, startDate, endDate),
+        behavioralTimeClause(range, startDate, endDate, tz),
         ...eventFilterClauses(filters ?? []),
       ];
       sb.where.behavioral = `id IN (SELECT DISTINCT profile_id FROM ${TABLE_NAMES.events} WHERE ${parts.join(' AND ')})`;
@@ -375,7 +403,15 @@ export async function getProfileList({
       settings,
       true,
     );
-  } else {
+  } else if (hasSeenRange) {
+    // Explicit last-seen window: partition-pruned to the month(s), so both sort
+    // directions run in ~1.4s. No month-window fallback needed.
+    data = await chQuery<IClickhouseProfile>(
+      buildSql({ recentOnly: false }),
+      settings,
+      true,
+    );
+  } else if (orderDir === 'DESC') {
     // Fast path: last month only (prunes partitions → ~0.5s vs ~20s). Fall back
     // to the full range if it doesn't fill the page — a low-activity project, or
     // paging past the window.
@@ -391,6 +427,16 @@ export async function getProfileList({
         true,
       );
     }
+  } else {
+    // Ascending with no window: the month window would give "oldest within the
+    // last month" (wrong — they want the oldest overall), so run unwindowed.
+    // This is the one slow path (~10s full-table FINAL dedup); the UI nudges a
+    // date range, which makes it ~1.4s.
+    data = await chQuery<IClickhouseProfile>(
+      buildSql({ recentOnly: false }),
+      settings,
+      true,
+    );
   }
 
   return data.map(transformProfile);
@@ -405,9 +451,14 @@ export async function getProfileListCount({
   range,
   startDate,
   endDate,
+  lastSeenStart,
+  lastSeenEnd,
 }: Omit<GetProfileListOptions, 'cursor' | 'take'>) {
   // Strip the `['*']`/'' "All Events" wildcard — see getProfileList.
   const eventNames = events?.filter((e) => e && e !== '*');
+  const hasSeenRange = !!(lastSeenStart && lastSeenEnd);
+  const tz =
+    (await getOrganizationByProjectIdCached(projectId))?.timezone || 'UTC';
   // BEHAVIORAL: distinct profiles who did the event(s) in range — count over the
   // events subquery (same ~7s scan as the list). Mirrors the list's filter.
   if (eventNames?.length) {
@@ -415,7 +466,7 @@ export async function getProfileListCount({
     const parts = [
       `project_id = ${sqlstring.escape(projectId)}`,
       `name IN (${names})`,
-      behavioralTimeClause(range, startDate, endDate),
+      behavioralTimeClause(range, startDate, endDate, tz),
       ...eventFilterClauses(filters ?? []),
     ];
     const data = await chQuery<{ count: number }>(
@@ -461,6 +512,10 @@ export async function getProfileListCount({
   }
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
+  }
+  if (hasSeenRange) {
+    // Reflect the last-seen window in the count too (partition-pruned, tz-aware).
+    sb.where.seen = `created_at BETWEEN toDateTime(${sqlstring.escape(lastSeenStart!)}, ${sqlstring.escape(tz)}) AND toDateTime(${sqlstring.escape(lastSeenEnd!)}, ${sqlstring.escape(tz)})`;
   }
   profilePropertyFilterClauses(filters ?? []).forEach((clause, i) => {
     sb.where[`pf${i}`] = clause;

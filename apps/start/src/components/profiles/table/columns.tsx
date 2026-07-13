@@ -1,14 +1,36 @@
 import { ProjectLink } from '@/components/links';
 import { SerieIcon } from '@/components/report-chart/common/serie-icon';
+import { useProfilesSort } from '@/hooks/use-profiles-sort';
 import { formatDateTime, formatTime } from '@/utils/date';
 import { getProfileName } from '@/utils/getters';
 import type { ColumnDef } from '@tanstack/react-table';
 import { isToday } from 'date-fns';
+import { ArrowDownIcon, ArrowUpIcon } from 'lucide-react';
 
 import type { IServiceProfile } from '@openpanel/db';
 
 import { ColumnCreatedAt } from '@/components/column-created-at';
 import { ProfileAvatar } from '../profile-avatar';
+
+// Clickable "Last seen" header — toggles created_at asc/desc, Mixpanel-style.
+function LastSeenHeader() {
+  const { dir, toggleDir } = useProfilesSort();
+  return (
+    <button
+      type="button"
+      onClick={toggleDir}
+      className="group flex items-center gap-1 select-none hover:text-foreground"
+      title={`Sorted ${dir === 'desc' ? 'newest first' : 'oldest first'} — click to flip`}
+    >
+      Last seen
+      {dir === 'desc' ? (
+        <ArrowDownIcon className="size-3.5 opacity-70" />
+      ) : (
+        <ArrowUpIcon className="size-3.5 opacity-70" />
+      )}
+    </button>
+  );
+}
 
 export function useColumns(type: 'profiles' | 'power-users') {
   const columns: ColumnDef<IServiceProfile>[] = [
@@ -45,7 +67,8 @@ export function useColumns(type: 'profiles' | 'power-users') {
     },
     {
       accessorKey: 'createdAt',
-      header: 'Last seen',
+      // Sortable only on the profiles list (power-users uses a different query).
+      header: type === 'profiles' ? () => <LastSeenHeader /> : 'Last seen',
       size: ColumnCreatedAt.size,
       cell: ({ row }) => (
         <ColumnCreatedAt>{row.original.createdAt}</ColumnCreatedAt>
