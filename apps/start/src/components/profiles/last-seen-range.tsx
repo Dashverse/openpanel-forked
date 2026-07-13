@@ -1,5 +1,5 @@
-import { CustomDateRangePopover } from '@/components/custom-date-range-popover';
 import { useProfilesSort } from '@/hooks/use-profiles-sort';
+import { LastSeenPicker } from '@/components/profiles/last-seen-picker';
 import { cn } from '@/utils/cn';
 import { format, parse } from 'date-fns';
 import { CalendarClockIcon, XIcon } from 'lucide-react';
@@ -26,8 +26,7 @@ export function LastSeenRange() {
 
   return (
     <div className="flex items-center gap-1">
-      <CustomDateRangePopover
-        withTime
+      <LastSeenPicker
         startDate={seenStart}
         endDate={seenEnd}
         onApply={(start, end) =>
@@ -47,7 +46,7 @@ export function LastSeenRange() {
         ) : (
           'Last seen: All time'
         )}
-      </CustomDateRangePopover>
+      </LastSeenPicker>
       {active && (
         <button
           type="button"

@@ -18,15 +18,9 @@ interface CustomDateRangePopoverProps {
   onApply: (startDate: string, endDate: string | null) => void;
   className?: string;
   children: ReactNode;
-  /**
-   * Show HH:mm time inputs alongside the calendar so the range is hour-precise.
-   * Off by default → the existing day-granular behaviour (startOfDay/endOfDay).
-   */
-  withTime?: boolean;
 }
 
 const DB_FORMAT = 'yyyy-MM-dd HH:mm:ss';
-const DAY = 'yyyy-MM-dd';
 
 export function CustomDateRangePopover({
   startDate,
@@ -34,7 +28,6 @@ export function CustomDateRangePopover({
   onApply,
   className,
   children,
-  withTime = false,
 }: CustomDateRangePopoverProps) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<Mode>(
@@ -46,12 +39,6 @@ export function CustomDateRangePopover({
   const [to, setTo] = useState<Date | undefined>(
     endDate ? new Date(endDate) : undefined,
   );
-  const [fromTime, setFromTime] = useState(
-    startDate ? format(new Date(startDate), 'HH:mm') : '00:00',
-  );
-  const [toTime, setToTime] = useState(
-    endDate ? format(new Date(endDate), 'HH:mm') : '23:59',
-  );
 
   const canApply = mode === 'fixed' ? !!from && !!to : !!from;
 
@@ -59,20 +46,13 @@ export function CustomDateRangePopover({
     if (!from) return;
     if (mode === 'since') {
       // Open-ended: the resolver rolls the end to "now" at query time.
-      const start = withTime
-        ? `${format(from, DAY)} ${fromTime}:00`
-        : format(startOfDay(from), DB_FORMAT);
-      onApply(start, null);
+      onApply(format(startOfDay(from), DB_FORMAT), null);
     } else {
       if (!to) return;
-      if (withTime) {
-        onApply(`${format(from, DAY)} ${fromTime}:00`, `${format(to, DAY)} ${toTime}:59`);
-      } else {
-        onApply(
-          format(startOfDay(from), DB_FORMAT),
-          format(endOfDay(to), DB_FORMAT),
-        );
-      }
+      onApply(
+        format(startOfDay(from), DB_FORMAT),
+        format(endOfDay(to), DB_FORMAT),
+      );
     }
     setOpen(false);
   };
@@ -82,8 +62,6 @@ export function CustomDateRangePopover({
       setMode(startDate && !endDate ? 'since' : 'fixed');
       setFrom(startDate ? new Date(startDate) : undefined);
       setTo(endDate ? new Date(endDate) : undefined);
-      setFromTime(startDate ? format(new Date(startDate), 'HH:mm') : '00:00');
-      setToTime(endDate ? format(new Date(endDate), 'HH:mm') : '23:59');
     }
     setOpen(next);
   };
@@ -138,38 +116,14 @@ export function CustomDateRangePopover({
             />
           )}
         </div>
-        {withTime && (
-          <div className="flex items-center gap-4 border-t px-3 py-2">
-            <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              From
-              <input
-                type="time"
-                value={fromTime}
-                onChange={(e) => setFromTime(e.target.value)}
-                className="h-7 rounded-md border bg-background px-2 text-sm text-foreground tabular-nums"
-              />
-            </label>
-            {mode === 'fixed' && (
-              <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                To
-                <input
-                  type="time"
-                  value={toTime}
-                  onChange={(e) => setToTime(e.target.value)}
-                  className="h-7 rounded-md border bg-background px-2 text-sm text-foreground tabular-nums"
-                />
-              </label>
-            )}
-          </div>
-        )}
         <div className="flex items-center justify-between gap-2 border-t p-2">
           <span className="px-1 text-xs text-muted-foreground">
             {mode === 'since'
               ? from
-                ? `Since ${format(from, 'MMM d, yyyy')}${withTime ? ` ${fromTime}` : ''} → now`
+                ? `Since ${format(from, 'MMM d, yyyy')} → now`
                 : 'Pick a start date'
               : from && to
-                ? `${format(from, 'MMM d')}${withTime ? ` ${fromTime}` : ''} – ${format(to, 'MMM d, yyyy')}${withTime ? ` ${toTime}` : ''}`
+                ? `${format(from, 'MMM d')} – ${format(to, 'MMM d, yyyy')}`
                 : 'Pick a range'}
           </span>
           <Button
