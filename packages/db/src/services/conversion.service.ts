@@ -326,8 +326,19 @@ export class ConversionService {
     // aligns previous-period rates by array INDEX — a sparse current series
     // would pair to the wrong previous bucket. `WITH FILL` fills the gaps
     // server-side so downstream index-based pairing stays correct.
+    //
+    // Clamp `fillEnd` to `now()` so we don't fill BUCKETS THAT HAVEN'T HAPPENED
+    // YET. For a "7D" range today, `endDate` = end-of-today = 23:59:59, so
+    // without clamping WITH FILL would insert 0-count rows for every future
+    // hour of today. Two visible symptoms this caused:
+    //   1. Live charts showed a flat 0% line at the right edge (trailing
+    //      future hours filled as 0).
+    //   2. Hourly alerting queries (`apps/worker/src/jobs/cron.custom-alerts.ts`)
+    //      pick `data[data.length - skipLast]` — the last future 0-bucket —
+    //      and fired "current value is 0.00%" alerts against forecasted bands.
+    // Historical ranges are unaffected (`least(pastDate, now())` = pastDate).
     const fillStart = clix.toStartOf(startTs, bucketInterval);
-    const fillEnd = clix.toStartOf(endTs, bucketInterval);
+    const fillEnd = clix.toStartOf(`least(${endTs}, now())`, bucketInterval);
     const fillStep = `INTERVAL 1 ${bucketInterval.toUpperCase()}`;
 
     // Hoist event filters to a `filtered_profiles` pre-CTE so proj_funnel
