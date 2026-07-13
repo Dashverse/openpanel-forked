@@ -13,6 +13,8 @@ import {
   getProfiles,
 } from '@openpanel/db';
 
+import { zChartEventFilter } from '@openpanel/validation';
+
 import { createTRPCRouter, protectedProcedure } from '../trpc';
 
 export const profileRouter = createTRPCRouter({
@@ -81,6 +83,11 @@ export const profileRouter = createTRPCRouter({
         take: z.number().default(50),
         search: z.string().optional(),
         isExternal: z.boolean().optional(),
+        filters: z.array(zChartEventFilter).optional(),
+        events: z.array(z.string()).optional(),
+        range: z.string().optional(),
+        startDate: z.string().nullish(),
+        endDate: z.string().nullish(),
       }),
     )
     .query(async ({ input }) => {

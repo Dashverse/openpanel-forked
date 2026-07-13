@@ -1,4 +1,5 @@
-import { omit, uniq } from 'ramda';
+import type { ClickHouseSettings } from '@clickhouse/client';
+import { uniq } from 'ramda';
 import sqlstring from 'sqlstring';
 
 import { strip, toObject } from '@openpanel/common';
@@ -150,8 +151,84 @@ interface GetProfileListOptions {
   take: number;
   cursor?: number;
   filters?: IChartEventFilter[];
+  events?: string[];
+  range?: string;
+  startDate?: string | null;
+  endDate?: string | null;
   search?: string;
   isExternal?: boolean;
+}
+
+// Rough range→days map for the behavioral subquery's time bound (v1). Custom
+// start/end takes precedence; otherwise default to 30 days.
+const RANGE_TO_DAYS: Record<string, number> = {
+  '30min': 1,
+  lastHour: 1,
+  today: 1,
+  yesterday: 2,
+  '3d': 3,
+  '7d': 7,
+  '21d': 21,
+  '30d': 30,
+  '3m': 90,
+  '6m': 180,
+  '12m': 365,
+};
+
+function behavioralTimeClause(
+  range?: string,
+  startDate?: string | null,
+  endDate?: string | null,
+): string {
+  if (startDate && endDate) {
+    return `created_at BETWEEN toDateTime('${formatClickhouseDate(startDate)}') AND toDateTime('${formatClickhouseDate(endDate)}')`;
+  }
+  const days = RANGE_TO_DAYS[range ?? '30d'] ?? 30;
+  return `created_at >= now() - INTERVAL ${days} DAY`;
+}
+
+// v1 event-filter builder for the behavioral subquery. Maps `properties.x` to
+// the events Map and leaves bare event columns (country/os/path/…) as-is.
+function eventFilterClauses(filters: IChartEventFilter[]): string[] {
+  const out: string[] = [];
+  for (const f of filters) {
+    if (!f.name || !f.value?.length) continue;
+    const col = f.name.startsWith('properties.')
+      ? `properties[${sqlstring.escape(f.name.replace(/^properties\./, ''))}]`
+      : f.name;
+    const inList = f.value.map((v) => sqlstring.escape(String(v))).join(',');
+    if (f.operator === 'isNot') {
+      out.push(`${col} NOT IN (${inList})`);
+    } else if (f.operator === 'contains') {
+      out.push(
+        `(${f.value.map((v) => `${col} ILIKE ${sqlstring.escape(`%${v}%`)}`).join(' OR ')})`,
+      );
+    } else {
+      out.push(`${col} IN (${inList})`);
+    }
+  }
+  return out;
+}
+
+// PROFILE property filters — match on the profiles `properties` Map, e.g.
+// properties['country'] IN ('IN'). Shared by the list and the count.
+function profilePropertyFilterClauses(filters: IChartEventFilter[]): string[] {
+  const out: string[] = [];
+  for (const f of filters) {
+    if (!f.name || !f.value?.length) continue;
+    const col = `properties[${sqlstring.escape(f.name.replace(/^properties\./, ''))}]`;
+    const inList = f.value.map((v) => sqlstring.escape(String(v))).join(',');
+    if (f.operator === 'isNot') {
+      out.push(`${col} NOT IN (${inList})`);
+    } else if (f.operator === 'contains') {
+      out.push(
+        `(${f.value.map((v) => `${col} ILIKE ${sqlstring.escape(`%${v}%`)}`).join(' OR ')})`,
+      );
+    } else {
+      out.push(`${col} IN (${inList})`);
+    }
+  }
+  return out;
 }
 
 export async function getProfiles(ids: string[], projectId: string) {
@@ -187,27 +264,135 @@ export async function getProfiles(ids: string[], projectId: string) {
 
 export const getProfilesCached = cacheable(getProfiles, 60 * 5);
 
+// Columns the profile LIST renders. `properties` IS needed here — the table's
+// Country/OS/Browser/Model/Referrer columns read from it (e.g.
+// properties['country']). ClickHouse Maps are read whole, so we can't cheaply
+// select just those keys; the speedup comes from the recent-partition window +
+// do_not_merge below, not from trimming columns.
+const PROFILE_LIST_COLUMNS =
+  'id, project_id, is_external, created_at, first_name, last_name, email, avatar, properties';
+
 export async function getProfileList({
   take,
   cursor,
   projectId,
   search,
   isExternal,
+  filters,
+  events,
+  range,
+  startDate,
+  endDate,
 }: GetProfileListOptions) {
-  const { sb, getSql } = createSqlBuilder();
-  sb.from = `${TABLE_NAMES.profiles} FINAL`;
-  sb.select.all = '*';
-  sb.where.project_id = `project_id = ${sqlstring.escape(projectId)}`;
-  sb.limit = take;
-  sb.offset = Math.max(0, (cursor ?? 0) * take);
-  sb.orderBy.created_at = 'created_at DESC';
+  // `['*']` (and '') is the "All Events" wildcard from the event picker — it
+  // means "no behavioral filter", NOT an event literally named `*`. Strip it,
+  // otherwise `name IN ('*')` matches nothing and returns 0 profiles.
+  const eventNames = events?.filter((e) => e && e !== '*');
+  const buildSql = (opts: {
+    recentOnly?: boolean;
+    searchMode?: 'id' | 'fuzzy';
+  }) => {
+    const { sb, getSql } = createSqlBuilder();
+    sb.from = `${TABLE_NAMES.profiles} FINAL`;
+    sb.select.columns = PROFILE_LIST_COLUMNS;
+    sb.where.project_id = `project_id = ${sqlstring.escape(projectId)}`;
+    // Prune to the most recent monthly partition(s). The newest profiles are by
+    // definition the most recent, so this reads a tiny slice of history instead
+    // of every version ever (~114M rows on dashreels).
+    if (opts.recentOnly) {
+      sb.where.recent = 'created_at >= now() - INTERVAL 1 MONTH';
+    }
+    sb.limit = take;
+    sb.offset = Math.max(0, (cursor ?? 0) * take);
+    sb.orderBy.created_at = 'created_at DESC';
+    if (opts.searchMode === 'id') {
+      // Exact profile-id match: a primary-key point lookup (id is in the sort
+      // key `(project_id, id)`), so it's ~instant regardless of table size.
+      sb.where.search = `id = ${sqlstring.escape(search!)}`;
+    } else if (opts.searchMode === 'fuzzy') {
+      // Substring name/email search. ILIKE '%x%' can't use any index (the bloom
+      // filters only help exact/token matches), so it scans — inherently slow.
+      sb.where.search = `(email ILIKE '%${search}%' OR first_name ILIKE '%${search}%' OR last_name ILIKE '%${search}%')`;
+    }
+    if (isExternal !== undefined) {
+      sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
+    }
+    if (eventNames?.length) {
+      // BEHAVIORAL (v1): users who did one of these events — the `filters` are
+      // applied as EVENT-property filters (e.g. showOpen where source='X') and
+      // bounded by the selected date range. Subquery over the events table
+      // (~7s on large projects).
+      const names = eventNames.map((e) => sqlstring.escape(e)).join(',');
+      const parts = [
+        `project_id = ${sqlstring.escape(projectId)}`,
+        `name IN (${names})`,
+        behavioralTimeClause(range, startDate, endDate),
+        ...eventFilterClauses(filters ?? []),
+      ];
+      sb.where.behavioral = `id IN (SELECT DISTINCT profile_id FROM ${TABLE_NAMES.events} WHERE ${parts.join(' AND ')})`;
+    } else {
+      // No event selected → treat `filters` as PROFILE-property filters on the
+      // profiles table, e.g. properties['country'] IN ('IN'). Cheap.
+      profilePropertyFilterClauses(filters ?? []).forEach((clause, i) => {
+        sb.where[`pf${i}`] = clause;
+      });
+    }
+    return getSql();
+  };
+
+  // do_not_merge_across_partitions_select_final is safe here: a profile's
+  // created_at (the ReplacingMergeTree version AND the partition key) is stable
+  // across updates, so all versions of a profile live in one monthly partition —
+  // FINAL can dedupe per-partition instead of merging across all of history.
+  const settings: ClickHouseSettings = {
+    do_not_merge_across_partitions_select_final: 1,
+  };
+
+  let data: IClickhouseProfile[];
   if (search) {
-    sb.where.search = `(email ILIKE '%${search}%' OR first_name ILIKE '%${search}%' OR last_name ILIKE '%${search}%')`;
+    // Try an exact profile-id lookup first — a primary-key hit, so it's instant.
+    // Most "search" here is really "find this exact profile id".
+    data = await chQuery<IClickhouseProfile>(
+      buildSql({ searchMode: 'id' }),
+      settings,
+      true,
+    );
+    if (data.length === 0) {
+      // No id match → fall back to the (slow) fuzzy name/email scan.
+      data = await chQuery<IClickhouseProfile>(
+        buildSql({ searchMode: 'fuzzy' }),
+        settings,
+        true,
+      );
+    }
+  } else if (eventNames?.length) {
+    // Behavioral filter: the events subquery already bounds the range, so the
+    // profiles-side month window is pointless and would only trigger the
+    // window→fallback double query (and could miss users whose profile is older
+    // than a month). Run once, unwindowed.
+    data = await chQuery<IClickhouseProfile>(
+      buildSql({ recentOnly: false }),
+      settings,
+      true,
+    );
+  } else {
+    // Fast path: last month only (prunes partitions → ~0.5s vs ~20s). Fall back
+    // to the full range if it doesn't fill the page — a low-activity project, or
+    // paging past the window.
+    data = await chQuery<IClickhouseProfile>(
+      buildSql({ recentOnly: true }),
+      settings,
+      true,
+    );
+    if (data.length < take) {
+      data = await chQuery<IClickhouseProfile>(
+        buildSql({ recentOnly: false }),
+        settings,
+        true,
+      );
+    }
   }
-  if (isExternal !== undefined) {
-    sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
-  }
-  const data = await chQuery<IClickhouseProfile>(getSql(), undefined, true);
+
   return data.map(transformProfile);
 }
 
@@ -215,10 +400,60 @@ export async function getProfileListCount({
   projectId,
   isExternal,
   search,
+  filters,
+  events,
+  range,
+  startDate,
+  endDate,
 }: Omit<GetProfileListOptions, 'cursor' | 'take'>) {
+  // Strip the `['*']`/'' "All Events" wildcard — see getProfileList.
+  const eventNames = events?.filter((e) => e && e !== '*');
+  // BEHAVIORAL: distinct profiles who did the event(s) in range — count over the
+  // events subquery (same ~7s scan as the list). Mirrors the list's filter.
+  if (eventNames?.length) {
+    const names = eventNames.map((e) => sqlstring.escape(e)).join(',');
+    const parts = [
+      `project_id = ${sqlstring.escape(projectId)}`,
+      `name IN (${names})`,
+      behavioralTimeClause(range, startDate, endDate),
+      ...eventFilterClauses(filters ?? []),
+    ];
+    const data = await chQuery<{ count: number }>(
+      `SELECT uniq(profile_id) as count FROM ${TABLE_NAMES.events} WHERE ${parts.join(' AND ')}`,
+      undefined,
+      true,
+    );
+    return data[0]?.count ?? 0;
+  }
+
+  if (search) {
+    // Search mirrors the list: exact profile-id first (a PK point lookup, so
+    // it's instant), then fall through to the fuzzy name/email scan below.
+    // Without this an id-search returns 0 here even though the list shows the
+    // row (the fuzzy clause only checks email/first_name/last_name).
+    const idRes = await chQuery<{ count: number }>(
+      `SELECT uniq(id) as count FROM ${TABLE_NAMES.profiles} WHERE project_id = ${sqlstring.escape(projectId)} AND id = ${sqlstring.escape(search)}${
+        isExternal !== undefined
+          ? ` AND is_external = ${isExternal ? 'true' : 'false'}`
+          : ''
+      }`,
+      undefined,
+      true,
+    );
+    if ((idRes[0]?.count ?? 0) > 0) {
+      return idRes[0]!.count;
+    }
+  }
+
+  // PROPERTY / no filter: uniq(id) over profiles. Unfiltered ~0.6s; a property
+  // filter reads the Map across all versions so it's slower (~8s), but it makes
+  // the count reflect the filter.
   const { sb, getSql } = createSqlBuilder();
   sb.from = 'profiles';
-  sb.select.count = 'count(id) as count';
+  // uniq(id) = approximate DISTINCT users (HLL, ~2% error). count(id) without
+  // FINAL over-counts because it includes every ReplacingMergeTree version, and
+  // uniqExact is ~4x slower.
+  sb.select.count = 'uniq(id) as count';
   sb.where.project_id = `project_id = ${sqlstring.escape(projectId)}`;
   sb.groupBy.project_id = 'project_id';
   if (search) {
@@ -227,6 +462,9 @@ export async function getProfileListCount({
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
   }
+  profilePropertyFilterClauses(filters ?? []).forEach((clause, i) => {
+    sb.where[`pf${i}`] = clause;
+  });
   const data = await chQuery<{ count: number }>(getSql(), undefined, true);
   return data[0]?.count ?? 0;
 }
@@ -290,7 +528,8 @@ export function transformProfile({
     firstName: first_name,
     lastName: last_name,
     isExternal: profile.is_external,
-    properties: toObject(profile.properties),
+    // The list query omits `properties` for speed; default to {} when absent.
+    properties: toObject(profile.properties ?? {}),
     createdAt: convertClickhouseDateToJs(created_at),
     projectId: profile.project_id,
     id: profile.id,

@@ -8,10 +8,11 @@ import {
   useEventQueryNamesFilter,
 } from '@/hooks/use-event-query-filters';
 import { PlusIcon } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { CohortFilterRow } from './cohort-filter-row';
 import { FilterRow } from './filter-row';
 
-export function EventsFilters() {
+export function EventsFilters({ rangeSlot }: { rangeSlot?: ReactNode } = {}) {
   const { projectId } = useAppParams();
   const [filters, setFilter, , removeFilter] = useEventQueryFilters();
   const [events, setEvents] = useEventQueryNamesFilter();
@@ -30,20 +31,23 @@ export function EventsFilters() {
         <span className="text-[10px] font-semibold uppercase text-muted-foreground">
           Select event
         </span>
-        <ComboboxEvents
-          size="sm"
-          className="w-full max-w-xs"
-          value={events}
-          onChange={setEvents}
-          multiple
-          items={eventNames}
-          placeholder="All Events"
-          maxDisplayItems={2}
-          searchable
-          isLoading={isLoading}
-          isError={isError}
-          onRefresh={refetch}
-        />
+        <div className="flex items-center justify-between gap-2">
+          <ComboboxEvents
+            size="sm"
+            className="w-full max-w-xs"
+            value={events}
+            onChange={setEvents}
+            multiple
+            items={eventNames}
+            placeholder="All Events"
+            maxDisplayItems={2}
+            searchable
+            isLoading={isLoading}
+            isError={isError}
+            onRefresh={refetch}
+          />
+          {rangeSlot}
+        </div>
       </div>
       <div className="flex flex-col gap-2">
         <span className="text-[10px] font-semibold uppercase text-muted-foreground">

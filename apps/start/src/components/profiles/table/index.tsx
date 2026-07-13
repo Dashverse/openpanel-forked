@@ -27,7 +27,7 @@ const LOADING_DATA = [{}, {}, {}, {}, {}, {}, {}, {}, {}] as IServiceProfile[];
 
 export const ProfilesTable = memo(
   ({ type, query }: Props) => {
-    const { data, isLoading } = query;
+    const { data, isFetching } = query;
     const columns = useColumns(type);
 
     const { setPage, state: pagination } = useDataTablePagination();
@@ -39,7 +39,7 @@ export const ProfilesTable = memo(
     } = useDataTableColumnVisibility(columns, 'profiles');
 
     const table = useReactTable({
-      data: isLoading ? LOADING_DATA : (data?.data ?? []),
+      data: isFetching ? LOADING_DATA : (data?.data ?? []),
       getCoreRowModel: getCoreRowModel(),
       manualPagination: true,
       manualFiltering: true,
@@ -73,7 +73,7 @@ export const ProfilesTable = memo(
         <ProfileTableToolbar table={table} />
         <DataTable
           table={table}
-          loading={isLoading}
+          loading={isFetching}
           empty={{
             title: 'No profiles',
             description: "Looks like you haven't identified any profiles yet.",
@@ -82,7 +82,7 @@ export const ProfilesTable = memo(
       </>
     );
   },
-  arePropsEqual(['query.isLoading', 'query.data', 'type']),
+  arePropsEqual(['query.isFetching', 'query.data', 'type']),
 );
 
 function ProfileTableToolbar({ table }: { table: Table<IServiceProfile> }) {
