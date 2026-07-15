@@ -156,12 +156,11 @@ export async function up() {
   //   - `optimize_trivial_insert_select=1` aligns SELECT parallelism with insert
   //   - `max_threads=8`, `max_insert_threads=8` — measured peak memory at
   //     4 threads was 3.9 GiB (6× headroom vs Aiven's 23 GB cap); 8 threads
-  //     estimated ~6 GiB. Trades 4→8 CPU for ~2× read throughput. Needed
-  //     because 4-thread rate (~13K rows/sec) would take 3+ hours per day,
-  //     blowing past `max_execution_time`.
-  //   - `max_execution_time=18000` (5h) — safety ceiling. At 8 threads a
-  //     150M-event day should run ~90 min. 5h gives ample slack for peak
-  //     traffic days without letting a stuck query run indefinitely.
+  //     estimated ~6 GiB. Trades 4→8 CPU for ~2× read throughput.
+  //   - `max_execution_time=36000` (10h) — safety ceiling. Real-world:
+  //     07-06 (157M events, sequential single-INSERT at threads=6) took
+  //     7h 17m. At threads=8 expect ~5h 30m per day. 10h ceiling covers
+  //     peak-traffic days without letting a stuck query run indefinitely.
   const insertSql = `
     INSERT INTO default.${NULL_TABLE}
     SELECT * FROM default.events
@@ -173,7 +172,7 @@ export async function up() {
       min_insert_block_size_bytes_for_materialized_views = 10485760,
       min_insert_block_size_rows_for_materialized_views = 1000000,
       optimize_trivial_insert_select = 1,
-      max_execution_time = 18000`;
+      max_execution_time = 36000`;
 
   if (isDry) {
     console.log('\n[DRY RUN] SQL that would execute:');
