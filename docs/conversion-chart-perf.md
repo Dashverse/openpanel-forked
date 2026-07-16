@@ -62,58 +62,8 @@ Anything outside the gate falls through unchanged.
 
 - Multi-property AND (2-3 filters) — works via intersection JOIN, measured 0.39s in the same session. Deferred to next PR to keep this MVP tight.
 - Property breakdown (chart's breakdown-by-property, not filter-by-property) — needs a JOIN with sibling MV rows, adds complexity.
+- Anonymous-heavy events (where `profile_id == device_id`) — MV excludes them via its WHERE clause; if we ever route an anonymous-heavy event we'd under-count. Only routing on filter-present shapes limits exposure — most filtered charts are on identified events (logIn, purchase, subscribeStart, etc.).
 - Conversion / funnel queries — separate services, separate PR.
-
-### Known safety boundary: anonymous-heavy events
-
-**Both MVs (`profile_event_property_summary_mv` and `profile_event_summary_mv`) are built with `WHERE profile_id != device_id` — anonymous events (pre-identify, where `profile_id == device_id`) are excluded from the MV at write time.**
-
-The identified/anonymous split is **project-specific** and varies dramatically. Verified on prod 2026-07-07:
-
-| Project | Event | Total (7d) | Anonymous | Identified | % Identified |
-|---|---|---|---|---|---|
-| dashreels | `installReferrer` (24h) | 122,355 | 121,595 | 760 | **0.6%** |
-| dashreels | `showOpen` | (millions) | 0.2% | 99.8% | **99.8%** |
-| dashreels | `show1Activated` | 169,915 | 140 | 169,775 | **99.9%** |
-| shortreels | `showOpen` | 2,659,905 | 2,241,881 | 418,024 | **15.7%** |
-| shortreels | `show1Activated` | 73,731 | 72,259 | 1,472 | **2%** |
-
-Note: dashreels users identify upfront (app forces signup) so almost all post-install events are identified. shortreels lets users browse anonymously, so `showOpen`/`show1Activated` fire before signup for most users.
-
-**What this means for the router:**
-- Route accepts a query → returns only the identified rows → if the event has an anonymous share, dashboard numbers under-count silently.
-- On shortreels this would be catastrophic: a `showOpen` breakdown chart would show 15.7% of actual events; a `show1Activated` chart would show 2%.
-
-### Safety guard: project allowlist
-
-`canUsePropertyMV` in `chart.service.ts` gates the router on an **explicit project allowlist**:
-
-```typescript
-const MV_ROUTING_ALLOWED_PROJECTS = new Set<string>(['dashreels']);
-```
-
-Unknown projects fall through to the events-table path — always correct, sometimes slower.
-
-**Rationale for allowlist over runtime coverage check:**
-- We considered a runtime probe (`SELECT mv_count / events_count FROM ... WHERE last 7d`) cached in Redis 24h per (project, event). Auto-adapts per project. But it's ~60 lines of code + a CH probe on cache miss + Redis dependency in the gate.
-- Allowlist is 2 lines. Fail-closed default. Manual curation is cheap because new projects are onboarded rarely (~monthly).
-- If allowlist becomes unwieldy (10+ projects, frequent additions), swap to the runtime probe; the shape is documented above.
-
-**To onboard a new project:**
-
-```sql
--- Run per candidate project, per hot dashboard event
-SELECT
-  count() AS total,
-  countIf(profile_id != device_id) AS identified,
-  round(100.0 * countIf(profile_id != device_id) / count(), 1) AS pct_identified
-FROM events
-WHERE project_id = '<candidate>'
-  AND name = '<event>'
-  AND created_at >= now() - INTERVAL 7 DAY
-```
-
-If `pct_identified ≥ 90` for the events users typically filter/breakdown on, add the project to `MV_ROUTING_ALLOWED_PROJECTS`.
 
 ### Follow-ups
 

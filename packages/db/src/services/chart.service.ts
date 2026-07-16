@@ -453,20 +453,6 @@ function getPropertyMVCutoffDate(): string {
   return formatClickhouseDate(cutoff).slice(0, 10);
 }
 
-// Project safety allowlist. Both MVs the router uses filter
-// `profile_id != device_id` on write, so anonymous events are excluded.
-// The identified/anonymous split is PROJECT-SPECIFIC:
-//   dashreels showOpen  → 99.8% identified (MV is complete)
-//   shortreels showOpen → 15.7% identified (MV misses 84% of events)
-// Routing a shortreels filtered/breakdown chart through the MV would
-// silently under-count by ~6x, so this route is gated on an explicit
-// allowlist. Unknown projects fail closed to the events-table path.
-//
-// To onboard a new project, verify its identify rate on the top events
-// used in filtered/breakdown charts (see diagnostic SQL in
-// docs/conversion-chart-perf.md) and add the project_id here.
-const MV_ROUTING_ALLOWED_PROJECTS = new Set<string>(['dashreels']);
-
 // Extract property key from filter.name for MV routing.
 // Dashboard filters on event properties come through as 'properties.<key>'.
 // A filter targeting a bare materialized column (name = '<key>' with no
@@ -512,10 +498,7 @@ function canUsePropertyMV(
   breakdowns: IGetChartDataInput['breakdowns'],
   interval: IGetChartDataInput['interval'],
   startDate: string,
-  projectId: string,
 ): boolean {
-  if (!MV_ROUTING_ALLOWED_PROJECTS.has(projectId)) return false;
-
   const validIntervals = ['day', 'week', 'month'];
   if (!validIntervals.includes(interval)) return false;
 
@@ -618,6 +601,10 @@ function getChartSqlFromPropertyMV({
     GROUP BY ${dateGroupBy}
     ORDER BY ${dateGroupBy} ASC
     ${fillClause}`;
+
+  console.log('-- Using profile_event_property_summary_mv --');
+  console.log(sql.replaceAll(/[\n\r]/g, ' '));
+  console.log('-- End --');
 
   return sql;
 }
@@ -944,7 +931,7 @@ export async function getChartSql({
   // 52.4s measured on dashreels 30-day logIn + type='truecaller').
   if (
     !customEvent &&
-    canUsePropertyMV(event, breakdowns, interval, startDate, projectId)
+    canUsePropertyMV(event, breakdowns, interval, startDate)
   ) {
     return getChartSqlFromPropertyMV({
       event,
