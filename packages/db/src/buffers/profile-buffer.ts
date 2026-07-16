@@ -215,8 +215,22 @@ export class ProfileBuffer extends BaseBuffer {
     logger: ILogger,
   ): Promise<IClickhouseProfile | null> {
     logger.debug('Fetching profile from Clickhouse');
+    // Explicit column list instead of SELECT * — avoids loading materialized
+    // columns (os, campaign, quotaPlan) and reduces payload size. properties
+    // Map dominates row size; skipping unused columns doesn't affect the merge
+    // but shaves serialization/network cost per query. Under peak load
+    // (~25K events/min → same order of profile lookups), this multiplies out.
     const result = await chQuery<IClickhouseProfile>(
-      `SELECT *
+      `SELECT
+         id,
+         project_id,
+         first_name,
+         last_name,
+         email,
+         avatar,
+         is_external,
+         properties,
+         created_at
        FROM ${TABLE_NAMES.profiles}
        WHERE project_id = '${profile.project_id}'
          AND id = '${profile.id}'
