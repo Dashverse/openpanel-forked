@@ -92,23 +92,30 @@ async function planDays(): Promise<DayPlan[]> {
   cutoff.setUTCDate(cutoff.getUTCDate() - SETTLE_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-  const parts = await chQuery<{ partition: string; bytes: string }>(
-    `SELECT partition, sum(bytes_on_disk) AS bytes
+  const parts = await chQuery<{ partition: string; bytes: string; rows: string }>(
+    `SELECT partition, sum(bytes_on_disk) AS bytes, sum(rows) AS rows
        FROM system.parts
-      WHERE table = '${TABLE}' AND active
+      WHERE table = '${TABLE}' AND database = currentDatabase() AND active
       GROUP BY partition`,
   );
-  const archived = await chQuery<{ dt: string }>(
-    `SELECT DISTINCT toString(dt) AS dt FROM ${INDEX}`,
+  // A day is "done" only when the index's chunk total equals the source row
+  // count. This makes progress robust to a partially-written index (populate
+  // failed mid-run): such a day is NOT treated as complete, so it's retried —
+  // the re-export overwrites the blob and the ReplacingMergeTree index dedups
+  // on re-insert. (Presence-only detection would silently skip the remainder.)
+  const indexed = await chQuery<{ dt: string; chunks: string }>(
+    `SELECT toString(dt) AS dt, sum(chunks) AS chunks FROM ${INDEX} FINAL GROUP BY dt`,
   );
-  const done = new Set(archived.map((r) => r.dt));
+  const indexedChunks = new Map(indexed.map((r) => [r.dt, Number(r.chunks)]));
 
   const plans: DayPlan[] = [];
   for (const p of parts) {
     const date = partitionToDate(p.partition);
     if (!date) continue; // unparseable partition
     if (date < MIN_DAY || date > cutoffStr) continue; // future/garbage or not settled
-    if (done.has(date)) continue; // already archived
+    const rows = Number(p.rows);
+    if (rows === 0) continue; // empty partition — nothing to archive
+    if (indexedChunks.get(date) === rows) continue; // fully archived + verified
     const bytes = Number(p.bytes);
     const buckets = Math.max(1, Math.ceil(bytes / GiB / TARGET_BUCKET_GIB));
     plans.push({
@@ -123,8 +130,9 @@ async function planDays(): Promise<DayPlan[]> {
 }
 
 function blobPathExpr(date: string, buckets: number): string {
-  // Per-session bucket so retrieval reads exactly one file.
-  return `concat('dt=${date}/project_id=', c.project_id, '/bucket=', toString(cityHash64(c.session_id) % ${buckets}), '.parquet')`;
+  // Per-session bucket so retrieval reads exactly one file. toString() guards
+  // against project_id being a non-String type (concat requires String args).
+  return `concat('dt=${date}/project_id=', toString(c.project_id), '/bucket=', toString(cityHash64(c.session_id) % ${buckets}), '.parquet')`;
 }
 
 async function exportBucket(

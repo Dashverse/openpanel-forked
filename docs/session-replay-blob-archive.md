@@ -1,60 +1,65 @@
 # Session Replay — Blob Archive
 
-**TL;DR:** ClickHouse keeps replays hot for a rolling window (**30 days today → moving to 45**). A K8s pod copies every chunk to **Azure Blob** so we keep **all** replays **forever** and never lose data. OpenPanel serves recent replays from ClickHouse and old ones from Blob — transparently.
+**TL;DR:** ClickHouse keeps replays hot for a rolling window (**30 days today → moving to 45**). A K8s CronJob copies every chunk to **Azure Blob** as Parquet so we keep **all** replays **forever** and never lose data. ClickHouse serves recent replays today; **serving archived replays from Blob is a planned follow-up** (see [Retrieval](#retrieval-planned)) — this PR ships the *archival* half only, and deletes nothing.
 
-> **Validated against industry practice:** this is essentially PostHog's architecture — recordings in blob storage, only a small pointer/metadata in the analytics DB. PostHog *started* with recordings in ClickHouse and deprecated it because it was "impractical and expensive at scale." Partition-by-date + sort-by-lookup-key + pre-signed direct downloads are all standard.
+> **Status:** archival is implemented (`pnpm --filter @openpanel/db archive:replay` + a K8s CronJob). Retrieval-from-Blob in the dashboard is **not yet built** — no ClickHouse day may be deleted until it ships.
 
 ---
 
 ## Why
-- Replay volume is ~**1 TB/month** — too much to keep hot in ClickHouse.
+- Replay volume is ~**2 TB/month** at full volume (~70 GiB/day, ~3–4k sessions/day) — too much to keep hot in ClickHouse.
 - We don't **delete**, we **relocate**: ClickHouse = hot cache, Blob = store-of-record (forever).
-- Scale is small: ~**3–4k sessions/day**, avg ~**10–20 MB/session**.
 
 ## How we store it
-A **K8s pod** reads from ClickHouse (daily) and writes to Azure Blob (ADLS Gen2), partitioned by **day + project**:
+A **K8s CronJob** runs `archive:replay`, which issues `INSERT INTO FUNCTION azureBlobStorage(...)` — **ClickHouse writes the Parquet directly to Blob**; no replay bytes flow through Node. Layout, partitioned by **day + project**:
 
-```
-replay-chunks/
-  dt=2026-07-14/                ← day (UTC)
-    project_id=frameo/          ← project
-      part-000                  ← big files, not many tiny ones
-      part-001
+```text
+clickhouse-export/
+  dt=2026-07-14/                 ← day (UTC, from started_at)
+    project_id=frameo/           ← project
+      bucket=0.parquet           ← session-hash slice (see below)
+      bucket=1.parquet
+      ...
 ```
 
-Each **row = one chunk**: `profile_id · session_id · window_id · chunk_index · started_at · ended_at · payload`
+Each Parquet **row = one chunk** — the `session_replay_chunks` columns as-is:
+`project_id · session_id · window_id · chunk_index · started_at · ended_at · payload`
 
 - **Partition (folders) = day + project.**
-- **Sorted by `session_id, window_id, chunk_index`** → one session's rows sit together (fast lookup).
-- **Timezone = UTC everywhere** (partition + query). IST only for display labels; playback is timezone-free (absolute timestamps).
-- **`profile_id` snapshotted at export** (from events, while still hot in CH) → archive is self-describing.
+- **Sorted by `project_id, session_id, started_at, chunk_index`** → one session's rows sit together (fast retrieval via row-group pruning).
+- **Session-hash bucketing:** a whole 78 GiB day OOMs if sorted at once (~44 GiB CH memory limit), so big days are split into `ceil(sizeGiB / 5)` slices via `cityHash64(session_id) % N`. This keeps every session's chunks in **one** file (never split) while bounding memory. Small days → 1 bucket.
+- **Timezone = UTC everywhere** (partition + query). Playback is timezone-free (absolute timestamps).
+- `profile_id` is **not** a Parquet column — the chunks table has none. It's enriched into the *index* (below) via a join to `events`.
 
-> **Open decision — file format:** **compressed JSON blocks** (simplest, playback-first — what PostHog does) vs **Parquet** (columnar, only worth it if we'll run analytics on the *replay payloads* in Databricks). Recommendation: **blocks unless payload-analytics is a real need.** Events analytics already live in Databricks separately.
+## The index — `replay_archive_index` (ClickHouse)
+A locator table in ClickHouse (created by code-migration `23-add-replay-archive-index`), written per session after each day is verified. It's also the **watermark** (no separate progress table):
 
-## How we retrieve (the key part)
-- **Recent (in the hot window):** served from ClickHouse exactly as today — unchanged, full speed.
-- **Archived (older):** three-hop, all fast:
-  1. **Index → exact locator.** A permanent index maps `session_id → project, dt, blob path (+ byte range)`. One lookup, ~5 ms. *No day-scan.*
-  2. **Direct fetch.** Read exactly that object (byte-range GET) — a few MB, not the whole day.
-  3. **Pre-signed URL.** The client downloads **straight from Blob** (like PostHog) — the API never proxies the bytes. Result cached in Redis.
-- **First open ~0.3–0.5 s; instant on replay/scrub (cached).**
+```sql
+replay_archive_index (
+  project_id, session_id, profile_id, dt,
+  blob_path,            -- dt=<date>/project_id=<p>/bucket=<hash>.parquet
+  chunks, first_started_at, last_started_at, archived_at
+) ENGINE = ReplacingMergeTree(archived_at)
+ORDER BY (project_id, session_id, dt)   -- dt in key: midnight-crossing sessions keep both file pointers
+-- NO TTL: must outlive the session_replay_chunks hot window.
+```
 
-## Index (the "where is it" pointer)
-- Lives in a **small DB table** (Postgres, or hung off existing session metadata), **kept forever** — outlives the CH copy.
-- Shape: `session_id → profile_id, project_id, dt, blob_path (+ byte offset)`.
-- Written by the **pod** at archive time (it's the only thing that knows which object each session landed in).
-- ~3.5k rows/day → ~1.3M/year — trivial.
+- **`blob_path` is deterministic** (day + project + `cityHash64(session_id) % buckets`), so retrieval reads exactly one file per session.
+- **Watermark = set-difference:** a day is "done" only when `sum(chunks)` in the index for that `dt` equals the source row count — so a partial index (populate failed mid-run) is retried, not skipped. Oldest-first, gapless, self-healing.
 
-## Fallback
-- If Aiven ClickHouse can't read Blob directly: fall back to **pre-signed-URL fetch in the app**, an **on-demand restore** into a temp CH table, or **Databricks SQL**.
-- Full **event feed** for an old session comes from **Databricks** (events archive), joined on `session_id`. `profile_id` is already in the archive, so "whose replay" needs no lookup.
+## Retrieval (planned)
+*Not implemented in this PR.* The intended dashboard read path for an archived session:
+1. Recent (in the hot window): served from ClickHouse as today — unchanged.
+2. Archived: look up `replay_archive_index` → `blob_path` → read that Parquet via `azureBlobStorage(...) WHERE session_id = X ORDER BY chunk_index` → same chunk shape → cache in Redis. (Optionally a SAS URL so the browser fetches from Blob directly.)
 
-## Retention
-- **ClickHouse:** rolling hot window — **30 days today, moving to 45** (one-line TTL change, *not yet applied*).
-- **Blob:** forever — **Cool → Cold** tier (both instant retrieval; avoid Archive tier — hours to rehydrate).
-- Nothing is dropped from ClickHouse until it's **verified in Blob**.
+**Validated manually on prod:** index → blob_path → raw rrweb payloads read back with matching counts. The dashboard code branch is the remaining work.
 
-## Open items before build
-1. Does **Aiven ClickHouse** allow reading Blob (`azureBlobStorage()`)? If not → pre-signed URL / Databricks read.
-2. **Databricks events retention ≥ replay retention** (so old replays keep their event feed).
-3. **File format decision** (blocks vs Parquet — see above).
+## Retention & safety
+- **ClickHouse:** rolling hot window — 30 days today, moving to 45 (one-line TTL change, *not yet applied*).
+- **Blob:** forever — **Cool → Cold** tier (both instant; avoid Archive tier — hours to rehydrate).
+- The CronJob **only copies**; nothing is deleted from ClickHouse. **No day may be TTL'd/dropped until the retrieval path ships**, or archived replays would 404.
+
+## Open items before deletion is enabled
+1. **Aiven** must allow `azureBlobStorage()` **reads** for the dashboard fallback (writes are already confirmed).
+2. Ship the **dashboard serving fallback** (`session.service.ts` + tRPC read path).
+3. Only then bump the TTL / let ClickHouse drop old days.

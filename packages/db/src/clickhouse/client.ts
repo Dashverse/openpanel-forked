@@ -65,6 +65,7 @@ export const TABLE_NAMES = {
   profile_event_summary_mv: 'profile_event_summary_mv',
   profile_event_property_summary_mv: 'profile_event_property_summary_mv',
   session_replay_chunks: 'session_replay_chunks',
+  replay_archive_index: 'replay_archive_index',
 };
 
 /**

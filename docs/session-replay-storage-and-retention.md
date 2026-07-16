@@ -68,9 +68,9 @@ ALTER TABLE session_replay_chunks
 - **Archive every chunk to Azure Blob (ADLS Gen2)** as Parquet — **we never delete, we relocate.** ClickHouse is the hot cache; Blob is the store-of-record for all history.
 - Only after a day is verified in Blob does ClickHouse drop it (TTL). Nothing leaves CH before it's safely archived.
 
-### Decision (2026-07): Databricks does the archival, not ClickHouse
+### Decision (2026-07): ClickHouse writes to Blob directly, run from a K8s CronJob
 
-We push data **from ClickHouse into Azure Blob via a Databricks job** — the same pattern already used to read the events table into Databricks. This deliberately avoids depending on Aiven ClickHouse being able to *write* to Azure (`INSERT INTO FUNCTION azureBlobStorage(...)`), which may be restricted on managed CH. Databricks does both the read and the write.
+> **This is the SHIPPED design — see [session-replay-blob-archive.md](session-replay-blob-archive.md) for the authoritative, implementation-accurate reference (Parquet layout, `replay_archive_index` schema, watermark, retrieval).** The Databricks-based alternative explored in the sections below was **superseded**: we verified on prod that Aiven ClickHouse *can* write to Blob via `INSERT INTO FUNCTION azureBlobStorage(...)`, so a thin **K8s CronJob** (`pnpm --filter @openpanel/db archive:replay`) orchestrates the export — ClickHouse streams the Parquet directly to Blob, with no Databricks/Spark and no bytes flowing through Node. Everything from here down is retained only as exploratory context; where it conflicts with the shipped design, the shipped design wins.
 
 ### 1. Storage — a dedicated ADLS Gen2 account
 
@@ -86,9 +86,9 @@ Create a **new dedicated storage account** (isolation, clean cost attribution, i
 | Soft-delete + versioning | **ON** | protect the archive from accidental deletion |
 | Lifecycle rule | Cool → **Cold @ 90d** (both instant); **Archive** only @ 1yr+ *or never* | cheap and keeps retrieval instant. **Avoid the Archive tier if instant retrieval matters — it needs hours to rehydrate.** |
 
-Container `replay-chunks`, Hive-partitioned so a single day/project reads cheaply:
-```
-replay-chunks/dt=YYYY-MM-DD/project_id=<p>/part-*.parquet
+Container, Hive-partitioned so a single day/project reads cheaply (shipped: container `clickhouse-export`, session-hash `bucket=N.parquet` files):
+```text
+clickhouse-export/dt=YYYY-MM-DD/project_id=<p>/bucket=<hash>.parquet
 ```
 
 ### 2. Archival job — Databricks (read ClickHouse → write Parquet)
