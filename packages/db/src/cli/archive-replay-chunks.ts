@@ -82,6 +82,10 @@ const EXPORT_SETTINGS = {
   max_block_size: MAX_BLOCK_SIZE,
   max_memory_usage: MAX_MEMORY_BYTES,
   max_execution_time: MAX_EXEC_SEC,
+  // Overwrite the day's bucket file on re-export instead of erroring
+  // ("Object ... already exists"). This is what makes a retried day (Level 1
+  // partial-day self-heal) idempotent rather than a hard failure.
+  azure_truncate_on_insert: 1,
 } as const;
 
 type DayPlan = { date: string; dayInt: number; bytes: number; buckets: number };
