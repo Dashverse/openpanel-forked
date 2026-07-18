@@ -1,8 +1,9 @@
 import type { IServiceEvent } from '@openpanel/db';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { FastForwardIcon, Maximize2, Minimize2 } from 'lucide-react';
+import { FastForwardIcon, LinkIcon, Maximize2, Minimize2 } from 'lucide-react';
 import type { MutableRefObject } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import { BrowserChrome } from './browser-chrome';
 import { ReplayTime } from './replay-controls';
 import { ReplayTimeline } from './replay-timeline';
@@ -150,6 +151,47 @@ function FullscreenButton({
 }
 
 /**
+ * Copies a shareable link to the CURRENT moment + tab of the replay:
+ * `?session=<id>&t=<seconds>&tab=<window_id>`. Opening it (on the Session
+ * Replays page) selects that tab and seeks to that timestamp. Must render
+ * inside <ReplayProvider>.
+ */
+function CopyLinkButton({
+  sessionId,
+  windowId,
+}: {
+  sessionId: string;
+  windowId?: string;
+}) {
+  const { currentTimeRef, startTime } = useReplayContext();
+  const onCopy = useCallback(() => {
+    const offsetMs = startTime == null ? 0 : Math.max(0, currentTimeRef.current);
+    const params = new URLSearchParams(window.location.search);
+    params.set('session', sessionId);
+    params.set('t', String(Math.floor(offsetMs / 1000)));
+    if (windowId) params.set('tab', windowId);
+    else params.delete('tab');
+    const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
+    void navigator.clipboard.writeText(url);
+    toast.success('Replay link copied', {
+      description: `Opens at ${formatDuration(offsetMs)}`,
+    });
+  }, [sessionId, windowId, currentTimeRef, startTime]);
+
+  return (
+    <button
+      type="button"
+      aria-label="Copy link to this moment"
+      title="Copy link to this moment & tab"
+      className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+      onClick={onCopy}
+    >
+      <LinkIcon className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+/**
  * Inside the provider, seed the buffer with first-batch chunks (events already
  * passed to rrweb at construction — no addToPlayer) and register the prefetch
  * function so the buffer-aware seek path can fetch chunks on demand.
@@ -232,11 +274,17 @@ export type ReplaySeekControls = { seekToWallMs: (wallMs: number) => void };
  * Bridges the player's seek out to consumers (the Session Replays event list),
  * so clicking an event can jump the player to that timestamp. Must render
  * inside <ReplayProvider>.
+ *
+ * Also handles the reverse: a shared deep link with `?t=` seeks to that exact
+ * moment once the player is ready.
  */
 function SeekBridge({
   controlsRef,
+  initialSeekMs,
 }: {
   controlsRef?: MutableRefObject<ReplaySeekControls | null>;
+  // When set (from a shared link's ?t=), seek here once the player is ready.
+  initialSeekMs?: number | null;
 }) {
   const { seek, startTime } = useReplayContext();
   useEffect(() => {
@@ -251,6 +299,18 @@ function SeekBridge({
       if (controlsRef) controlsRef.current = null;
     };
   }, [seek, startTime, controlsRef]);
+
+  // Deep link: jump to the shared timestamp exactly once, after the player is
+  // ready (startTime becomes non-null). seek() prefetches on demand, so this
+  // works even for a far jump into a long recording.
+  const didDeepSeek = useRef(false);
+  useEffect(() => {
+    if (didDeepSeek.current) return;
+    if (startTime == null || initialSeekMs == null || initialSeekMs <= 0) return;
+    didDeepSeek.current = true;
+    seek(initialSeekMs);
+  }, [startTime, initialSeekMs, seek]);
+
   return null;
 }
 
@@ -261,6 +321,7 @@ function ReplayContent({
   windowDurationMs,
   showEventFeed = true,
   controlsRef,
+  initialSeekMs,
 }: {
   sessionId: string;
   projectId: string;
@@ -276,6 +337,8 @@ function ReplayContent({
   // Populated with the player's seek controls so external UIs (the replays
   // event list) can jump the player to an event's timestamp.
   controlsRef?: MutableRefObject<ReplaySeekControls | null>;
+  // From a shared deep link (?t=): seek here once the player is ready.
+  initialSeekMs?: number | null;
 }) {
   const trpc = useTRPC();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -366,7 +429,7 @@ function ReplayContent({
     <ReplayProvider
       totalDurationMs={windowDurationMs ?? replayMeta?.totalDurationMs}
     >
-      <SeekBridge controlsRef={controlsRef} />
+      <SeekBridge controlsRef={controlsRef} initialSeekMs={initialSeekMs} />
       <div
         className={cn(
           'grid gap-4 [&:fullscreen]:flex [&:fullscreen]:flex-col [&:fullscreen]:bg-background [&:fullscreen]:p-4',
@@ -399,6 +462,9 @@ function ReplayContent({
                     <FastForwardIcon className="size-3" />
                     Skip idle
                   </button>
+                )}
+                {hasReplay && (
+                  <CopyLinkButton sessionId={sessionId} windowId={windowId} />
                 )}
                 <FullscreenButton containerRef={containerRef} />
               </div>
@@ -449,6 +515,8 @@ export function ReplayShell({
   showEventFeed = true,
   tabsOnRight = false,
   controlsRef,
+  initialWindowId,
+  initialSeekMs,
 }: {
   sessionId: string;
   projectId: string;
@@ -457,9 +525,15 @@ export function ReplayShell({
   // vertical column to the RIGHT of the player instead of a row on top.
   tabsOnRight?: boolean;
   controlsRef?: MutableRefObject<ReplaySeekControls | null>;
+  // Deep link: pre-select this tab (window_id) and seek to initialSeekMs once
+  // the player is ready. Both come from a shared ?tab= / ?t= link.
+  initialWindowId?: string | null;
+  initialSeekMs?: number | null;
 }) {
   const trpc = useTRPC();
-  const [selectedWindowId, setSelectedWindowId] = useState<string | null>(null);
+  const [selectedWindowId, setSelectedWindowId] = useState<string | null>(
+    initialWindowId ?? null,
+  );
 
   // List the distinct recorders (tabs) that wrote to this session. Each is a
   // separate rrweb recording — the player must play one at a time to avoid
@@ -512,6 +586,7 @@ export function ReplayShell({
       windowDurationMs={activeWindow?.durationMs}
       showEventFeed={showEventFeed}
       controlsRef={controlsRef}
+      initialSeekMs={initialSeekMs}
     />
   );
 

@@ -16,7 +16,7 @@ import {
   MonitorPlayIcon,
   SearchIcon,
 } from 'lucide-react';
-import { parseAsString, useQueryState } from 'nuqs';
+import { parseAsInteger, parseAsString, useQueryState } from 'nuqs';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 /** Inline event list shown under the selected replay (Mixpanel-style).
@@ -86,6 +86,19 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
     'session',
     parseAsString,
   );
+  // Shareable deep link: ?t=<seconds> jumps to that moment, ?tab=<window_id>
+  // pre-selects that tab. Read once on mount to seed the player, then owned by
+  // the player (we don't keep re-seeking as the URL changes).
+  const [tParam] = useQueryState('t', parseAsInteger);
+  const [tabParam] = useQueryState('tab', parseAsString);
+  // Captured once on mount: a shared ?t=/?tab= only seeds the deep-linked
+  // session, not sessions the user clicks afterward.
+  const initialSeekRef = useRef({
+    t: tParam,
+    tab: tabParam,
+    session: selectedSessionId,
+  });
+
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(
     null,
   );
@@ -268,6 +281,17 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
               projectId={projectId}
               showEventFeed={false}
               tabsOnRight
+              initialWindowId={
+                selectedSessionId === initialSeekRef.current.session
+                  ? initialSeekRef.current.tab
+                  : null
+              }
+              initialSeekMs={
+                selectedSessionId === initialSeekRef.current.session &&
+                initialSeekRef.current.t != null
+                  ? initialSeekRef.current.t * 1000
+                  : null
+              }
             />
           </div>
         ) : (
