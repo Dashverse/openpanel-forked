@@ -93,11 +93,22 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
   const [tabParam] = useQueryState('tab', parseAsString);
   // Captured once on mount: a shared ?t=/?tab= only seeds the deep-linked
   // session, not sessions the user clicks afterward.
-  const initialSeekRef = useRef({
+  const initialSeekRef = useRef<{
+    t: number | null;
+    tab: string | null;
+    session: string | null;
+  }>({
     t: tParam,
     tab: tabParam,
     session: selectedSessionId,
   });
+  // Consume the deep link once: as soon as the user navigates to a DIFFERENT
+  // session, clear it so returning to the shared session doesn't re-seek.
+  useEffect(() => {
+    if (selectedSessionId && selectedSessionId !== initialSeekRef.current.session) {
+      initialSeekRef.current = { t: null, tab: null, session: null };
+    }
+  }, [selectedSessionId]);
 
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(
     null,

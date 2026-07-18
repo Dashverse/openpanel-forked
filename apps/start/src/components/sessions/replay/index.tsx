@@ -172,10 +172,13 @@ function CopyLinkButton({
     if (windowId) params.set('tab', windowId);
     else params.delete('tab');
     const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
-    void navigator.clipboard.writeText(url);
-    toast.success('Replay link copied', {
-      description: `Opens at ${formatDuration(offsetMs)}`,
-    });
+    navigator.clipboard.writeText(url).then(
+      () =>
+        toast.success('Replay link copied', {
+          description: `Opens at ${formatDuration(offsetMs)}`,
+        }),
+      () => toast.error('Could not copy link — check clipboard permissions'),
+    );
   }, [sessionId, windowId, currentTimeRef, startTime]);
 
   return (
@@ -461,6 +464,7 @@ function ReplayContent({
                   >
                     <FastForwardIcon className="size-3" />
                     Skip idle
+                    
                   </button>
                 )}
                 {hasReplay && (
