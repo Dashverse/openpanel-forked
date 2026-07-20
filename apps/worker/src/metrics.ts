@@ -147,6 +147,9 @@ register.registerMetric(
 
 // Per-buffer memory bytes (Redis MEMORY USAGE on the underlying key).
 // One gauge per buffer type so a dashboard can attribute Redis growth.
+// Errors are swallowed so a Redis blip on one buffer doesn't fail the whole
+// scrape and take out every other metric (prom-client fails the registry if
+// any collect() throws).
 for (const buffer of [
   eventBuffer,
   profileBuffer,
@@ -159,30 +162,43 @@ for (const buffer of [
       name: `buffer_${buffer.name}_bytes`,
       help: `Redis memory usage (bytes) held by the ${buffer.name} buffer`,
       async collect() {
-        this.set(await buffer.getBufferBytes());
+        try {
+          this.set(await buffer.getBufferBytes());
+        } catch {
+          // Skip this scrape; keep the last observed value.
+        }
       },
     }),
   );
 }
 
-// Cluster-wide Redis memory. Lets us alert on approach to noeviction cliff
-// (used / max) instead of only observing counts.
+// Buffer Redis memory footprint (getRedisCache — where all buffers live).
+// Scoped to the cache/queue Redis only; session store Redis (REDIS_SESSION_URL)
+// is a different instance and not measured here.
 register.registerMetric(
   new client.Gauge({
-    name: 'redis_used_memory_bytes',
-    help: 'Redis used_memory in bytes (from INFO memory)',
+    name: 'buffer_redis_used_memory_bytes',
+    help: 'used_memory of the buffer/cache Redis (from INFO memory)',
     async collect() {
-      this.set(await readRedisMemoryField('used_memory'));
+      try {
+        this.set(await readRedisMemoryField('used_memory'));
+      } catch {
+        // Skip this scrape; keep the last observed value.
+      }
     },
   }),
 );
 
 register.registerMetric(
   new client.Gauge({
-    name: 'redis_maxmemory_bytes',
-    help: 'Redis maxmemory in bytes (0 = unlimited)',
+    name: 'buffer_redis_maxmemory_bytes',
+    help: 'maxmemory of the buffer/cache Redis (0 = unlimited)',
     async collect() {
-      this.set(await readRedisMemoryField('maxmemory'));
+      try {
+        this.set(await readRedisMemoryField('maxmemory'));
+      } catch {
+        // Skip this scrape; keep the last observed value.
+      }
     },
   }),
 );
