@@ -4,9 +4,18 @@ import {
   botBuffer,
   eventBuffer,
   profileBuffer,
+  replayBuffer,
   sessionBuffer,
 } from '@openpanel/db';
 import { cronQueue, eventsGroupQueues, sessionsQueue } from '@openpanel/queue';
+import { getRedisCache } from '@openpanel/redis';
+
+const bufferRedis = getRedisCache();
+
+async function readRedisMemoryField(field: 'used_memory' | 'maxmemory') {
+  const info = await bufferRedis.info('memory');
+  return Number(info.match(new RegExp(`^${field}:(\\d+)`, 'm'))?.[1] ?? 0);
+}
 
 const Registry = client.Registry;
 
@@ -121,6 +130,59 @@ register.registerMetric(
     async collect() {
       const metric = await sessionBuffer.getBufferSize();
       this.set(metric);
+    },
+  }),
+);
+
+register.registerMetric(
+  new client.Gauge({
+    name: `buffer_${replayBuffer.name}_count`,
+    help: 'Number of unprocessed replay chunks',
+    async collect() {
+      const metric = await replayBuffer.getBufferSize();
+      this.set(metric);
+    },
+  }),
+);
+
+// Per-buffer memory bytes (Redis MEMORY USAGE on the underlying key).
+// One gauge per buffer type so a dashboard can attribute Redis growth.
+for (const buffer of [
+  eventBuffer,
+  profileBuffer,
+  sessionBuffer,
+  replayBuffer,
+  botBuffer,
+]) {
+  register.registerMetric(
+    new client.Gauge({
+      name: `buffer_${buffer.name}_bytes`,
+      help: `Redis memory usage (bytes) held by the ${buffer.name} buffer`,
+      async collect() {
+        this.set(await buffer.getBufferBytes());
+      },
+    }),
+  );
+}
+
+// Cluster-wide Redis memory. Lets us alert on approach to noeviction cliff
+// (used / max) instead of only observing counts.
+register.registerMetric(
+  new client.Gauge({
+    name: 'redis_used_memory_bytes',
+    help: 'Redis used_memory in bytes (from INFO memory)',
+    async collect() {
+      this.set(await readRedisMemoryField('used_memory'));
+    },
+  }),
+);
+
+register.registerMetric(
+  new client.Gauge({
+    name: 'redis_maxmemory_bytes',
+    help: 'Redis maxmemory in bytes (0 = unlimited)',
+    async collect() {
+      this.set(await readRedisMemoryField('maxmemory'));
     },
   }),
 );
