@@ -106,4 +106,8 @@ export class ReplayBuffer extends BaseBuffer {
   async getBufferSize() {
     return this.getBufferSizeWithCounter(() => this.redis.llen(this.redisKey));
   }
+
+  async getBufferBytes() {
+    return (await this.redis.memory('USAGE', this.redisKey)) ?? 0;
+  }
 }
