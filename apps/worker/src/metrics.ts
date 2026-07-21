@@ -48,6 +48,18 @@ const bufferFlushDuration = new client.Histogram({
 });
 register.registerMetric(bufferFlushDuration);
 
+const handleFlushObservation = (obs: FlushObservation) => {
+  const labels = { buffer: obs.buffer, result: obs.result };
+  bufferFlushDuration.observe({ ...labels, phase: 'total' }, obs.totalMs);
+  if (obs.phases) {
+    for (const [key, value] of Object.entries(obs.phases)) {
+      if (typeof value === 'number') {
+        bufferFlushDuration.observe({ ...labels, phase: key }, value);
+      }
+    }
+  }
+};
+
 for (const buffer of [
   eventBuffer,
   profileBuffer,
@@ -55,17 +67,7 @@ for (const buffer of [
   replayBuffer,
   botBuffer,
 ]) {
-  buffer.flushObserver = (obs: FlushObservation) => {
-    const labels = { buffer: obs.buffer, result: obs.result };
-    bufferFlushDuration.observe({ ...labels, phase: 'total' }, obs.totalMs);
-    if (obs.phases) {
-      for (const [key, value] of Object.entries(obs.phases)) {
-        if (typeof value === 'number') {
-          bufferFlushDuration.observe({ ...labels, phase: key }, value);
-        }
-      }
-    }
-  };
+  buffer.flushObserver = handleFlushObservation;
 }
 
 queues.forEach((queue) => {
