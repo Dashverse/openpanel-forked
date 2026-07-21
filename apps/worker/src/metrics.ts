@@ -48,6 +48,17 @@ const bufferFlushDuration = new client.Histogram({
 });
 register.registerMetric(bufferFlushDuration);
 
+// Total rows the flush actually pushed to CH per buffer/result. Lets a
+// dashboard show "events landed in CH per second" — the SLA-relevant
+// throughput number — via rate() on this counter. The histogram alone
+// only counts flush cycles, not rows per cycle.
+const bufferRowsInserted = new client.Counter({
+  name: 'buffer_rows_inserted_total',
+  help: 'Total rows inserted into CH from a buffer flush cycle',
+  labelNames: ['buffer', 'result'],
+});
+register.registerMetric(bufferRowsInserted);
+
 const handleFlushObservation = (obs: FlushObservation) => {
   const labels = { buffer: obs.buffer, result: obs.result };
   bufferFlushDuration.observe({ ...labels, phase: 'total' }, obs.totalMs);
@@ -57,6 +68,9 @@ const handleFlushObservation = (obs: FlushObservation) => {
         bufferFlushDuration.observe({ ...labels, phase: key }, value);
       }
     }
+  }
+  if (obs.rowsProcessed) {
+    bufferRowsInserted.inc(labels, obs.rowsProcessed);
   }
 };
 
