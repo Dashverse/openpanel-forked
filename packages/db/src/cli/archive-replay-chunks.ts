@@ -51,6 +51,17 @@ const EXPORT_SETTINGS: ClickHouseSettings = {
   max_execution_time: MAX_EXEC_SEC,
   output_format_parquet_row_group_size_bytes: String(ROW_GROUP_BYTES),
   azure_truncate_on_insert: 1, // overwrite on retry instead of erroring
+  // Our blob path contains `project_id=<id>`, which ClickHouse would otherwise
+  // read as a Hive partition column that collides with the real project_id in
+  // SELECT * ("columns don't match, 9 vs 8"). We key on the index, not the
+  // path, so Hive partitioning must be off on both write and read.
+  use_hive_partitioning: 0,
+};
+
+/** Reads of azureBlobStorage must also disable Hive partitioning (see above). */
+const READ_SETTINGS: ClickHouseSettings = {
+  max_execution_time: MAX_EXEC_SEC,
+  use_hive_partitioning: 0,
 };
 
 const INDEX_SETTINGS: ClickHouseSettings = {
@@ -209,7 +220,7 @@ async function countBlob(path: string): Promise<number> {
   const [row] = await chQuery<{ n: string }>(
     `SELECT count() AS n FROM azureBlobStorage(
        '${CONN}', '${CONTAINER}', '${path}', 'Parquet')`,
-    { max_execution_time: MAX_EXEC_SEC },
+    READ_SETTINGS,
   );
   return Number(row?.n ?? -1);
 }
