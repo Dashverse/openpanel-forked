@@ -3,6 +3,7 @@ import client from 'prom-client';
 import {
   botBuffer,
   eventBuffer,
+  type FlushObservation,
   profileBuffer,
   replayBuffer,
   sessionBuffer,
@@ -32,6 +33,40 @@ export const eventsGroupJobDuration = new client.Histogram({
 });
 
 register.registerMetric(eventsGroupJobDuration);
+
+// Per-buffer flush duration histogram — bridges each buffer's flushObserver
+// hook into Prometheus. Labels let a dashboard split by buffer + result +
+// phase, so during an incident we can see e.g. "replay chInsertMs p95
+// spiked" or "replay flushes failing" instantly instead of grepping logs.
+// The buffer_flush_duration_ms_count series (auto-emitted by histograms)
+// doubles as the failure counter — filter by result='error' or 'locked'.
+const bufferFlushDuration = new client.Histogram({
+  name: 'buffer_flush_duration_ms',
+  help: 'Duration of a buffer flush cycle in ms, per buffer / phase / result',
+  labelNames: ['buffer', 'phase', 'result'],
+  buckets: [5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000],
+});
+register.registerMetric(bufferFlushDuration);
+
+for (const buffer of [
+  eventBuffer,
+  profileBuffer,
+  sessionBuffer,
+  replayBuffer,
+  botBuffer,
+]) {
+  buffer.flushObserver = (obs: FlushObservation) => {
+    const labels = { buffer: obs.buffer, result: obs.result };
+    bufferFlushDuration.observe({ ...labels, phase: 'total' }, obs.totalMs);
+    if (obs.phases) {
+      for (const [key, value] of Object.entries(obs.phases)) {
+        if (typeof value === 'number') {
+          bufferFlushDuration.observe({ ...labels, phase: key }, value);
+        }
+      }
+    }
+  };
+}
 
 queues.forEach((queue) => {
   register.registerMetric(
