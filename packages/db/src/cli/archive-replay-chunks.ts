@@ -40,16 +40,19 @@ const MIN_DAY = '2020-01-01'; // floor for clock-skew partition guard
 const HEX = '0123456789abcdef'; // session_id is a lowercase-hex UUIDv4
 const ALLOWED_SLICES = [1, 2, 4, 8, 16] as const; // divisors of 16 (one hex char)
 
-// Peak memory is bounded by the Parquet row group (flushed and freed at this
-// size), not by slice or day size. A 64 MiB cap holds peak ~3 GiB and keeps
-// every column chunk far under the 2 GiB Arrow array limit — the setting that
-// unblocked big-day exports. The client types byte/count settings as string.
+// The 64 MiB row-group cap bounds peak memory (~3 GiB). It does NOT bound the
+// 2 GiB Arrow array limit — that array is built per block, so on fat-payload
+// days a 512-row block can exceed 2^31 bytes (measured: 06-14 hit 2.16 GB,
+// ~4.2 MB/row). The custom Parquet encoder splits such arrays internally; the
+// Arrow writer (used when this is off) throws "array cannot contain more than
+// 2147483646 bytes". So it MUST be on. The client types byte/count as string.
 const EXPORT_SETTINGS: ClickHouseSettings = {
   max_threads: MAX_THREADS,
   max_block_size: String(MAX_BLOCK_SIZE),
   max_memory_usage: String(MAX_MEMORY_BYTES),
   max_execution_time: MAX_EXEC_SEC,
   output_format_parquet_row_group_size_bytes: String(ROW_GROUP_BYTES),
+  output_format_parquet_use_custom_encoder: 1, // splits >2 GiB payload arrays
   azure_truncate_on_insert: 1, // overwrite on retry instead of erroring
   // Our blob path contains `project_id=<id>`, which ClickHouse would otherwise
   // read as a Hive partition column that collides with the real project_id in
