@@ -12,14 +12,20 @@
  * has no per-column cap, streams block-by-block (bounded memory), and self-
  * describes its schema, so CH reads it straight back from Blob for serving.
  *
- * A day is exported as one blob per (project, session_id-range) slice. Slicing
- * on a session_id range (a prefix of the table's ORDER BY key) lets ClickHouse
- * seek to each slice instead of re-scanning the day, keeps each file small
- * enough to play back cheaply, and makes the job resumable per slice.
+ * A day is exported as ONE BLOB PER SESSION (`session_id=<sid>.native.zst`) so
+ * playback fetches a single ~10 MiB object in ~0.2s instead of scanning a
+ * multi-GiB slice. ClickHouse writes them in one `INSERT ... PARTITION BY
+ * session_id` statement per batch — it fans out a file per session on its own.
  *
- * Oldest-settled day first; each slice is verified (blob count == CH count) and
- * indexed before the next. Re-running is safe: finished slices are skipped and
- * re-exports overwrite their blob.
+ * Batches exist only to bound memory: PARTITION BY buffers per open partition,
+ * so peak memory scales with the number of sessions in one statement (~200
+ * sessions ~= 10 GiB). We split a project-day into session_id-range batches of
+ * ~TARGET_SESSIONS_PER_BATCH each (a session_id prefix is a seek on the table's
+ * ORDER BY key), so every statement stays under the memory ceiling.
+ *
+ * Oldest-settled day first; each day is verified (total blob rows == CH rows)
+ * and indexed. Re-running is safe: finished batches are skipped (their sessions
+ * are already indexed) and re-exports overwrite each session's blob.
  *
  * See docs/session-replay-blob-archive.md. Env: CLICKHOUSE_URL,
  * AZURE_BLOB_CONNECTION_STRING (required) + REPLAY_ARCHIVE_* overrides below.
@@ -30,7 +36,9 @@ import { ch, chQuery } from '../clickhouse/client';
 const CONTAINER = process.env.REPLAY_ARCHIVE_CONTAINER || 'clickhouse-export';
 const CONN = process.env.AZURE_BLOB_CONNECTION_STRING || '';
 const SETTLE_DAYS = int('REPLAY_ARCHIVE_SETTLE_DAYS', 2);
-const TARGET_SLICE_GIB = num('REPLAY_ARCHIVE_TARGET_SLICE_GIB', 5);
+// Sessions per PARTITION BY statement. Peak memory scales with this (~200
+// sessions hit ~10 GiB peak on fat days); keep it well under max_memory_usage.
+const TARGET_SESSIONS_PER_BATCH = int('REPLAY_ARCHIVE_SESSIONS_PER_BATCH', 200);
 const MAX_DAYS_PER_RUN = int('REPLAY_ARCHIVE_MAX_DAYS_PER_RUN', 1);
 const MAX_THREADS = int('REPLAY_ARCHIVE_MAX_THREADS', 1);
 // Native streams block-by-block, so peak memory ~= max_block_size rows in
@@ -85,15 +93,12 @@ type ProjectPlan = {
   projectId: string;
   rows: number;
   bytes: number;
+  sessions: number;
   slices: number;
 };
 
 function int(key: string, def: number): number {
   const v = Number.parseInt(process.env[key] ?? '', 10);
-  return Number.isFinite(v) ? v : def;
-}
-function num(key: string, def: number): number {
-  const v = Number.parseFloat(process.env[key] ?? '');
   return Number.isFinite(v) ? v : def;
 }
 function log(msg: string): void {
@@ -107,13 +112,22 @@ function partitionToDate(p: string): string | null {
 function esc(v: string): string {
   return v.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
-function blobPath(date: string, projectId: string, slice: number): string {
-  return `dt=${date}/project_id=${projectId}/s=${slice}.native.zst`;
+/**
+ * INSERT path template. `{_partition_id}` is substituted by ClickHouse with each
+ * PARTITION BY value (the session_id), so one statement writes one blob/session.
+ */
+function exportPathTemplate(date: string, projectId: string): string {
+  return `dt=${date}/project_id=${projectId}/session_id={_partition_id}.native.zst`;
 }
 
-/** Smallest allowed slice count that keeps each slice under the target size. */
-function sliceCountFor(bytes: number): number {
-  const want = Math.ceil(bytes / GiB / TARGET_SLICE_GIB);
+/** SQL expr for a session's own blob path — must match exportPathTemplate. */
+function sessionPathExpr(date: string, projectId: string): string {
+  return `concat('dt=${date}/project_id=${projectId}/session_id=', c.session_id, '.native.zst')`;
+}
+
+/** Smallest allowed batch count keeping each PARTITION BY under the mem ceiling. */
+function sliceCountFor(sessions: number): number {
+  const want = Math.ceil(sessions / TARGET_SESSIONS_PER_BATCH);
   return ALLOWED_SLICES.find((n) => n >= want) ?? 16;
 }
 
@@ -183,8 +197,13 @@ async function planDays(): Promise<DayPlan[]> {
  * (the leading key column), so it's cheap even on a 70 GiB day.
  */
 async function planProjects(day: DayPlan): Promise<ProjectPlan[]> {
-  const rows = await chQuery<{ project_id: string; rows: string }>(
-    `SELECT toString(project_id) AS project_id, count() AS rows
+  const rows = await chQuery<{
+    project_id: string;
+    rows: string;
+    sessions: string;
+  }>(
+    `SELECT toString(project_id) AS project_id, count() AS rows,
+            uniqExact(session_id) AS sessions
        FROM ${TABLE}
       WHERE toYYYYMMDD(started_at) = ${day.dayInt}
       GROUP BY project_id
@@ -193,19 +212,29 @@ async function planProjects(day: DayPlan): Promise<ProjectPlan[]> {
   );
   return rows.map((r) => {
     const n = Number(r.rows);
+    const sessions = Number(r.sessions);
     const bytes = day.rows > 0 ? (day.bytes * n) / day.rows : 0; // split by row share
     return {
       projectId: r.project_id,
       rows: n,
       bytes,
-      slices: sliceCountFor(bytes),
+      sessions,
+      slices: sliceCountFor(sessions),
     };
   });
 }
 
-async function indexedChunksForSlice(path: string): Promise<number> {
+/** Chunks already indexed for the sessions in batch `i` (for resume/skip). */
+async function indexedChunksForSlice(
+  day: DayPlan,
+  p: ProjectPlan,
+  i: number,
+): Promise<number> {
   const [row] = await chQuery<{ n: string }>(
-    `SELECT sum(chunks) AS n FROM ${INDEX} FINAL WHERE blob_path = '${esc(path)}'`,
+    `SELECT sum(chunks) AS n FROM ${INDEX} FINAL
+      WHERE dt = toDate('${day.date}')
+        AND project_id = '${esc(p.projectId)}'
+        AND ${slicePredicate(p.slices, i)}`,
     { max_execution_time: MAX_EXEC_SEC },
   );
   return Number(row?.n ?? 0);
@@ -236,9 +265,10 @@ async function countBlob(path: string): Promise<number> {
 }
 
 /**
- * Export one slice. No ORDER BY (the table is already stored in key order;
- * sorting fat payloads OOM'd) and no PARTITION BY (it buffers a block per
- * partition, scaling memory with output — ClickHouse #88666); the path is fixed.
+ * Export one batch as one blob per session. `PARTITION BY session_id` makes
+ * ClickHouse fan out a file per session (path from {_partition_id}); the batch's
+ * session_id range bounds the number of open partitions (peak memory). No ORDER
+ * BY — the table is already stored in key order (sorting fat payloads OOM'd).
  */
 async function exportSlice(
   day: DayPlan,
@@ -247,7 +277,8 @@ async function exportSlice(
 ): Promise<void> {
   const query = `
     INSERT INTO FUNCTION azureBlobStorage(
-      '${CONN}', '${CONTAINER}', '${blobPath(day.date, p.projectId, i)}', '${FORMAT}', '${COMPRESSION}')
+      '${CONN}', '${CONTAINER}', '${exportPathTemplate(day.date, p.projectId)}', '${FORMAT}', '${COMPRESSION}')
+    PARTITION BY session_id
     SELECT * FROM ${TABLE}
      WHERE toYYYYMMDD(started_at) = ${day.dayInt}
        AND project_id = '${esc(p.projectId)}'
@@ -256,15 +287,15 @@ async function exportSlice(
 }
 
 /**
- * Index every session in one slice (all live in `s=i.parquet`, so blob_path is
- * constant). Written per slice so a crash resumes at slice granularity.
+ * Index every session in one batch. Each session's blob_path is its own file
+ * (session_id=<sid>.native.zst), built to match exportPathTemplate. Written per
+ * batch so a crash resumes at batch granularity.
  */
 async function populateSliceIndex(
   day: DayPlan,
   p: ProjectPlan,
   i: number,
 ): Promise<void> {
-  const path = blobPath(day.date, p.projectId, i);
   const profileSelect = ENRICH_PROFILE ? 'any(e.profile_id)' : `''`;
   const profileJoin = ENRICH_PROFILE
     ? `LEFT JOIN (
@@ -284,7 +315,7 @@ async function populateSliceIndex(
       c.session_id,
       ${profileSelect} AS profile_id,
       toDate('${day.date}') AS dt,
-      '${esc(path)}' AS blob_path,
+      ${sessionPathExpr(day.date, p.projectId)} AS blob_path,
       count() AS chunks,
       min(c.started_at) AS first_started_at,
       max(c.started_at) AS last_started_at
@@ -299,36 +330,35 @@ async function populateSliceIndex(
 
 async function archiveProject(day: DayPlan, p: ProjectPlan): Promise<boolean> {
   log(
-    `  project ${p.projectId}: ${(p.bytes / GiB).toFixed(1)} GiB / ${p.rows} rows -> ${p.slices} slice(s)`,
+    `  project ${p.projectId}: ${(p.bytes / GiB).toFixed(1)} GiB / ${p.rows} rows / ${p.sessions} sessions -> ${p.slices} batch(es)`,
   );
   for (let i = 0; i < p.slices; i++) {
-    const path = blobPath(day.date, p.projectId, i);
     const expected = await countSlice(day, p, i);
     if (expected === 0) {
-      log(`    slice ${i}: empty, skipped`);
+      log(`    batch ${i}: empty, skipped`);
       continue;
     }
-    if ((await indexedChunksForSlice(path)) === expected) {
-      log(`    slice ${i}: already archived (${expected} chunks), skipped`);
+    if ((await indexedChunksForSlice(day, p, i)) === expected) {
+      log(`    batch ${i}: already archived (${expected} chunks), skipped`);
       continue;
     }
+    // PARTITION BY is atomic per statement — it either writes every session's
+    // blob or throws (aborting the day). Per-batch blob-count verification would
+    // need to read the batch back; the day-level verifyDay is the integrity gate.
     const t0 = Date.now();
     await exportSlice(day, p, i);
-    const got = await countBlob(path);
-    if (got !== expected) {
-      log(`    slice ${i}: MISMATCH blob=${got} ch=${expected} — aborting day`);
-      return false;
-    }
     await populateSliceIndex(day, p, i);
     log(
-      `    slice ${i}: ${expected} chunks verified + indexed (${((Date.now() - t0) / 1000).toFixed(1)}s)`,
+      `    batch ${i}: ${expected} chunks -> per-session blobs + indexed (${((Date.now() - t0) / 1000).toFixed(1)}s)`,
     );
   }
   return true;
 }
 
 async function verifyDay(day: DayPlan): Promise<boolean> {
-  const blobN = await countBlob(`dt=${day.date}/**/*.native.zst`);
+  // Match only per-session blobs — a `s=<n>.native.zst` slice blob from an
+  // earlier run would otherwise be double-counted during the transition.
+  const blobN = await countBlob(`dt=${day.date}/**/session_id=*.native.zst`);
   const [src] = await chQuery<{ n: string }>(
     `SELECT count() AS n FROM ${TABLE} WHERE toYYYYMMDD(started_at) = ${day.dayInt}`,
     { max_execution_time: MAX_EXEC_SEC },
@@ -348,7 +378,7 @@ async function archiveDay(day: DayPlan): Promise<boolean> {
   if (DRY_RUN) {
     for (const p of projects) {
       log(
-        `  DRY_RUN project ${p.projectId}: ${(p.bytes / GiB).toFixed(1)} GiB -> ${p.slices} slice(s)`,
+        `  DRY_RUN project ${p.projectId}: ${p.sessions} sessions -> ${p.slices} batch(es)`,
       );
     }
     return true;
@@ -367,7 +397,7 @@ async function archiveDay(day: DayPlan): Promise<boolean> {
 async function main(): Promise<void> {
   if (!CONN) throw new Error('AZURE_BLOB_CONNECTION_STRING is required');
   log(
-    `start container=${CONTAINER} settleDays=${SETTLE_DAYS} sliceGiB=${TARGET_SLICE_GIB} maxDays=${MAX_DAYS_PER_RUN} blockSize=${MAX_BLOCK_SIZE} dryRun=${DRY_RUN}`,
+    `start container=${CONTAINER} settleDays=${SETTLE_DAYS} sessionsPerBatch=${TARGET_SESSIONS_PER_BATCH} maxDays=${MAX_DAYS_PER_RUN} blockSize=${MAX_BLOCK_SIZE} dryRun=${DRY_RUN}`,
   );
 
   const plans = await planDays();
