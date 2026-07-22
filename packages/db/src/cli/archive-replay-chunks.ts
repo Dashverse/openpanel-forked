@@ -48,6 +48,13 @@ const MAX_THREADS = int('REPLAY_ARCHIVE_MAX_THREADS', 1);
 // slice (06-14 s=2, 30 GiB) at 2.51 GiB peak.
 const MAX_BLOCK_SIZE = int('REPLAY_ARCHIVE_MAX_BLOCK_SIZE', 512);
 const MAX_MEMORY_BYTES = int('REPLAY_ARCHIVE_MAX_MEMORY_BYTES', 15_000_000_000);
+// Cap for the small metadata/aggregation queries (plan, count, verify). These
+// share a PROD server whose total memory ceiling is ~44 GiB; an uncapped read
+// (e.g. counting rows across a whole day's blobs) can tip that ceiling and OOM
+// live traffic. Keep them bounded and modest.
+const LIGHT_MEMORY_BYTES = int('REPLAY_ARCHIVE_LIGHT_MEMORY_BYTES', 8_000_000_000);
+// How many per-session blobs to actually read back per day as a spot-check.
+const VERIFY_SAMPLE = int('REPLAY_ARCHIVE_VERIFY_SAMPLE', 3);
 const MAX_EXEC_SEC = int('REPLAY_ARCHIVE_MAX_EXEC_SEC', 1800);
 const ENRICH_PROFILE = process.env.REPLAY_ARCHIVE_ENRICH_PROFILE !== 'false';
 const DRY_RUN = process.env.REPLAY_ARCHIVE_DRY_RUN === 'true';
@@ -63,8 +70,11 @@ const FORMAT = 'Native'; // no per-column size cap; self-describes its schema
 const COMPRESSION = 'zstd'; // rrweb payloads compress ~10x
 const GiB = 1024 ** 3;
 const MIN_DAY = '2020-01-01'; // floor for clock-skew partition guard
-const HEX = '0123456789abcdef'; // session_id is a lowercase-hex UUIDv4
-const ALLOWED_SLICES = [1, 2, 4, 8, 16] as const; // divisors of 16 (one hex char)
+// session_id is a lowercase-hex UUIDv4; batches split its space by a 1- or
+// 2-hex-char prefix. Counts are powers of 2 that evenly divide 16 (one char) or
+// 256 (two chars), so up to 256 batches keep each within TARGET_SESSIONS_PER_BATCH.
+const ALLOWED_SLICES = [1, 2, 4, 8, 16, 32, 64, 128, 256] as const;
+const MAX_SLICES = 256;
 
 // The client types byte/count settings as string.
 const EXPORT_SETTINGS: ClickHouseSettings = {
@@ -83,6 +93,7 @@ const EXPORT_SETTINGS: ClickHouseSettings = {
 // read as a Hive partition column, adding a phantom column on read. We key on
 // the index, not the path, so Hive partitioning must be off when reading back.
 const READ_SETTINGS: ClickHouseSettings = {
+  max_memory_usage: String(LIGHT_MEMORY_BYTES),
   max_execution_time: MAX_EXEC_SEC,
   use_hive_partitioning: 0,
 };
@@ -90,6 +101,12 @@ const READ_SETTINGS: ClickHouseSettings = {
 const INDEX_SETTINGS: ClickHouseSettings = {
   max_threads: MAX_THREADS,
   max_memory_usage: String(MAX_MEMORY_BYTES),
+  max_execution_time: MAX_EXEC_SEC,
+};
+
+/** Small metadata/aggregation queries (plan, count, verify) — bounded + capped. */
+const LIGHT_SETTINGS: ClickHouseSettings = {
+  max_memory_usage: String(LIGHT_MEMORY_BYTES),
   max_execution_time: MAX_EXEC_SEC,
 };
 
@@ -133,17 +150,33 @@ function sessionPathExpr(date: string, projectId: string): string {
 /** Smallest allowed batch count keeping each PARTITION BY under the mem ceiling. */
 function sliceCountFor(sessions: number): number {
   const want = Math.ceil(sessions / TARGET_SESSIONS_PER_BATCH);
-  return ALLOWED_SLICES.find((n) => n >= want) ?? 16;
+  const n = ALLOWED_SLICES.find((v) => v >= want);
+  if (n === undefined) {
+    // >256*target sessions in one project-day: cap at MAX_SLICES and warn rather
+    // than skip the day (skipping = unarchived data). Per-batch will exceed the
+    // target, but max_memory_usage turns any overshoot into a recoverable error.
+    log(
+      `WARN: ${sessions} sessions > ${MAX_SLICES * TARGET_SESSIONS_PER_BATCH}; capping at ${MAX_SLICES} batches — per-batch exceeds target, watch memory`,
+    );
+    return MAX_SLICES;
+  }
+  return n;
 }
 
 /**
- * Session_id prefixes between slices; n=4 -> ['4','8','c']. The first and last
- * slices are open-ended so a non-UUID session_id still lands in exactly one
- * slice (else it would be exported by none and fail the rowcount check).
+ * Session_id prefixes evenly dividing the hex space into n ranges. Uses 1 hex
+ * char for n<=16 (n=4 -> ['4','8','c']) and 2 chars for finer splits (n=32 ->
+ * ['08','10',...,'f8']). First/last ranges are open-ended in slicePredicate, so
+ * a non-UUID session_id still lands in exactly one batch.
  */
 function sliceBoundaries(n: number): string[] {
-  const step = HEX.length / n;
-  return Array.from({ length: n - 1 }, (_, i) => HEX[(i + 1) * step]!);
+  const chars = n <= 16 ? 1 : 2;
+  const space = 16 ** chars;
+  return Array.from({ length: n - 1 }, (_, i) =>
+    Math.floor(((i + 1) * space) / n)
+      .toString(16)
+      .padStart(chars, '0'),
+  );
 }
 
 /** WHERE fragment selecting slice `i` of `n`. */
@@ -213,7 +246,7 @@ async function planProjects(day: DayPlan): Promise<ProjectPlan[]> {
       WHERE toYYYYMMDD(started_at) = ${day.dayInt}
       GROUP BY project_id
       ORDER BY project_id`,
-    { max_execution_time: MAX_EXEC_SEC },
+    LIGHT_SETTINGS,
   );
   return rows.map((r) => {
     const n = Number(r.rows);
@@ -240,7 +273,7 @@ async function indexedChunksForSlice(
       WHERE dt = toDate('${day.date}')
         AND project_id = '${esc(p.projectId)}'
         AND ${slicePredicate(p.slices, i)}`,
-    { max_execution_time: MAX_EXEC_SEC },
+    LIGHT_SETTINGS,
   );
   return Number(row?.n ?? 0);
 }
@@ -255,7 +288,7 @@ async function countSlice(
       WHERE toYYYYMMDD(started_at) = ${day.dayInt}
         AND project_id = '${esc(p.projectId)}'
         AND ${slicePredicate(p.slices, i)}`,
-    { max_execution_time: MAX_EXEC_SEC },
+    LIGHT_SETTINGS,
   );
   return Number(row?.n ?? 0);
 }
@@ -303,12 +336,16 @@ async function populateSliceIndex(
 ): Promise<void> {
   const profileSelect = ENRICH_PROFILE ? 'any(e.profile_id)' : `''`;
   const profileJoin = ENRICH_PROFILE
-    ? `LEFT JOIN (
+    ? // Scope to the batch's session_id range too — otherwise this aggregates
+      // the whole day's events once per batch (redundant + memory-heavy on big
+      // days). Events outside the range can't match the outer join anyway.
+      `LEFT JOIN (
          SELECT session_id, argMax(profile_id, created_at) AS profile_id
            FROM events
           WHERE toYYYYMMDD(created_at) = ${day.dayInt}
             AND project_id = '${esc(p.projectId)}'
             AND session_id != ''
+            AND ${slicePredicate(p.slices, i)}
           GROUP BY session_id
        ) e ON c.session_id = e.session_id`
     : '';
@@ -343,7 +380,7 @@ async function archiveProject(day: DayPlan, p: ProjectPlan): Promise<boolean> {
       log(`    batch ${i}: empty, skipped`);
       continue;
     }
-    if ((await indexedChunksForSlice(day, p, i)) === expected) {
+    if (!REARCHIVE && (await indexedChunksForSlice(day, p, i)) === expected) {
       log(`    batch ${i}: already archived (${expected} chunks), skipped`);
       continue;
     }
@@ -361,18 +398,45 @@ async function archiveProject(day: DayPlan, p: ProjectPlan): Promise<boolean> {
 }
 
 async function verifyDay(day: DayPlan): Promise<boolean> {
-  // Match only per-session blobs — a `s=<n>.native.zst` slice blob from an
-  // earlier run would otherwise be double-counted during the transition.
-  const blobN = await countBlob(`dt=${day.date}/**/session_id=*.native.zst`);
+  // Gate: everything we indexed for this day must equal the source. Both count
+  // physical day-N chunks (populateSliceIndex filters started_at to the day), so
+  // they match even for midnight-crossing sessions. This is a cheap aggregate —
+  // NOT a re-read of every per-session blob, which re-downloads the whole day
+  // (tens of GiB) and OOM'd the shared server on big days.
+  const [idx] = await chQuery<{ n: string }>(
+    `SELECT sum(chunks) AS n FROM ${INDEX} FINAL WHERE dt = toDate('${day.date}')`,
+    LIGHT_SETTINGS,
+  );
   const [src] = await chQuery<{ n: string }>(
     `SELECT count() AS n FROM ${TABLE} WHERE toYYYYMMDD(started_at) = ${day.dayInt}`,
-    { max_execution_time: MAX_EXEC_SEC },
+    LIGHT_SETTINGS,
   );
+  const idxN = Number(idx?.n ?? -1);
   const srcN = Number(src?.n ?? -2);
-  log(
-    `  verify day: blob=${blobN} ch=${srcN} ${blobN === srcN ? 'OK' : 'MISMATCH'}`,
+  if (idxN !== srcN) {
+    log(`  verify day: index=${idxN} ch=${srcN} MISMATCH`);
+    return false;
+  }
+  // Independent spot-check: actually read a few of the smallest per-session
+  // blobs back and confirm their row counts. Guards against an indexed-but-
+  // unwritten blob without re-reading the whole day. Small reads, capped.
+  const samples = await chQuery<{ blob_path: string; chunks: string }>(
+    `SELECT blob_path, chunks FROM ${INDEX} FINAL
+      WHERE dt = toDate('${day.date}') AND chunks > 0
+      ORDER BY chunks ASC LIMIT ${VERIFY_SAMPLE}`,
+    LIGHT_SETTINGS,
   );
-  return blobN === srcN;
+  for (const s of samples) {
+    const got = await countBlob(s.blob_path);
+    if (got !== Number(s.chunks)) {
+      log(`  verify day: sample ${s.blob_path} blob=${got} idx=${s.chunks} MISMATCH`);
+      return false;
+    }
+  }
+  log(
+    `  verify day: index=${idxN} ch=${srcN} OK (+${samples.length} blob samples)`,
+  );
+  return true;
 }
 
 async function archiveDay(day: DayPlan): Promise<boolean> {
