@@ -1,9 +1,16 @@
 /**
  * archive-replay-chunks — copy `session_replay_chunks` from ClickHouse to Azure
- * Blob as Parquet, so replays are kept forever while ClickHouse holds only a
- * rolling hot window. ClickHouse streams the Parquet directly to Blob via the
- * azureBlobStorage() table function, so this script only orchestrates — no
- * replay bytes flow through Node.
+ * Blob as zstd-compressed Native, so replays are kept forever while ClickHouse
+ * holds only a rolling hot window. ClickHouse streams the bytes directly to Blob
+ * via the azureBlobStorage() table function, so this script only orchestrates —
+ * no replay bytes flow through Node.
+ *
+ * Format is ClickHouse Native (not Parquet): replay payloads are fat and uneven
+ * (avg ~850 KB/row, max ~45 MB/row), and Parquet caps a single String column
+ * chunk at 2 GiB (Arrow 32-bit offsets) with no honored byte-based row-group
+ * splitter on this path — so fat slices overflowed one chunk and died. Native
+ * has no per-column cap, streams block-by-block (bounded memory), and self-
+ * describes its schema, so CH reads it straight back from Blob for serving.
  *
  * A day is exported as one blob per (project, session_id-range) slice. Slicing
  * on a session_id range (a prefix of the table's ORDER BY key) lets ClickHouse
@@ -25,54 +32,39 @@ const CONN = process.env.AZURE_BLOB_CONNECTION_STRING || '';
 const SETTLE_DAYS = int('REPLAY_ARCHIVE_SETTLE_DAYS', 2);
 const TARGET_SLICE_GIB = num('REPLAY_ARCHIVE_TARGET_SLICE_GIB', 5);
 const MAX_DAYS_PER_RUN = int('REPLAY_ARCHIVE_MAX_DAYS_PER_RUN', 1);
-const MAX_THREADS = int('REPLAY_ARCHIVE_MAX_THREADS', 2);
-// max_block_size MUST be >= ROW_GROUP_ROWS or the Arrow writer can't split row
-// groups and accumulates the whole slice into one column chunk (see below).
-const MAX_BLOCK_SIZE = int('REPLAY_ARCHIVE_MAX_BLOCK_SIZE', 8192);
+const MAX_THREADS = int('REPLAY_ARCHIVE_MAX_THREADS', 1);
+// Native streams block-by-block, so peak memory ~= max_block_size rows in
+// flight (times threads). Payloads are fat AND cluster (~850 KB/row avg, up to
+// ~45 MB), so a big block lands in a dense region and blows up: 4096 rows hit a
+// ~10 GiB chunk and OOM'd. 512 keeps peak ~1-1.5 GiB — validated on the fattest
+// slice (06-14 s=2, 30 GiB) at 2.51 GiB peak.
+const MAX_BLOCK_SIZE = int('REPLAY_ARCHIVE_MAX_BLOCK_SIZE', 512);
 const MAX_MEMORY_BYTES = int('REPLAY_ARCHIVE_MAX_MEMORY_BYTES', 15_000_000_000);
 const MAX_EXEC_SEC = int('REPLAY_ARCHIVE_MAX_EXEC_SEC', 1800);
-// Rows per Parquet row group. A String column chunk (one row group) can't
-// exceed 2 GiB (Arrow INT32 offsets). Fat payloads (~57 KB/row on 06-14) put a
-// whole slice in one 2.16 GB chunk when unsplit. 2048 rows keeps each chunk
-// small (~117 MiB here, well under 2 GiB even for far fatter days).
-const ROW_GROUP_ROWS = int('REPLAY_ARCHIVE_ROW_GROUP_ROWS', 2048);
 const ENRICH_PROFILE = process.env.REPLAY_ARCHIVE_ENRICH_PROFILE !== 'false';
 const DRY_RUN = process.env.REPLAY_ARCHIVE_DRY_RUN === 'true';
 
 const TABLE = 'session_replay_chunks';
 const INDEX = 'replay_archive_index';
+const FORMAT = 'Native'; // no per-column size cap; self-describes its schema
+const COMPRESSION = 'zstd'; // rrweb payloads compress ~10x
 const GiB = 1024 ** 3;
 const MIN_DAY = '2020-01-01'; // floor for clock-skew partition guard
 const HEX = '0123456789abcdef'; // session_id is a lowercase-hex UUIDv4
 const ALLOWED_SLICES = [1, 2, 4, 8, 16] as const; // divisors of 16 (one hex char)
 
-// Avoiding the 2 GiB Parquet array (a String column chunk can't exceed 2^31
-// bytes) needs THREE settings together — verified on the fat-payload slice that
-// killed the backfill (06-14 s=2, ~2.15 GB in one chunk):
-//   1. use_custom_encoder=0 — the CUSTOM encoder ignores row-group size and
-//      builds one giant chunk; only the Arrow writer honors row_group_size.
-//   2. row_group_size (ROWS) small — the actual splitter. bytes-based
-//      row_group_size_bytes is NOT honored here, so it's gone.
-//   3. max_block_size >= row_group_size — a block smaller than the row group
-//      breaks Arrow's splitting and it re-accumulates the whole slice. (This is
-//      why the earlier max_block_size=512 "fix" was in fact the CAUSE.)
 // The client types byte/count settings as string.
 const EXPORT_SETTINGS: ClickHouseSettings = {
   max_threads: MAX_THREADS,
   max_block_size: String(MAX_BLOCK_SIZE),
   max_memory_usage: String(MAX_MEMORY_BYTES),
   max_execution_time: MAX_EXEC_SEC,
-  output_format_parquet_use_custom_encoder: 0,
-  output_format_parquet_row_group_size: String(ROW_GROUP_ROWS),
   azure_truncate_on_insert: 1, // overwrite on retry instead of erroring
-  // Our blob path contains `project_id=<id>`, which ClickHouse would otherwise
-  // read as a Hive partition column that collides with the real project_id in
-  // SELECT * ("columns don't match, 9 vs 8"). We key on the index, not the
-  // path, so Hive partitioning must be off on both write and read.
-  use_hive_partitioning: 0,
 };
 
-/** Reads of azureBlobStorage must also disable Hive partitioning (see above). */
+// Our blob path contains `project_id=<id>`, which ClickHouse would otherwise
+// read as a Hive partition column, adding a phantom column on read. We key on
+// the index, not the path, so Hive partitioning must be off when reading back.
 const READ_SETTINGS: ClickHouseSettings = {
   max_execution_time: MAX_EXEC_SEC,
   use_hive_partitioning: 0,
@@ -112,7 +104,7 @@ function esc(v: string): string {
   return v.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 function blobPath(date: string, projectId: string, slice: number): string {
-  return `dt=${date}/project_id=${projectId}/s=${slice}.parquet`;
+  return `dt=${date}/project_id=${projectId}/s=${slice}.native.zst`;
 }
 
 /** Smallest allowed slice count that keeps each slice under the target size. */
@@ -233,7 +225,7 @@ async function countSlice(
 async function countBlob(path: string): Promise<number> {
   const [row] = await chQuery<{ n: string }>(
     `SELECT count() AS n FROM azureBlobStorage(
-       '${CONN}', '${CONTAINER}', '${path}', 'Parquet')`,
+       '${CONN}', '${CONTAINER}', '${path}', '${FORMAT}', '${COMPRESSION}')`,
     READ_SETTINGS,
   );
   return Number(row?.n ?? -1);
@@ -251,7 +243,7 @@ async function exportSlice(
 ): Promise<void> {
   const query = `
     INSERT INTO FUNCTION azureBlobStorage(
-      '${CONN}', '${CONTAINER}', '${blobPath(day.date, p.projectId, i)}', 'Parquet')
+      '${CONN}', '${CONTAINER}', '${blobPath(day.date, p.projectId, i)}', '${FORMAT}', '${COMPRESSION}')
     SELECT * FROM ${TABLE}
      WHERE toYYYYMMDD(started_at) = ${day.dayInt}
        AND project_id = '${esc(p.projectId)}'
@@ -332,7 +324,7 @@ async function archiveProject(day: DayPlan, p: ProjectPlan): Promise<boolean> {
 }
 
 async function verifyDay(day: DayPlan): Promise<boolean> {
-  const blobN = await countBlob(`dt=${day.date}/**/*.parquet`);
+  const blobN = await countBlob(`dt=${day.date}/**/*.native.zst`);
   const [src] = await chQuery<{ n: string }>(
     `SELECT count() AS n FROM ${TABLE} WHERE toYYYYMMDD(started_at) = ${day.dayInt}`,
     { max_execution_time: MAX_EXEC_SEC },
