@@ -60,6 +60,10 @@ const EXPORT_SETTINGS: ClickHouseSettings = {
   max_memory_usage: String(MAX_MEMORY_BYTES),
   max_execution_time: MAX_EXEC_SEC,
   azure_truncate_on_insert: 1, // overwrite on retry instead of erroring
+  // The blob path contains `project_id=<id>`; without this, CH reads it as a
+  // Hive partition and invents a 9th column on write ("9 and 8"). Needed on
+  // BOTH write (here) and read (READ_SETTINGS).
+  use_hive_partitioning: 0,
 };
 
 // Our blob path contains `project_id=<id>`, which ClickHouse would otherwise
