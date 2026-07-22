@@ -26,10 +26,16 @@ const SETTLE_DAYS = int('REPLAY_ARCHIVE_SETTLE_DAYS', 2);
 const TARGET_SLICE_GIB = num('REPLAY_ARCHIVE_TARGET_SLICE_GIB', 5);
 const MAX_DAYS_PER_RUN = int('REPLAY_ARCHIVE_MAX_DAYS_PER_RUN', 1);
 const MAX_THREADS = int('REPLAY_ARCHIVE_MAX_THREADS', 2);
-const MAX_BLOCK_SIZE = int('REPLAY_ARCHIVE_MAX_BLOCK_SIZE', 512);
+// max_block_size MUST be >= ROW_GROUP_ROWS or the Arrow writer can't split row
+// groups and accumulates the whole slice into one column chunk (see below).
+const MAX_BLOCK_SIZE = int('REPLAY_ARCHIVE_MAX_BLOCK_SIZE', 8192);
 const MAX_MEMORY_BYTES = int('REPLAY_ARCHIVE_MAX_MEMORY_BYTES', 15_000_000_000);
 const MAX_EXEC_SEC = int('REPLAY_ARCHIVE_MAX_EXEC_SEC', 1800);
-const ROW_GROUP_BYTES = int('REPLAY_ARCHIVE_ROW_GROUP_BYTES', 64 * 1024 * 1024);
+// Rows per Parquet row group. A String column chunk (one row group) can't
+// exceed 2 GiB (Arrow INT32 offsets). Fat payloads (~57 KB/row on 06-14) put a
+// whole slice in one 2.16 GB chunk when unsplit. 2048 rows keeps each chunk
+// small (~117 MiB here, well under 2 GiB even for far fatter days).
+const ROW_GROUP_ROWS = int('REPLAY_ARCHIVE_ROW_GROUP_ROWS', 2048);
 const ENRICH_PROFILE = process.env.REPLAY_ARCHIVE_ENRICH_PROFILE !== 'false';
 const DRY_RUN = process.env.REPLAY_ARCHIVE_DRY_RUN === 'true';
 
@@ -40,19 +46,24 @@ const MIN_DAY = '2020-01-01'; // floor for clock-skew partition guard
 const HEX = '0123456789abcdef'; // session_id is a lowercase-hex UUIDv4
 const ALLOWED_SLICES = [1, 2, 4, 8, 16] as const; // divisors of 16 (one hex char)
 
-// The 64 MiB row-group cap bounds peak memory (~3 GiB). It does NOT bound the
-// 2 GiB Arrow array limit — that array is built per block, so on fat-payload
-// days a 512-row block can exceed 2^31 bytes (measured: 06-14 hit 2.16 GB,
-// ~4.2 MB/row). The custom Parquet encoder splits such arrays internally; the
-// Arrow writer (used when this is off) throws "array cannot contain more than
-// 2147483646 bytes". So it MUST be on. The client types byte/count as string.
+// Avoiding the 2 GiB Parquet array (a String column chunk can't exceed 2^31
+// bytes) needs THREE settings together — verified on the fat-payload slice that
+// killed the backfill (06-14 s=2, ~2.15 GB in one chunk):
+//   1. use_custom_encoder=0 — the CUSTOM encoder ignores row-group size and
+//      builds one giant chunk; only the Arrow writer honors row_group_size.
+//   2. row_group_size (ROWS) small — the actual splitter. bytes-based
+//      row_group_size_bytes is NOT honored here, so it's gone.
+//   3. max_block_size >= row_group_size — a block smaller than the row group
+//      breaks Arrow's splitting and it re-accumulates the whole slice. (This is
+//      why the earlier max_block_size=512 "fix" was in fact the CAUSE.)
+// The client types byte/count settings as string.
 const EXPORT_SETTINGS: ClickHouseSettings = {
   max_threads: MAX_THREADS,
   max_block_size: String(MAX_BLOCK_SIZE),
   max_memory_usage: String(MAX_MEMORY_BYTES),
   max_execution_time: MAX_EXEC_SEC,
-  output_format_parquet_row_group_size_bytes: String(ROW_GROUP_BYTES),
-  output_format_parquet_use_custom_encoder: 1, // splits >2 GiB payload arrays
+  output_format_parquet_use_custom_encoder: 0,
+  output_format_parquet_row_group_size: String(ROW_GROUP_ROWS),
   azure_truncate_on_insert: 1, // overwrite on retry instead of erroring
   // Our blob path contains `project_id=<id>`, which ClickHouse would otherwise
   // read as a Hive partition column that collides with the real project_id in
