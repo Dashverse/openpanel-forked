@@ -51,6 +51,11 @@ const MAX_MEMORY_BYTES = int('REPLAY_ARCHIVE_MAX_MEMORY_BYTES', 15_000_000_000);
 const MAX_EXEC_SEC = int('REPLAY_ARCHIVE_MAX_EXEC_SEC', 1800);
 const ENRICH_PROFILE = process.env.REPLAY_ARCHIVE_ENRICH_PROFILE !== 'false';
 const DRY_RUN = process.env.REPLAY_ARCHIVE_DRY_RUN === 'true';
+// Re-archive days even if the index already marks them done. Set only for a
+// one-off re-archive (e.g. migrating slice blobs -> per-session): fresh rows
+// (newer archived_at) supersede the old ones via ReplacingMergeTree FINAL, so
+// the index self-corrects without a DELETE (which the replication wedge blocks).
+const REARCHIVE = process.env.REPLAY_ARCHIVE_REARCHIVE === 'true';
 
 const TABLE = 'session_replay_chunks';
 const INDEX = 'replay_archive_index';
@@ -181,7 +186,7 @@ async function planDays(): Promise<DayPlan[]> {
     if (date < MIN_DAY || date > cutoffStr) continue; // garbage/future or unsettled
     const rows = Number(p.rows);
     if (rows === 0) continue; // TTL husk — nothing to archive
-    if (indexedChunks.get(date) === rows) continue; // fully archived
+    if (!REARCHIVE && indexedChunks.get(date) === rows) continue; // fully archived
     plans.push({
       date,
       dayInt: Number(p.partition),
@@ -397,7 +402,7 @@ async function archiveDay(day: DayPlan): Promise<boolean> {
 async function main(): Promise<void> {
   if (!CONN) throw new Error('AZURE_BLOB_CONNECTION_STRING is required');
   log(
-    `start container=${CONTAINER} settleDays=${SETTLE_DAYS} sessionsPerBatch=${TARGET_SESSIONS_PER_BATCH} maxDays=${MAX_DAYS_PER_RUN} blockSize=${MAX_BLOCK_SIZE} dryRun=${DRY_RUN}`,
+    `start container=${CONTAINER} settleDays=${SETTLE_DAYS} sessionsPerBatch=${TARGET_SESSIONS_PER_BATCH} maxDays=${MAX_DAYS_PER_RUN} blockSize=${MAX_BLOCK_SIZE} rearchive=${REARCHIVE} dryRun=${DRY_RUN}`,
   );
 
   const plans = await planDays();
