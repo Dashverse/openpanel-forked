@@ -84,6 +84,48 @@ for (const buffer of [
   buffer.flushObserver = handleFlushObservation;
 }
 
+// Counts Kafka messages redelivered (at-least-once duplicates) outside of a
+// rebalance — the signature of an offset-handling bug. Should stay flat at 0.
+export const kafkaReprocessedTotal = new client.Counter({
+  name: 'kafka_reprocessed_total',
+  help: 'Kafka messages redelivered outside a rebalance (at-least-once duplicates)',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(kafkaReprocessedTotal);
+
+// Events successfully handed to incomingEvent() from the Kafka consumer.
+// Compare against Event Hubs "IncomingMessages" (portal) to see produce→consume
+// throughput and spot the consumer falling behind during the migration.
+export const kafkaEventsConsumedTotal = new client.Counter({
+  name: 'kafka_events_consumed_total',
+  help: 'Kafka event messages processed by the consumer',
+  labelNames: ['partition'],
+});
+
+// incomingEvent() threw for a Kafka message (logged + acked, at-most-once).
+export const kafkaConsumeErrorsTotal = new client.Counter({
+  name: 'kafka_consume_errors_total',
+  help: 'Kafka events whose incomingEvent handler threw',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(kafkaEventsConsumedTotal);
+register.registerMetric(kafkaConsumeErrorsTotal);
+
+// Consumer lag per partition = broker high-watermark − last committed offset.
+// Azure Event Hubs exposes NO native consumer-lag metric, so we compute it in
+// the consumer from batch.highWatermark. This is the #1 health signal — the
+// Kafka equivalent of GroupMQ's group_events_N_waiting_count. Rising = the
+// consumer is falling behind → scale worker pods.
+export const kafkaConsumerLag = new client.Gauge({
+  name: 'kafka_consumer_lag',
+  help: 'Kafka consumer lag (messages behind the partition high-watermark)',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(kafkaConsumerLag);
+
 queues.forEach((queue) => {
   register.registerMetric(
     new client.Gauge({
