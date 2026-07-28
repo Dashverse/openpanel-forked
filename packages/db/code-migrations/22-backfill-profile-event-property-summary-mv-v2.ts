@@ -159,9 +159,13 @@ export async function up() {
   //     estimated ~6 GiB. Trades 4→8 CPU for ~2× read throughput. Needed
   //     because 4-thread rate (~13K rows/sec) would take 3+ hours per day,
   //     blowing past `max_execution_time`.
-  //   - `max_execution_time=18000` (5h) — safety ceiling. At 8 threads a
-  //     150M-event day should run ~90 min. 5h gives ample slack for peak
-  //     traffic days without letting a stuck query run indefinitely.
+  //   - `max_execution_time=86400` (24h) — safety ceiling. Bumped from 18000
+  //     (5h) after the 2026-07-24 → 2026-07-27 run where every whole-day INSERT
+  //     hit the 5h server-side timeout under cluster stress (single days
+  //     stretched from ~90min baseline to 5h+ due to failed backfill
+  //     contention). 24h gives comfortable slack even for 1.5-day windows
+  //     (e.g. 07-10 12:00 → 07-12 00:00) without letting a stuck query run
+  //     indefinitely.
   const insertSql = `
     INSERT INTO default.${NULL_TABLE}
     SELECT * FROM default.events
@@ -173,7 +177,7 @@ export async function up() {
       min_insert_block_size_bytes_for_materialized_views = 10485760,
       min_insert_block_size_rows_for_materialized_views = 1000000,
       optimize_trivial_insert_select = 1,
-      max_execution_time = 18000`;
+      max_execution_time = 86400`;
 
   if (isDry) {
     console.log('\n[DRY RUN] SQL that would execute:');
