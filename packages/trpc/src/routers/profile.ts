@@ -91,6 +91,23 @@ export const profileRouter = createTRPCRouter({
         lastSeenDir: z.enum(['ASC', 'DESC']).optional(),
         lastSeenStart: z.string().nullish(),
         lastSeenEnd: z.string().nullish(),
+        // "did event OP N times" threshold. between/notBetween use value2.
+        eventCount: z
+          .object({
+            operator: z.enum([
+              'eq',
+              'ne',
+              'gt',
+              'gte',
+              'lt',
+              'lte',
+              'between',
+              'notBetween',
+            ]),
+            value: z.number().int().min(0),
+            value2: z.number().int().min(0).optional(),
+          })
+          .optional(),
       }),
     )
     .query(async ({ input }) => {

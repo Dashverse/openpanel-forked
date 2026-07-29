@@ -1,6 +1,21 @@
-import { parseAsString, parseAsStringEnum, useQueryState } from 'nuqs';
+import {
+  parseAsInteger,
+  parseAsString,
+  parseAsStringEnum,
+  useQueryState,
+} from 'nuqs';
 
 const nuqsOptions = { history: 'push' } as const;
+
+export type ProfileCountOp =
+  | 'eq'
+  | 'ne'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'between'
+  | 'notBetween';
 
 /**
  * URL state for the Profiles "Last seen" (created_at) column: sort direction and
@@ -24,6 +39,30 @@ export function useProfilesSort() {
     'seenEnd',
     parseAsString.withOptions(nuqsOptions),
   );
+  // "did event OP N times" threshold for the behavioural filter. Operator +
+  // value(s); value2 is only used by between/notBetween. Only meaningful when an
+  // event is selected. Default (op unset) reads as "at least 1" = no-op.
+  const [countOp, setCountOp] = useQueryState(
+    'countOp',
+    parseAsStringEnum<ProfileCountOp>([
+      'eq',
+      'ne',
+      'gt',
+      'gte',
+      'lt',
+      'lte',
+      'between',
+      'notBetween',
+    ]).withOptions(nuqsOptions),
+  );
+  const [countVal, setCountVal] = useQueryState(
+    'countVal',
+    parseAsInteger.withOptions(nuqsOptions),
+  );
+  const [countVal2, setCountVal2] = useQueryState(
+    'countVal2',
+    parseAsInteger.withOptions(nuqsOptions),
+  );
 
   return {
     dir,
@@ -35,5 +74,11 @@ export function useProfilesSort() {
       setSeenStart(start);
       setSeenEnd(end);
     },
+    countOp,
+    setCountOp,
+    countVal,
+    setCountVal,
+    countVal2,
+    setCountVal2,
   };
 }

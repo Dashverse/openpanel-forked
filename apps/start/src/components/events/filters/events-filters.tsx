@@ -12,7 +12,19 @@ import type { ReactNode } from 'react';
 import { CohortFilterRow } from './cohort-filter-row';
 import { FilterRow } from './filter-row';
 
-export function EventsFilters({ rangeSlot }: { rangeSlot?: ReactNode } = {}) {
+export function EventsFilters({
+  rangeSlot,
+  // Label above the event picker. Defaults to "Select event"; the Profiles page
+  // overrides it to "Profiles who did" (Mixpanel-style phrasing).
+  eventLabel = 'Select event',
+  // Rendered inline right after the event combobox — the Profiles page puts the
+  // "≥ N times" threshold control here.
+  afterEventSlot,
+}: {
+  rangeSlot?: ReactNode;
+  eventLabel?: string;
+  afterEventSlot?: ReactNode;
+} = {}) {
   const { projectId } = useAppParams();
   const [filters, setFilter, , removeFilter] = useEventQueryFilters();
   const [events, setEvents] = useEventQueryNamesFilter();
@@ -29,23 +41,26 @@ export function EventsFilters({ rangeSlot }: { rangeSlot?: ReactNode } = {}) {
     <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
       <div className="flex flex-col gap-1.5">
         <span className="text-[10px] font-semibold uppercase text-muted-foreground">
-          Select event
+          {eventLabel}
         </span>
         <div className="flex items-center justify-between gap-2">
-          <ComboboxEvents
-            size="sm"
-            className="w-full max-w-xs"
-            value={events}
-            onChange={setEvents}
-            multiple
-            items={eventNames}
-            placeholder="All Events"
-            maxDisplayItems={2}
-            searchable
-            isLoading={isLoading}
-            isError={isError}
-            onRefresh={refetch}
-          />
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <ComboboxEvents
+              size="sm"
+              className="w-full max-w-xs"
+              value={events}
+              onChange={setEvents}
+              multiple
+              items={eventNames}
+              placeholder="All Events"
+              maxDisplayItems={2}
+              searchable
+              isLoading={isLoading}
+              isError={isError}
+              onRefresh={refetch}
+            />
+            {afterEventSlot}
+          </div>
           {rangeSlot}
         </div>
       </div>

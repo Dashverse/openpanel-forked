@@ -71,7 +71,7 @@ export function useColumns(type: 'profiles' | 'power-users') {
       header: type === 'profiles' ? () => <LastSeenHeader /> : 'Last seen',
       size: ColumnCreatedAt.size,
       cell: ({ row }) => (
-        <ColumnCreatedAt>{row.original.createdAt}</ColumnCreatedAt>
+        <ColumnCreatedAt exact>{row.original.createdAt}</ColumnCreatedAt>
       ),
     },
     {

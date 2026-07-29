@@ -64,6 +64,7 @@ export const TABLE_NAMES = {
   cohort_metadata: 'cohort_metadata',
   profile_event_summary_mv: 'profile_event_summary_mv',
   profile_event_property_summary_mv: 'profile_event_property_summary_mv',
+  profile_event_property_summary_v2: 'profile_event_property_summary_v2',
   session_replay_chunks: 'session_replay_chunks',
 };
 
@@ -110,8 +111,20 @@ function getClickhouseSettings(): ClickHouseSettings {
       ? rawQueryLimit
       : undefined;
 
+  // Hard default read timeout. Without this, a read query with no per-query
+  // max_execution_time runs UNBOUNDED — a Profiles "did event X" behavioral
+  // filter (id IN (SELECT … FROM events …) + FINAL) ran 45 min from a laptop
+  // against prod CH (public IP, avnadmin), peaking 3.5 GB and spiking cluster
+  // CPU, because nothing capped it. This floor caps every read via this client.
+  // Inserts override to 300 in the `insert` proxy; a per-query max_execution_time
+  // still wins for legitimately long reads; prod CLICKHOUSE_SETTINGS can override.
+  const rawMaxExec = process.env.CLICKHOUSE_MAX_EXECUTION_TIME?.trim();
+  const maxExecutionTime =
+    rawMaxExec && Number.isFinite(Number(rawMaxExec)) ? Number(rawMaxExec) : 60;
+
   return {
     date_time_input_format: 'best_effort',
+    max_execution_time: maxExecutionTime,
     ...(queryLimit ? { max_concurrent_queries_for_user: queryLimit } : {}),
     ...(!process.env.CLICKHOUSE_SETTINGS_REMOVE_CONVERT_ANY_JOIN
       ? {

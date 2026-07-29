@@ -44,7 +44,7 @@ export function LastSeenRange() {
             {label(seenStart!)} → {label(seenEnd!)}
           </span>
         ) : (
-          'Last seen: All time'
+          'Last 15 days'
         )}
       </LastSeenPicker>
       {active && (
