@@ -1,10 +1,8 @@
 import { ProjectLink } from '@/components/links';
 import { SerieIcon } from '@/components/report-chart/common/serie-icon';
 import { useProfilesSort } from '@/hooks/use-profiles-sort';
-import { formatDateTime, formatTime } from '@/utils/date';
 import { getProfileName } from '@/utils/getters';
 import type { ColumnDef } from '@tanstack/react-table';
-import { isToday } from 'date-fns';
 import { ArrowDownIcon, ArrowUpIcon } from 'lucide-react';
 
 import type { IServiceProfile } from '@openpanel/db';

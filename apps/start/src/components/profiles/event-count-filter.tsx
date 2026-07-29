@@ -52,10 +52,14 @@ export function EventCountFilter({
         ))}
       </select>
       <input
-        type="number"
-        min={0}
+        type="text"
+        inputMode="numeric"
         value={value}
-        onChange={(e) => onValueChange(Math.max(0, Number(e.target.value) || 0))}
+        onChange={(e) =>
+          onValueChange(
+            Math.max(0, Number(e.target.value.replace(/[^0-9]/g, '')) || 0),
+          )
+        }
         className={inputCls}
         aria-label="Number of times"
       />
@@ -63,11 +67,13 @@ export function EventCountFilter({
         <>
           <span>and</span>
           <input
-            type="number"
-            min={0}
+            type="text"
+            inputMode="numeric"
             value={value2}
             onChange={(e) =>
-              onValue2Change(Math.max(0, Number(e.target.value) || 0))
+              onValue2Change(
+                Math.max(0, Number(e.target.value.replace(/[^0-9]/g, '')) || 0),
+              )
             }
             className={inputCls}
             aria-label="Upper bound"

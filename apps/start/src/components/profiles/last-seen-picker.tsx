@@ -73,8 +73,19 @@ export function LastSeenPicker({
 
   const sync = () => {
     setMode(startDate && !endDate ? 'since' : 'fixed');
-    setFrom(parseDb(startDate));
-    setTo(parseDb(endDate));
+    const f = parseDb(startDate);
+    const t = parseDb(endDate);
+    setFrom(f);
+    setTo(t);
+    // Restore the time toggle from the incoming bounds — otherwise reopening a
+    // saved hour-precise window shows date-only fields and Apply silently widens
+    // it to full days (00:00:00 / 23:59:59).
+    const startHasTime =
+      !!f && (f.getHours() !== 0 || f.getMinutes() !== 0 || f.getSeconds() !== 0);
+    const endHasTime =
+      !!t &&
+      !(t.getHours() === 23 && t.getMinutes() === 59 && t.getSeconds() === 59);
+    setEnableTime(startHasTime || endHasTime);
   };
 
   const canApply = mode === 'fixed' ? !!from && !!to : !!from;
