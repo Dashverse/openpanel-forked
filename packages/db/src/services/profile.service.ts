@@ -393,6 +393,7 @@ function buildBehavioralV2Subquery(
   startDate: string | null | undefined,
   endDate: string | null | undefined,
   tz: string,
+  eventCount: IProfileEventCount | undefined,
 ): string {
   const where = buildBehavioralV2WhereClause(
     projectId,
@@ -403,6 +404,14 @@ function buildBehavioralV2Subquery(
     endDate,
     tz,
   );
+  // Apply the same exact-window clamp + count threshold as the two-step path, so
+  // the search+behavioral list (which routes through here, not the two-step)
+  // matches the count and honours "OP N times". Without a HAVING, a plain
+  // DISTINCT is enough and cheaper.
+  const having = buildBehavioralV2Having(startDate, endDate, tz, eventCount);
+  if (having) {
+    return `SELECT profile_id FROM ${TABLE_NAMES.profile_event_property_summary_v2} WHERE ${where} GROUP BY profile_id ${having}`;
+  }
   return `SELECT DISTINCT profile_id FROM ${TABLE_NAMES.profile_event_property_summary_v2} WHERE ${where}`;
 }
 
@@ -539,9 +548,16 @@ function eventFilterClauses(filters: IChartEventFilter[]): string[] {
   const out: string[] = [];
   for (const f of filters) {
     if (!f.name || !f.value?.length) continue;
-    const col = f.name.startsWith('properties.')
-      ? `properties[${sqlstring.escape(f.name.replace(/^properties\./, ''))}]`
-      : f.name;
+    let col: string;
+    if (f.name.startsWith('properties.')) {
+      col = `properties[${sqlstring.escape(f.name.replace(/^properties\./, ''))}]`;
+    } else {
+      // Bare event column (country/os/path/…). It's a SQL identifier, not a
+      // string literal, so it can't be sqlstring.escape'd — reject anything that
+      // isn't a plain identifier to block injection via a crafted filter name.
+      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(f.name)) continue;
+      col = f.name;
+    }
     const inList = f.value.map((v) => sqlstring.escape(String(v))).join(',');
     if (f.operator === 'isNot') {
       out.push(`${col} NOT IN (${inList})`);
@@ -702,7 +718,10 @@ export async function getProfileList({
     } else if (opts.searchMode === 'fuzzy') {
       // Substring name/email search. ILIKE '%x%' can't use any index (the bloom
       // filters only help exact/token matches), so it scans — inherently slow.
-      sb.where.search = `(email ILIKE '%${search}%' OR first_name ILIKE '%${search}%' OR last_name ILIKE '%${search}%')`;
+      // Escape the user input: sqlstring.escape wraps + escapes so a crafted
+      // `search` can't break out of the string literal (SQL injection).
+      const like = sqlstring.escape(`%${search}%`);
+      sb.where.search = `(email ILIKE ${like} OR first_name ILIKE ${like} OR last_name ILIKE ${like})`;
     }
     if (isExternal !== undefined) {
       sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
@@ -718,7 +737,7 @@ export async function getProfileList({
       // either way, so "Last seen" (profiles.created_at) and sorting are
       // unchanged. Falls back to events for anything v2 can't serve.
       if (canRouteBehavioralToV2(projectId, filters ?? [], range, startDate)) {
-        sb.where.behavioral = `id IN (${buildBehavioralV2Subquery(projectId, eventNames, filters ?? [], range, startDate, endDate, tz)})`;
+        sb.where.behavioral = `id IN (${buildBehavioralV2Subquery(projectId, eventNames, filters ?? [], range, startDate, endDate, tz, eventCount)})`;
       } else {
         const names = eventNames.map((e) => sqlstring.escape(e)).join(',');
         const parts = [
@@ -924,7 +943,9 @@ export async function getProfileListCount({
   sb.where.project_id = `project_id = ${sqlstring.escape(projectId)}`;
   sb.groupBy.project_id = 'project_id';
   if (search) {
-    sb.where.search = `(email ILIKE '%${search}%' OR first_name ILIKE '%${search}%' OR last_name ILIKE '%${search}%')`;
+    // Escape user input — see getProfileList fuzzy branch (SQL injection).
+    const like = sqlstring.escape(`%${search}%`);
+    sb.where.search = `(email ILIKE ${like} OR first_name ILIKE ${like} OR last_name ILIKE ${like})`;
   }
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;

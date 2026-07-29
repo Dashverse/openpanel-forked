@@ -24,6 +24,17 @@ interface Props {
 
 const DATE_FMT = 'MMM d, yyyy';
 const DATETIME_FMT = 'MMM d, yyyy, hh:mm a';
+const DB_FMT = 'yyyy-MM-dd HH:mm:ss';
+
+// Parse a persisted DB-format string with date-fns (not `new Date(...)`, which
+// is browser-dependent for space-separated `yyyy-MM-dd HH:mm:ss` — Safari yields
+// Invalid Date). Returns undefined for null/invalid so the picker stays empty
+// rather than showing NaN.
+function parseDb(s: string | null): Date | undefined {
+  if (!s) return undefined;
+  const d = parse(s, DB_FMT, new Date());
+  return isValid(d) ? d : undefined;
+}
 
 // Copy a calendar-picked day onto an existing datetime, preserving the time
 // (react-day-picker returns midnight). Falls back to a default HH:mm.
@@ -56,18 +67,14 @@ export function LastSeenPicker({
   const [mode, setMode] = useState<Mode>(
     startDate && !endDate ? 'since' : 'fixed',
   );
-  const [from, setFrom] = useState<Date | undefined>(
-    startDate ? new Date(startDate) : undefined,
-  );
-  const [to, setTo] = useState<Date | undefined>(
-    endDate ? new Date(endDate) : undefined,
-  );
+  const [from, setFrom] = useState<Date | undefined>(parseDb(startDate));
+  const [to, setTo] = useState<Date | undefined>(parseDb(endDate));
   const [enableTime, setEnableTime] = useState(false);
 
   const sync = () => {
     setMode(startDate && !endDate ? 'since' : 'fixed');
-    setFrom(startDate ? new Date(startDate) : undefined);
-    setTo(endDate ? new Date(endDate) : undefined);
+    setFrom(parseDb(startDate));
+    setTo(parseDb(endDate));
   };
 
   const canApply = mode === 'fixed' ? !!from && !!to : !!from;

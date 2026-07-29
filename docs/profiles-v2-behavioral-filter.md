@@ -131,14 +131,12 @@ count above the identified-only base.
 
 - `PROFILES_BEHAVIORAL_V2_PROJECTS` — comma-separated allowlist (per-project rollout).
 - `PROFILES_BEHAVIORAL_V2_START_DATE` — earliest window start v2 may serve.
-- `CLICKHOUSE_MAX_EXECUTION_TIME` — app CH client cap (default 60 s) so a stray
-  read can't run for minutes. Prod's `CLICKHOUSE_SETTINGS` (40 s) still wins.
 
 ## Files
 
 - `packages/db/src/services/profile.service.ts` — routing, two-step, clamp,
   operators, count.
-- `packages/db/src/clickhouse/client.ts` — v2 in `TABLE_NAMES`; `max_execution_time`.
+- `packages/db/src/clickhouse/client.ts` — v2 in `TABLE_NAMES`.
 - `packages/trpc/src/routers/profile.ts` — `eventCount` input.
 - `apps/start/.../profiles._tabs.identified.tsx` — query wiring, 15-day default,
   all-profiles (no is_external).
