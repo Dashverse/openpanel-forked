@@ -644,6 +644,75 @@ async function getBehavioralV2ProfileList(opts: {
   });
 }
 
+// Two-step behavioural list on the RAW events table — the fallback for anything
+// v2 can't serve (name-only, multi-key, non-allowlisted). Same shape as the v2
+// two-step: rank profiles by the exact last-event time (max(created_at)) INSIDE
+// events, LIMIT to one page, then hydrate. Two wins over the old buildSql path:
+//  1. "Last seen" = the real last EVENT time (not profiles.created_at, which is
+//     the profile-record write time and can be months stale).
+//  2. It never feeds a huge id-set into `profiles FINAL` — it ranks+limits in
+//     events first, then hydrates only 50 ids (the old path did
+//     `profiles FINAL WHERE id IN (every doer)` → ~20s on a high-volume event).
+async function getBehavioralEventsProfileList(opts: {
+  projectId: string;
+  eventNames: string[];
+  eventFilters: IChartEventFilter[];
+  range: string | undefined;
+  startDate: string | null | undefined;
+  endDate: string | null | undefined;
+  tz: string;
+  take: number;
+  offset: number;
+  orderDir: 'ASC' | 'DESC';
+  eventCount?: IProfileEventCount;
+}): Promise<IServiceProfile[]> {
+  const names = opts.eventNames.map((e) => sqlstring.escape(e)).join(',');
+  const parts = [
+    `project_id = ${sqlstring.escape(opts.projectId)}`,
+    `name IN (${names})`,
+    behavioralTimeClause(opts.range, opts.startDate, opts.endDate, opts.tz),
+    ...eventFilterClauses(opts.eventFilters),
+  ];
+  const countClause = countHavingClause('count()', opts.eventCount);
+
+  // Step 1 — rank in events by the last event time, one page only.
+  const ranked = await chQuery<{ profile_id: string; last_seen: string }>(
+    `SELECT profile_id, max(created_at) AS last_seen
+     FROM ${TABLE_NAMES.events}
+     WHERE ${parts.join(' AND ')}
+     GROUP BY profile_id
+     ${countClause ? `HAVING ${countClause}` : ''}
+     ORDER BY last_seen ${opts.orderDir}
+     LIMIT ${opts.take} OFFSET ${opts.offset}`,
+    undefined,
+    true,
+  );
+  if (ranked.length === 0) return [];
+
+  // Step 2 — hydrate this page by id (no FINAL).
+  const ids = ranked.map((r) => r.profile_id);
+  const hydrated = await getProfiles(ids, opts.projectId);
+  const byId = new Map(hydrated.map((p) => [p.id, p]));
+
+  // Step 3 — emit in rank order, "Last seen" = the event's max(created_at).
+  return ranked.map(({ profile_id, last_seen }) => {
+    const createdAt = convertClickhouseDateToJs(last_seen);
+    const p = byId.get(profile_id);
+    if (p) return { ...p, createdAt };
+    return {
+      id: profile_id,
+      email: '',
+      avatar: '',
+      firstName: '',
+      lastName: '',
+      createdAt,
+      isExternal: false,
+      projectId: opts.projectId,
+      properties: {},
+    };
+  });
+}
+
 // v1 event-filter builder for the behavioral subquery. Maps `properties.x` to
 // the events Map and leaves bare event columns (country/os/path/…) as-is.
 function eventFilterClauses(filters: IChartEventFilter[]): string[] {
@@ -758,27 +827,38 @@ export async function getProfileList({
   // last-event time in v2, hydrate the page. "Last seen" becomes the true last
   // time the profile did the event with the property (not profiles.created_at).
   // Search is a separate mode (id/fuzzy) and keeps the subquery-swap path below.
-  // Two-step is v2-only and hydrates by id — it can't also filter by profile
-  // attributes, so a profile.* filter forces the buildSql path below (which
-  // applies profile filters to the outer query).
-  if (
-    !search &&
-    !profileFilters.length &&
-    eventNames?.length &&
-    canRouteBehavioralToV2(projectId, eventFilters, range, startDate)
-  ) {
-    return getBehavioralV2ProfileList({
+  // Behavioural + no search + no profile.* filter → a two-step that ranks by
+  // the exact last-EVENT time and hydrates one page. "Last seen" = event time
+  // on both branches. profile.* filters (need the outer profiles query) and
+  // search (filters profiles) fall through to buildSql below.
+  // `cursor` is already the row offset ((page-1)*take) — do NOT multiply again.
+  const offset = Math.max(0, cursor ?? 0);
+  if (!search && !profileFilters.length && eventNames?.length) {
+    if (canRouteBehavioralToV2(projectId, eventFilters, range, startDate)) {
+      return getBehavioralV2ProfileList({
+        projectId,
+        eventNames,
+        filters: eventFilters,
+        range,
+        startDate,
+        endDate,
+        tz,
+        take,
+        offset,
+        orderDir,
+        eventCount,
+      });
+    }
+    return getBehavioralEventsProfileList({
       projectId,
       eventNames,
-      filters: eventFilters,
+      eventFilters,
       range,
       startDate,
       endDate,
       tz,
       take,
-      // `cursor` is already the row offset ((page-1)*take from the client) — do
-      // NOT multiply again (that was OFFSET (page-1)*take*take = empty pages).
-      offset: Math.max(0, cursor ?? 0),
+      offset,
       orderDir,
       eventCount,
     });
