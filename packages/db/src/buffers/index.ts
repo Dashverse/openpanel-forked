@@ -9,3 +9,11 @@ export const profileBuffer = new ProfileBufferRedis();
 export const botBuffer = new BotBufferRedis();
 export const sessionBuffer = new SessionBuffer();
 export const replayBuffer = new ReplayBuffer();
+
+// Re-export flush observer types so the worker can bridge them into Prometheus.
+export type {
+  FlushObservation,
+  FlushObserver,
+  FlushPhaseTimings,
+  FlushTrigger,
+} from './base-buffer';

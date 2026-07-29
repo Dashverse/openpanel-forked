@@ -601,6 +601,10 @@ return added
     });
   }
 
+  public async getBufferBytes() {
+    return (await this.redis.memory('USAGE', this.queueKey)) ?? 0;
+  }
+
   /**
    * Track active visitors using ZADD only.
    *

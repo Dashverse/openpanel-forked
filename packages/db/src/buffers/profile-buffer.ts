@@ -283,6 +283,10 @@ export class ProfileBuffer extends BaseBuffer {
     return this.getBufferSizeWithCounter(() => this.redis.llen(this.redisKey));
   }
 
+  async getBufferBytes() {
+    return (await this.redis.memory('USAGE', this.redisKey)) ?? 0;
+  }
+
   /**
    * Creates a _firstSeen event when a new profile is detected
    * This event only fires once per user in their entire journey
