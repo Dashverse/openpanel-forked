@@ -20,7 +20,12 @@ function label(db: string): string {
  * calendar date-range popover with hour precision (withTime) for a consistent
  * UX. Null by default (no bound); a Clear button removes it.
  */
-export function LastSeenRange() {
+export function LastSeenRange({
+  // Label shown when the user hasn't picked an explicit range. Reflects the
+  // effective default: "Last 15 days" when an event is selected, "All time"
+  // otherwise.
+  emptyLabel = 'Last 15 days',
+}: { emptyLabel?: string } = {}) {
   const { seenStart, seenEnd, setSeenRange } = useProfilesSort();
   const active = !!(seenStart && seenEnd);
 
@@ -44,7 +49,7 @@ export function LastSeenRange() {
             {label(seenStart!)} → {label(seenEnd!)}
           </span>
         ) : (
-          'Last 15 days'
+          emptyLabel
         )}
       </LastSeenPicker>
       {active && (

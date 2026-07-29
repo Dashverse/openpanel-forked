@@ -62,18 +62,19 @@ function Component() {
     [filters],
   );
 
-  // Default the "Last seen" window to the last 15 days (ending now) when the
-  // user hasn't picked one. A window ending *now* keeps last-seen times real —
-  // v2's day-granular last-event only reads oddly for windows ending mid-day in
-  // the past. Stable per mount so it doesn't churn the query key.
+  const hasEvent = events.some((e) => e && e !== '*');
+
+  // Mixpanel-style default window (stable per mount): when an event is selected,
+  // default to the last 15 days (a "who did X" question is naturally time-bound
+  // and this keeps last-seen times real). With NO event ("All Events"), default
+  // to ALL TIME — the plain profile list shouldn't hide older profiles. An
+  // explicit pick (seenStart/seenEnd) always wins over both.
   const [defaultWindow] = useState(() => ({
     start: format(subDays(new Date(), 15), DB_FORMAT),
     end: format(new Date(), DB_FORMAT),
   }));
-  const rangeStart = seenStart ?? defaultWindow.start;
-  const rangeEnd = seenEnd ?? defaultWindow.end;
-
-  const hasEvent = events.some((e) => e && e !== '*');
+  const rangeStart = seenStart ?? (hasEvent ? defaultWindow.start : null);
+  const rangeEnd = seenEnd ?? (hasEvent ? defaultWindow.end : null);
 
   // Build the "did event OP N times" payload. Only sent when an event is
   // selected; a missing operator defaults to "at least 1" (server treats as
@@ -131,38 +132,39 @@ function Component() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Count (Mixpanel-style, top-left) + the "Last seen" window control on
-          the right. Skeleton while (re)fetching so the count tracks the filter. */}
-      <div className="flex h-7 items-center justify-between gap-2">
-        <div className="flex items-baseline gap-1.5 tabular-nums">
-          {query.isFetching ? (
-            <span className="h-6 w-40 self-center animate-pulse rounded bg-muted" />
-          ) : typeof count === 'number' ? (
-            <>
-              <span className="text-lg font-semibold text-foreground">
-                {count.toLocaleString()}
-              </span>
-              <span className="text-sm font-medium text-muted-foreground">
-                profiles
-              </span>
-            </>
-          ) : null}
-        </div>
-        <LastSeenRange />
+      {/* Count (Mixpanel-style, top-left). Skeleton while (re)fetching so the
+          count tracks the filter. The date control lives inline in the
+          condition card below (next to the event), Mixpanel-style. */}
+      <div className="flex h-7 items-center gap-1.5 tabular-nums">
+        {query.isFetching ? (
+          <span className="h-6 w-40 self-center animate-pulse rounded bg-muted" />
+        ) : typeof count === 'number' ? (
+          <>
+            <span className="text-lg font-semibold text-foreground">
+              {count.toLocaleString()}
+            </span>
+            <span className="text-sm font-medium text-muted-foreground">
+              profiles
+            </span>
+          </>
+        ) : null}
       </div>
       <EventsFilters
         eventLabel="Profiles who did"
         afterEventSlot={
-          hasEvent ? (
-            <EventCountFilter
-              operator={op}
-              value={val}
-              value2={val2}
-              onOperatorChange={setCountOp}
-              onValueChange={setCountVal}
-              onValue2Change={setCountVal2}
-            />
-          ) : null
+          <div className="flex items-center gap-2">
+            {hasEvent ? (
+              <EventCountFilter
+                operator={op}
+                value={val}
+                value2={val2}
+                onOperatorChange={setCountOp}
+                onValueChange={setCountVal}
+                onValue2Change={setCountVal2}
+              />
+            ) : null}
+            <LastSeenRange emptyLabel={hasEvent ? 'Last 15 days' : 'All time'} />
+          </div>
         }
       />
       <ProfilesTable type="profiles" query={query} />
