@@ -386,6 +386,17 @@ function operatorClause(
 const isProfileFilter = (f: IChartEventFilter) =>
   !!f.name?.startsWith('profile.');
 
+// Bare `profile.*` columns allowed as filter names (everything else must be a
+// `profile.properties.*` map key). Allowlisted for the same reason as
+// EVENT_FILTER_COLUMNS — a bare name is a raw identifier.
+const PROFILE_FILTER_COLUMNS = new Set([
+  'id',
+  'email',
+  'first_name',
+  'last_name',
+  'is_external',
+]);
+
 function profileAttrFilterClauses(filters: IChartEventFilter[]): string[] {
   const out: string[] = [];
   for (const f of filters) {
@@ -395,7 +406,7 @@ function profileAttrFilterClauses(filters: IChartEventFilter[]): string[] {
       col = `properties[${sqlstring.escape(f.name.replace('profile.properties.', ''))}]`;
     } else {
       const bare = f.name.replace(/^profile\./, '');
-      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(bare)) continue;
+      if (!PROFILE_FILTER_COLUMNS.has(bare)) continue;
       col = bare;
     }
     out.push(operatorClause(col, f.operator, f.value));
@@ -713,8 +724,35 @@ async function getBehavioralEventsProfileList(opts: {
   });
 }
 
+// Known bare event columns allowed as filter names. A bare name is a raw SQL
+// identifier (can't be string-escaped), so an allowlist both blocks injection
+// via a crafted name AND prevents referencing arbitrary/unintended columns.
+// Everything else must be a `properties.*` map key.
+const EVENT_FILTER_COLUMNS = new Set([
+  'name',
+  'country',
+  'city',
+  'region',
+  'os',
+  'os_version',
+  'browser',
+  'browser_version',
+  'device',
+  'brand',
+  'model',
+  'referrer',
+  'referrer_name',
+  'referrer_type',
+  'path',
+  'origin',
+  'duration',
+  'profile_id',
+  'device_id',
+  'session_id',
+]);
+
 // v1 event-filter builder for the behavioral subquery. Maps `properties.x` to
-// the events Map and leaves bare event columns (country/os/path/…) as-is.
+// the events Map and leaves allowlisted bare event columns as-is.
 function eventFilterClauses(filters: IChartEventFilter[]): string[] {
   const out: string[] = [];
   for (const f of filters) {
@@ -723,10 +761,8 @@ function eventFilterClauses(filters: IChartEventFilter[]): string[] {
     if (f.name.startsWith('properties.')) {
       col = `properties[${sqlstring.escape(f.name.replace(/^properties\./, ''))}]`;
     } else {
-      // Bare event column (country/os/path/…). It's a SQL identifier, not a
-      // string literal, so it can't be sqlstring.escape'd — reject anything that
-      // isn't a plain identifier to block injection via a crafted filter name.
-      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(f.name)) continue;
+      // Bare event column — must be a known column (see EVENT_FILTER_COLUMNS).
+      if (!EVENT_FILTER_COLUMNS.has(f.name)) continue;
       col = f.name;
     }
     out.push(operatorClause(col, f.operator, f.value));

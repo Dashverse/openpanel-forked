@@ -78,9 +78,11 @@ function Component() {
   // Build the "did event OP N times" payload. Only sent when an event is
   // selected; a missing operator defaults to "at least 1" (server treats as
   // no-op). Stable identity so the query key doesn't churn.
+  // Clamp to non-negative ints — a hand-edited URL (?countVal=-1) would
+  // otherwise send a negative value and 400 on the tRPC min(0) schema.
   const op = countOp ?? 'gte';
-  const val = countVal ?? 1;
-  const val2 = countVal2 ?? val + 1;
+  const val = Math.max(0, Math.floor(countVal ?? 1));
+  const val2 = Math.max(0, Math.floor(countVal2 ?? val + 1));
   const eventCount = useMemo(
     () =>
       hasEvent
