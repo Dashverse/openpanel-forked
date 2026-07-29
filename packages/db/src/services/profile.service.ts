@@ -696,16 +696,20 @@ export async function getProfileList({
     sb.from = `${TABLE_NAMES.profiles} FINAL`;
     sb.select.columns = PROFILE_LIST_COLUMNS;
     sb.where.project_id = `project_id = ${sqlstring.escape(projectId)}`;
+    // Search scans ALL profiles — a name/email/id lookup must find a match
+    // regardless of when they were last seen, so the "Last seen" window (incl.
+    // the 15-day default) does NOT apply while searching.
+    const applyWindow = !opts.searchMode;
     // Prune to the most recent monthly partition(s). The newest profiles are by
     // definition the most recent, so this reads a tiny slice of history instead
     // of every version ever (~114M rows on dashreels).
-    if (opts.recentOnly && !hasSeenRange) {
+    if (opts.recentOnly && !hasSeenRange && applyWindow) {
       sb.where.recent = 'created_at >= now() - INTERVAL 1 MONTH';
     }
     // Explicit last-seen window replaces the implicit month window. Monthly
     // partitioning prunes to the month(s); the BETWEEN narrows within (down to
     // the hour) for free.
-    if (hasSeenRange) {
+    if (hasSeenRange && applyWindow) {
       sb.where.seen = `created_at BETWEEN toDateTime(${sqlstring.escape(lastSeenStart!)}, ${sqlstring.escape(tz)}) AND toDateTime(${sqlstring.escape(lastSeenEnd!)}, ${sqlstring.escape(tz)})`;
     }
     sb.limit = take;
@@ -950,8 +954,10 @@ export async function getProfileListCount({
   if (isExternal !== undefined) {
     sb.where.external = `is_external = ${isExternal ? 'true' : 'false'}`;
   }
-  if (hasSeenRange) {
+  if (hasSeenRange && !search) {
     // Reflect the last-seen window in the count too (partition-pruned, tz-aware).
+    // Skipped while searching: search scans all profiles regardless of window,
+    // so the count must match (see getProfileList).
     sb.where.seen = `created_at BETWEEN toDateTime(${sqlstring.escape(lastSeenStart!)}, ${sqlstring.escape(tz)}) AND toDateTime(${sqlstring.escape(lastSeenEnd!)}, ${sqlstring.escape(tz)})`;
   }
   profilePropertyFilterClauses(filters ?? []).forEach((clause, i) => {
