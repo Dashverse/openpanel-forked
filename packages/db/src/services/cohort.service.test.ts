@@ -16,16 +16,23 @@ import {
   updateCohortMembership,
 } from './cohort.service';
 
-// Mock the ch and db modules
+// Mock the ch and db modules. mockChQuery is created via vi.hoisted so the
+// hoisted vi.mock factory can reference it (a plain top-level const would be
+// initialised AFTER the hoisted factory runs → ReferenceError).
+const { mockChQuery } = vi.hoisted(() => ({ mockChQuery: vi.fn() }));
+
 vi.mock('../clickhouse/client', () => ({
   ch: vi.fn(),
-  chQuery: vi.fn(),
+  chQuery: mockChQuery,
   TABLE_NAMES: {
     events: 'events',
     profiles: 'profiles',
     cohort_members: 'cohort_members',
     cohort_metadata: 'cohort_metadata',
     profile_event_summary_mv: 'profile_event_summary_mv',
+    profile_event_property_summary_mv: 'profile_event_property_summary_mv',
+    profile_event_property_summary_v2: 'profile_event_property_summary_v2',
+    cohort_events_mv: 'cohort_events_mv',
   },
 }));
 
@@ -37,15 +44,6 @@ vi.mock('../prisma-client', () => ({
     },
   },
 }));
-
-const mockChQuery = vi.fn();
-vi.mock('../clickhouse/client', async () => {
-  const actual = await vi.importActual('../clickhouse/client');
-  return {
-    ...actual,
-    chQuery: mockChQuery,
-  };
-});
 
 describe('Cohort Service', () => {
   beforeEach(() => {
@@ -62,7 +60,7 @@ describe('Cohort Service', () => {
               name: 'page_view',
               filters: [],
               timeframe: { type: 'relative', value: '30d' },
-              frequency: { operator: 'gte', value: 1 },
+              frequency: { operator: 'at_least', count: 1 },
             },
           ],
           operator: 'or',
@@ -94,7 +92,7 @@ describe('Cohort Service', () => {
               name: 'purchase',
               filters: [],
               timeframe: { type: 'relative', value: '7d' },
-              frequency: { operator: 'gte', value: 1 },
+              frequency: { operator: 'at_least', count: 1 },
             },
           ],
           operator: 'and',
@@ -111,7 +109,7 @@ describe('Cohort Service', () => {
       expect(result).toEqual(['user1', 'user2']);
       expect(mockChQuery).toHaveBeenCalledTimes(1);
       // Verify INTERSECT is used for AND
-      const query = mockChQuery.mock.calls[0][0];
+      const query = mockChQuery.mock.calls[0]![0];
       expect(query).toContain('INTERSECT');
     });
 
@@ -131,7 +129,7 @@ describe('Cohort Service', () => {
                 },
               ],
               timeframe: { type: 'relative', value: '7d' },
-              frequency: { operator: 'gte', value: 3 },
+              frequency: { operator: 'at_least', count: 3 },
             },
           ],
           operator: 'or',
@@ -154,7 +152,7 @@ describe('Cohort Service', () => {
             {
               name: 'signup',
               filters: [],
-              timeframe: { type: 'absolute', value: '2024-01-01' },
+              timeframe: { type: 'absolute', start: '2024-01-01' },
             },
           ],
           operator: 'or',
@@ -166,7 +164,7 @@ describe('Cohort Service', () => {
       const result = await computeEventBasedCohort('project-123', definition);
 
       expect(result).toEqual(['user1']);
-      const query = mockChQuery.mock.calls[0][0];
+      const query = mockChQuery.mock.calls[0]![0];
       expect(query).toContain('2024-01-01');
     });
   });
@@ -180,7 +178,7 @@ describe('Cohort Service', () => {
             {
               id: 'p1',
               name: 'email',
-              operator: 'isSet',
+              operator: 'isNotNull',
               value: [],
             },
           ],
@@ -267,7 +265,7 @@ describe('Cohort Service', () => {
             {
               id: 'p1',
               name: 'email',
-              operator: 'isSet',
+              operator: 'isNotNull',
               value: [],
             },
           ],
@@ -288,13 +286,14 @@ describe('Cohort Service', () => {
       mockChQuery.mockResolvedValueOnce(undefined);
 
       await storeCohortMembership(
-        'cohort-123',
         'project-123',
+        'cohort-123',
         ['user1', 'user2', 'user3'],
+        1,
       );
 
       expect(mockChQuery).toHaveBeenCalledTimes(1);
-      const query = mockChQuery.mock.calls[0][0];
+      const query = mockChQuery.mock.calls[0]![0];
       expect(query).toContain('cohort_members');
       expect(query).toContain('cohort-123');
       expect(query).toContain('project-123');
@@ -303,7 +302,7 @@ describe('Cohort Service', () => {
     it('should handle empty profile list', async () => {
       mockChQuery.mockResolvedValueOnce(undefined);
 
-      await storeCohortMembership('cohort-123', 'project-123', []);
+      await storeCohortMembership('project-123', 'cohort-123', [], 1);
 
       // Should still execute to clear old members
       expect(mockChQuery).toHaveBeenCalledTimes(1);
