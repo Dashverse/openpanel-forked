@@ -616,7 +616,7 @@ export const chartRouter = createTRPCRouter({
     .query(async ({ input }) => {
       const { timezone } = await getSettingsForProject(input.projectId);
       const { projectId, date, series } = input;
-      const limit = 100;
+      const limit = 1000;
       const serie = series[0];
 
       if (!serie) {
@@ -668,6 +668,12 @@ export const chartRouter = createTRPCRouter({
             `${propertyKey} = ${sqlstring.escape(value)}`;
         });
       }
+
+      // Cap the preview list. The declared `limit` was never applied here, so this
+      // endpoint returned ALL profile_ids for the bucket — on a high-traffic day
+      // getProfilesCached then inlines tens of thousands of ids into the Redis cache
+      // key -> "ERR key name too long" (same crash the funnel view-users hit).
+      sb.limit = limit;
 
       // Get unique profile IDs
       const profileIds = await chQuery<{ profile_id: string }>(getSql());
@@ -738,7 +744,17 @@ export const chartRouter = createTRPCRouter({
           endDate,
         );
 
-      const group = funnelService.resolveFunnelGroup(funnelGroup, fromClause);
+      // Identity-merge: resolve anon profile_id -> canonical via profile_aliases so
+      // the user list keys on the SAME canonical id the count funnel (getFunnel) uses.
+      // Without this, the list emitted raw/session ids that don't match profiles.id,
+      // so getProfilesCached dropped them all -> "No users found" even when the
+      // dropoff count was > 0. Profile-level only (no cohorts in this procedure).
+      const resolveAliases = funnelGroup !== 'session_id';
+      const group = funnelService.resolveFunnelGroup(
+        funnelGroup,
+        fromClause,
+        resolveAliases,
+      );
       const groupedByProfile = group[1] === 'profile_id';
 
       // Create sessions CTE if grouping by profile_id (needs sessions.pid lookup)
@@ -796,6 +812,22 @@ export const chartRouter = createTRPCRouter({
         query.with('sessions', sessionsCte);
       }
 
+      // Identity-merge alias map — mirrors getFunnel (funnel.service.ts:782-791). Join
+      // each event's profile_id to its canonical id so resolveFunnelGroup's coalesce
+      // collapses anon -> identified, yielding real profiles.id values. One scan of
+      // profile_aliases; a no-op for projects with no aliases (coalesce keeps raw id).
+      if (resolveAliases) {
+        funnelCte.leftJoin('al', `al.alias = ${fromClause}.profile_id`);
+        query.with(
+          'al',
+          clix(ch, timezone)
+            .select(['alias', 'argMax(profile_id, created_at) AS canonical'])
+            .from(TABLE_NAMES.alias)
+            .where('project_id', '=', projectId)
+            .groupBy(['alias']),
+        );
+      }
+
       query.with('funnel', funnelCte);
 
       // Get distinct profile IDs
@@ -811,6 +843,12 @@ export const chartRouter = createTRPCRouter({
         // Show users who completed at least this step
         query.where('level', '>=', targetLevel);
       }
+
+      // "View Users" is a preview list — cap it. Large cohorts (e.g. all completers)
+      // returned tens of thousands of ids, which getProfilesCached inlines into the
+      // Redis cache key -> multi-MB key -> "ERR key name too long". Top 1000 for now;
+      // pagination can extend this later.
+      query.limit(1000);
 
       const profileIdsResult = (await query.execute()) as {
         profile_id: string;
