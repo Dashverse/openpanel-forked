@@ -261,6 +261,11 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
               )}
             </div>
           )}
+          {profiles.length >= 1000 && (
+            <p className="mt-2 text-sm text-muted-foreground">
+              Showing the first 1,000 users (preview limit).
+            </p>
+          )}
         </div>
       }
     >
@@ -349,6 +354,11 @@ function FunnelUsersView({ report, stepIndex }: FunnelUsersViewProps) {
                 Dropped Off
               </button>
             </div>
+          )}
+          {profiles.length >= 1000 && (
+            <p className="text-sm text-muted-foreground">
+              Showing the first 1,000 users (preview limit).
+            </p>
           )}
         </div>
       }
