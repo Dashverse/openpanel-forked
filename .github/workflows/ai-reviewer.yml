@@ -1,16 +1,16 @@
-name: Codex Code Review
+name: AI Code Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: codex-review-${{ github.event.pull_request.number }}
+  group: ai-reviewer-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  codex-review:
-    uses: Dashverse/infra/.github/workflows/codex-review.yml@main
+  ai-reviewer:
+    uses: Dashverse/infra/.github/workflows/ai-reviewer.yml@main
     secrets:
       openai_api_key: ${{ secrets.OPENAI_API_KEY }}
       app_id: ${{ secrets.APP_ID }}
