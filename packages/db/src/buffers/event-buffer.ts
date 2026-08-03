@@ -529,6 +529,7 @@ return added
         chunks: Math.ceil(eventsToClickhouse.length / this.chunkSize),
       });
 
+      const chInsertStart = performance.now();
       await Promise.all(
         this.chunks(eventsToClickhouse, this.chunkSize).map((chunk) =>
           ch.insert({
@@ -538,6 +539,18 @@ return added
           })
         )
       );
+
+      // Report the rows actually inserted into ClickHouse so
+      // buffer_rows_inserted_total{buffer="event"} tracks real event-insert
+      // throughput — the SLA number for "events landing in CH per second"
+      // (via rate()). Until now only the replay buffer reported rowsProcessed,
+      // so events reaching CH were invisible in metrics; only the Kafka/GroupMQ
+      // → Redis-buffer half was observable. chInsertMs feeds the flush-duration
+      // histogram's phase breakdown, matching the replay buffer.
+      this.reportFlushStats({
+        rowsProcessed: eventsToClickhouse.length,
+        phases: { chInsertMs: performance.now() - chInsertStart },
+      });
 
       // Publish "saved" events
       const pubMulti = getRedisPub().multi();
