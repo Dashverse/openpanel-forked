@@ -48,11 +48,35 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
     // the reprocess watermarks so legitimate resume-from-committed-offset after
     // a rebalance is not flagged as a duplicate.
     resolvedHWM.clear();
+
+    // Seed the error + reprocess counters at 0 for every partition assigned to
+    // this member. prom-client emits NO time series for a labelled counter
+    // until it is incremented at least once, so on a healthy consumer these two
+    // metrics never appear in /metrics — SigNoz can't graph or alert on a
+    // metric it has never received. Partitions are known here at join time, so
+    // `.inc(…, 0)` (a no-op on the value) materialises the series immediately:
+    // panels render every partition at 0 and alerts sit in "OK" rather than
+    // "No Data" until a real error/duplicate bumps them. Stale 0-series for a
+    // partition later reassigned elsewhere are harmless — summed across pods the
+    // owning pod's real value still wins.
+    const assignment = (payload.memberAssignment?.[KAFKA_EVENTS_TOPIC] ?? []) as
+      | number[]
+      | Record<string, number>;
+    const partitions = Array.isArray(assignment)
+      ? assignment
+      : Object.values(assignment);
+    for (const partition of partitions) {
+      const p = String(partition);
+      kafkaConsumeErrorsTotal.inc({ partition: p }, 0);
+      kafkaReprocessedTotal.inc({ partition: p }, 0);
+    }
+
     logger.info('kafka consumer joined group (rebalance complete)', {
       memberId: payload.memberId,
       groupId: payload.groupId,
       isLeader: payload.isLeader,
       memberAssignment: payload.memberAssignment,
+      partitionsSeeded: partitions.length,
       duration: payload.duration,
     });
   });
