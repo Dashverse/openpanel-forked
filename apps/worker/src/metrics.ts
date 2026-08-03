@@ -126,6 +126,21 @@ export const kafkaConsumerLag = new client.Gauge({
 
 register.registerMetric(kafkaConsumerLag);
 
+// Which pod currently owns each Kafka partition in the consumer group. Value is
+// always 1; there is one series per (partition, pod) the pod owns, set on
+// GROUP_JOIN and removed when a rebalance moves the partition elsewhere. Lets a
+// per-partition dashboard show the owning pod — the Kafka equivalent of seeing
+// which worker holds a GroupMQ shard. `pod` = the worker's hostname (K8s pod
+// name). Exactly one pod should report 1 per partition; two = a rebalance not
+// yet settled (or a stale series if clearing regressed).
+export const kafkaPartitionOwner = new client.Gauge({
+  name: 'kafka_partition_owner',
+  help: 'Pod that currently owns a Kafka partition in the consumer group (value always 1)',
+  labelNames: ['partition', 'pod'],
+});
+
+register.registerMetric(kafkaPartitionOwner);
+
 queues.forEach((queue) => {
   register.registerMetric(
     new client.Gauge({

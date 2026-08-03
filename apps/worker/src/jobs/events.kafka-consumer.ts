@@ -10,6 +10,7 @@ import {
   kafkaConsumeErrorsTotal,
   kafkaConsumerLag,
   kafkaEventsConsumedTotal,
+  kafkaPartitionOwner,
   kafkaReprocessedTotal,
 } from '../metrics';
 import { logger } from '../utils/logger';
@@ -31,6 +32,15 @@ const HEARTBEAT_EVERY = 16;
 // signature of an offset-handling bug. Cleared on GROUP_JOIN so legitimate
 // post-rebalance redelivery from the last committed offset doesn't trip it.
 const resolvedHWM = new Map<string, number>();
+
+// This worker's pod identity for the kafka_partition_owner gauge. In K8s the
+// container hostname is the pod name; fall back to something non-empty locally.
+const POD = process.env.HOSTNAME || process.env.POD_NAME || 'unknown';
+
+// Partitions this pod currently owns, so on the next GROUP_JOIN we can clear the
+// owner gauge for any partition that moved to another member (otherwise a stale
+// `owner=1` would linger and make two pods look like they own the same one).
+let ownedPartitions = new Set<number>();
 
 export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
   const consumer = createKafkaEventsConsumer();
@@ -71,6 +81,23 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
       kafkaReprocessedTotal.inc({ partition: p }, 0);
     }
 
+    // Update the partition-owner gauge so a per-partition dashboard can show
+    // which pod holds each partition (the Kafka equivalent of seeing which
+    // worker owns a GroupMQ shard). Claim every partition now assigned to this
+    // pod, and release any we owned before this rebalance but no longer do —
+    // otherwise a moved partition would keep showing this pod as its owner and
+    // two pods would appear to own the same partition.
+    const assignedNow = new Set(partitions.map(Number));
+    for (const prev of ownedPartitions) {
+      if (!assignedNow.has(prev)) {
+        kafkaPartitionOwner.remove(String(prev), POD);
+      }
+    }
+    for (const partition of assignedNow) {
+      kafkaPartitionOwner.set({ partition: String(partition), pod: POD }, 1);
+    }
+    ownedPartitions = assignedNow;
+
     logger.info('kafka consumer joined group (rebalance complete)', {
       memberId: payload.memberId,
       groupId: payload.groupId,
@@ -94,6 +121,13 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
     });
   });
   consumer.on(consumer.events.DISCONNECT, () => {
+    // Release this pod's owner gauges on disconnect so a leaving/terminating pod
+    // stops reporting itself as a partition owner; the surviving members
+    // re-claim on their next GROUP_JOIN.
+    for (const prev of ownedPartitions) {
+      kafkaPartitionOwner.remove(String(prev), POD);
+    }
+    ownedPartitions = new Set();
     logger.warn('kafka consumer disconnected');
   });
   consumer.on(consumer.events.REQUEST_TIMEOUT, ({ payload }) => {
