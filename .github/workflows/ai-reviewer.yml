@@ -1,0 +1,15 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ai-reviewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-reviewer:
+    uses: Dashverse/infra/.github/workflows/ai-reviewer.yml@main
+    secrets: inherit
+
