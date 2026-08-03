@@ -11,8 +11,5 @@ concurrency:
 jobs:
   ai-reviewer:
     uses: Dashverse/infra/.github/workflows/ai-reviewer.yml@main
-    secrets:
-      openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-      app_id: ${{ secrets.APP_ID }}
-      app_private_key: ${{ secrets.APP_PRIVATE_KEY }}
+    secrets: inherit
 
