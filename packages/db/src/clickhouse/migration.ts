@@ -42,7 +42,14 @@ export const chMigrationClient = createClient({
   },
   compression: {
     request: true,
-    response: true,
+    // Response compression MUST stay off for long-running migration INSERTs.
+    // With response:true the client gzip-decodes the response stream; a
+    // multi-hour `INSERT ... SELECT` returns an (effectively empty) body only
+    // after `wait_end_of_query`, and the gzip stream + keep-alive interaction
+    // leaves the client hanging on the response until the socket resets
+    // ("socket hang up" / the backfill appearing to stall). Plain (uncompressed)
+    // responses return cleanly, so the progress-header keep-alive is enough.
+    response: false,
   },
   clickhouse_settings: {
     wait_end_of_query: 1,
