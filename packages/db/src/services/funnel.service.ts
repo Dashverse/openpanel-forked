@@ -7,7 +7,7 @@ import type {
 import { last, reverse, uniq } from 'ramda';
 import sqlstring from 'sqlstring';
 import { ch, formatClickhouseDate } from '../clickhouse/client';
-import { TABLE_NAMES } from '../clickhouse/client';
+import { TABLE_NAMES, getEventsTableForRange } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import { createSqlBuilder } from '../sql-builder';
 import {
@@ -50,10 +50,11 @@ export class FunnelService {
 
     const hasCustomEvents = customEventsChecks.some((ce) => ce !== null);
 
-    // If no custom events, use regular events table
+    // If no custom events, use regular events table (routed to events_v2 when the
+    // range is inside its complete window).
     if (!hasCustomEvents) {
       return {
-        fromClause: TABLE_NAMES.events,
+        fromClause: getEventsTableForRange(startDate),
         withClauses: [],
         needsNameFilter: true,
       };
@@ -763,7 +764,7 @@ export class FunnelService {
       funnelQuery.with(
         'filtered_profiles',
         `SELECT DISTINCT profile_id
-         FROM ${TABLE_NAMES.events}
+         FROM ${getEventsTableForRange(startDate)}
          WHERE project_id = ${sqlstring.escape(projectId)}
            AND name IN (${funnelNamesIn})
            AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
@@ -940,7 +941,7 @@ export class FunnelService {
         WITH
         ${ttcAliasCte}first_step_events AS (
           SELECT ${ttcGid} AS gid, min(created_at) AS first_ts
-          FROM ${TABLE_NAMES.events}${ttcAliasJoin}
+          FROM ${getEventsTableForRange(startDate)}${ttcAliasJoin}
           PREWHERE project_id = ${sqlstring.escape(projectId)}
             AND name = ${sqlstring.escape(firstEvent.name)}
             AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
@@ -949,7 +950,7 @@ export class FunnelService {
         ),
         last_step_events AS (
           SELECT ${ttcGid} AS gid, min(created_at) AS last_ts
-          FROM ${TABLE_NAMES.events}${ttcAliasJoin}
+          FROM ${getEventsTableForRange(startDate)}${ttcAliasJoin}
           PREWHERE project_id = ${sqlstring.escape(projectId)}
             AND name = ${sqlstring.escape(lastEventItem.name)}
             AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')

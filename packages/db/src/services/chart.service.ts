@@ -13,7 +13,11 @@ import type {
 } from '@openpanel/validation';
 
 import { db } from '../../index';
-import { TABLE_NAMES, formatClickhouseDate } from '../clickhouse/client';
+import {
+  TABLE_NAMES,
+  formatClickhouseDate,
+  getEventsTableForRange,
+} from '../clickhouse/client';
 import { createSqlBuilder } from '../sql-builder';
 import {
   buildEventCriteriaQuery,
@@ -828,7 +832,7 @@ function getPerUserChartSql({
   if (isDistribution) {
     // Bucket users by their per-user value.
     const perUserCte = `SELECT profile_id${bkInnerSelect}, ${innerAgg} as user_value
-      FROM ${TABLE_NAMES.events} e
+      FROM ${getEventsTableForRange(startDate)} e
       ${whereClause}
       GROUP BY profile_id${bkInnerGroup}`;
 
@@ -893,7 +897,7 @@ function getPerUserChartSql({
   }
 
   const perUserCte = `SELECT ${dateExpr} as date, profile_id${bkInnerSelect}, ${innerAgg} as user_value
-    FROM ${TABLE_NAMES.events} e
+    FROM ${getEventsTableForRange(startDate)} e
     ${whereClause}
     GROUP BY date, profile_id${bkInnerGroup}`;
 
@@ -1153,7 +1157,7 @@ export async function getChartSql({
   // Profile JOIN for CTEs that don't use 'e' alias (use table name directly)
   const profilesJoinRefForCTE =
     anyFilterOnProfile || anyBreakdownOnProfile
-      ? `LEFT ANY JOIN profile ON profile.id = ${TABLE_NAMES.events}.profile_id`
+      ? `LEFT ANY JOIN profile ON profile.id = ${getEventsTableForRange(startDate)}.profile_id`
       : '';
 
   if (anyFilterOnProfile || anyBreakdownOnProfile) {
@@ -1259,7 +1263,7 @@ export async function getChartSql({
       ? TABLE_NAMES.profile_event_summary_mv
       : customEvent
         ? 'custom_event_data'
-        : TABLE_NAMES.events;
+        : getEventsTableForRange(startDate);
     const orderByCount = useCohortMV ? 'countMerge(e.event_count)' : 'count(*)';
 
     // Add top_breakdowns CTE using the builder
@@ -1336,7 +1340,7 @@ export async function getChartSql({
 
   if (event.segment === 'one_event_per_user') {
     sb.from = `(
-      SELECT DISTINCT ON (profile_id) * from ${TABLE_NAMES.events} ${getJoins()} WHERE ${join(
+      SELECT DISTINCT ON (profile_id) * from ${getEventsTableForRange(startDate)} ${getJoins()} WHERE ${join(
         sb.where,
         ' AND ',
       )}
@@ -1375,7 +1379,7 @@ export async function getChartSql({
       ? TABLE_NAMES.profile_event_summary_mv
       : customEvent
         ? 'custom_event_data'
-        : TABLE_NAMES.events;
+        : getEventsTableForRange(startDate);
 
     // Build cohort JOINs for breakdown_totals CTE
     // NOTE: ClickHouse CTEs cannot reference other CTEs in JOINs, so we inline the subquery
@@ -1423,7 +1427,7 @@ export async function getChartSql({
       ? TABLE_NAMES.profile_event_summary_mv
       : customEvent
         ? 'custom_event_data'
-        : TABLE_NAMES.events;
+        : getEventsTableForRange(startDate);
 
     // Build cohort JOINs for total_unique CTE
     // NOTE: ClickHouse CTEs cannot reference other CTEs in JOINs, so we inline the subquery
