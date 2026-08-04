@@ -7,9 +7,11 @@ import {
   type KafkaMessage,
 } from '@openpanel/queue';
 import {
+  kafkaCommittedOffset,
   kafkaConsumeErrorsTotal,
   kafkaConsumerLag,
   kafkaEventsConsumedTotal,
+  kafkaHighWatermark,
   kafkaPartitionOwner,
   kafkaReprocessedTotal,
 } from '../metrics';
@@ -273,6 +275,16 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
       kafkaConsumerLag.set(
         { partition: String(batch.partition) },
         Math.max(0, Number(batch.highWatermark) - 1 - newHWM),
+      );
+
+      // Absolute offsets for full per-partition visibility (committed = acked
+      // position, high-watermark = log end). Same source values as the lag
+      // above, just exposed directly so the dashboard can show where each
+      // partition is acked and where the log ends, not only the gap.
+      kafkaCommittedOffset.set({ partition: String(batch.partition) }, newHWM);
+      kafkaHighWatermark.set(
+        { partition: String(batch.partition) },
+        Number(batch.highWatermark),
       );
 
       await heartbeat();

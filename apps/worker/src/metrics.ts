@@ -126,6 +126,28 @@ export const kafkaConsumerLag = new client.Gauge({
 
 register.registerMetric(kafkaConsumerLag);
 
+// Absolute Kafka offsets per partition, for full offset visibility on the
+// per-partition dashboard: `committed` = the last offset we've acked, `high
+// watermark` = the broker's next-write position (log end). The relationship is
+// kafka_consumer_lag = kafka_high_watermark - 1 - kafka_committed_offset, so the
+// three together read like a Kafka console: "partition N acked at X, log ends at
+// Y, Z behind." Set from the consumer's own state (resolvedHWM + batch
+// .highWatermark) — no broker admin API needed.
+export const kafkaCommittedOffset = new client.Gauge({
+  name: 'kafka_committed_offset',
+  help: 'Last Kafka offset committed (acked) by the consumer, per partition',
+  labelNames: ['partition'],
+});
+
+export const kafkaHighWatermark = new client.Gauge({
+  name: 'kafka_high_watermark',
+  help: 'Kafka partition high-watermark (next offset to be written), per partition',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(kafkaCommittedOffset);
+register.registerMetric(kafkaHighWatermark);
+
 // Which pod currently owns each Kafka partition in the consumer group. Value is
 // always 1; there is one series per (partition, pod) the pod owns, set on
 // GROUP_JOIN and removed when a rebalance moves the partition elsewhere. Lets a
