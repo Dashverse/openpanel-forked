@@ -2,7 +2,12 @@ import { NOT_SET_VALUE } from '@openpanel/constants';
 import type { IChartEvent, IChartInput } from '@openpanel/validation';
 import { omit } from 'ramda';
 import sqlstring from 'sqlstring';
-import { TABLE_NAMES, ch, formatClickhouseDate } from '../clickhouse/client';
+import {
+  TABLE_NAMES,
+  ch,
+  formatClickhouseDate,
+  getEventsTableForRange,
+} from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import {
   getEventFiltersWhereClause,
@@ -134,7 +139,7 @@ export class ConversionService {
             return [f.name.replace('profile.', '').split('.')[0]!];
           })
         )];
-        profileJoinClause = `\n        LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = ${TABLE_NAMES.events}.profile_id`;
+        profileJoinClause = `\n        LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = ${getEventsTableForRange(startDate)}.profile_id`;
       }
 
       // Minimal SELECT: only the columns actually needed downstream
@@ -149,7 +154,7 @@ export class ConversionService {
       // resolution: an unqualified `profile_id` in the JOIN ON / coalesce binds to
       // the SELECT output alias (also `profile_id`), yielding a circular join key
       // (al.alias = coalesce(al.canonical, profile_id)) that ClickHouse rejects.
-      const rawProfileId = `${TABLE_NAMES.events}.profile_id`;
+      const rawProfileId = `${getEventsTableForRange(startDate)}.profile_id`;
       const aliasJoin = resolveProfile
         ? `\n        LEFT JOIN al ON al.alias = ${rawProfileId}`
         : '';
@@ -175,7 +180,7 @@ export class ConversionService {
       // or depend on the profile LEFT JOIN executed after PREWHERE.
       return `${cteName} AS (
         SELECT ${selectList}
-        FROM ${TABLE_NAMES.events}${profileJoinClause}${aliasJoin}
+        FROM ${getEventsTableForRange(startDate)}${profileJoinClause}${aliasJoin}
         PREWHERE project_id = '${projectId}'
           AND name = '${event.name}'
           AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
@@ -209,7 +214,7 @@ export class ConversionService {
     // If no custom events, use regular events table
     if (customEvents.every(ce => !ce)) {
       return {
-        fromClause: TABLE_NAMES.events,
+        fromClause: getEventsTableForRange(startDate),
         ctes: [],
         needsDateFilter: true,
       };
@@ -258,7 +263,7 @@ export class ConversionService {
       } else {
         // Regular event - include materialized columns to match custom events
         unionParts.push(`
-          SELECT *${materializedColumnsSelect} FROM ${TABLE_NAMES.events}
+          SELECT *${materializedColumnsSelect} FROM ${getEventsTableForRange(startDate)}
           WHERE project_id = '${projectId}'
             AND name = '${event.name}'
             AND created_at BETWEEN toDateTime('${startDate}') AND toDateTime('${endDate}')
@@ -290,6 +295,8 @@ export class ConversionService {
     extendedEndDate,
     funnelWindowSeconds,
     interval,
+    breakdown,
+    limit,
   }: {
     projectId: string;
     firstEvent: IChartEvent;
@@ -299,6 +306,8 @@ export class ConversionService {
     extendedEndDate: string;
     funnelWindowSeconds: number;
     interval?: 'minute' | 'hour' | 'day' | 'week' | 'month';
+    breakdown?: { name: string; cohortId?: string };
+    limit?: number;
   }): string {
     const startTs = `toDateTime('${formatClickhouseDate(startDate)}')`;
     const endTs = `toDateTime('${formatClickhouseDate(endDate)}')`;
@@ -366,7 +375,7 @@ export class ConversionService {
       allFilterClauses.length > 0
         ? `filtered_profiles AS (
         SELECT DISTINCT profile_id
-        FROM ${TABLE_NAMES.events}
+        FROM ${getEventsTableForRange(startDate)}
         WHERE project_id = '${projectLiteral}'
           AND name IN ('${firstNameLiteral}', '${lastNameLiteral}')
           AND created_at >= ${startTs}
@@ -378,8 +387,99 @@ export class ConversionService {
 
     const filteredProfilesJoin =
       allFilterClauses.length > 0
-        ? `\n          AND ${TABLE_NAMES.events}.profile_id IN (SELECT profile_id FROM filtered_profiles)`
+        ? `\n          AND ${getEventsTableForRange(startDate)}.profile_id IN (SELECT profile_id FROM filtered_profiles)`
         : '';
+
+    // Split-scan breakdown variant. Opens (first event) are grouped per
+    // (resolved_pid, b_0) so the breakdown value comes from the START event;
+    // finishes (last event) are grouped per user only, so conversion is decided
+    // on the user — NOT pinned to the finish's breakdown value (which is often
+    // empty/different). Matches the ASOF path's "convert on the user" semantic +
+    // its dense_rank top-N breakdown limiting. See docs/conversion-chart-perf.md.
+    if (breakdown) {
+      const E = getEventsTableForRange(startDate);
+      const breakdownExpr = getSelectPropertyKey(
+        breakdown.name,
+        projectId,
+        undefined,
+      );
+      const topNLimit = limit ?? 50;
+      return `
+      WITH ${filteredProfilesCte}
+      al AS (
+        SELECT alias, argMax(profile_id, created_at) AS canonical
+        FROM ${TABLE_NAMES.alias}
+        WHERE project_id = '${projectLiteral}'
+        GROUP BY alias
+      ),
+      user_installs AS (
+        SELECT
+          coalesce(nullIf(al.canonical, ''), ${E}.profile_id) AS resolved_pid,
+          ${breakdownExpr} AS b_0,
+          groupArray(toDateTime64(created_at, 3)) AS opens
+        FROM ${E}
+        LEFT JOIN al ON al.alias = ${E}.profile_id
+        WHERE project_id = '${projectLiteral}'
+          AND name = '${firstNameLiteral}'
+          AND created_at >= ${startTs}
+          AND created_at <= ${endTs}
+          AND ${E}.profile_id != ''${filteredProfilesJoin}
+        GROUP BY resolved_pid, b_0
+        HAVING length(opens) > 0
+      ),
+      user_finishes AS (
+        SELECT
+          coalesce(nullIf(al.canonical, ''), ${E}.profile_id) AS resolved_pid,
+          groupArray(toDateTime64(created_at, 3)) AS finishes
+        FROM ${E}
+        LEFT JOIN al ON al.alias = ${E}.profile_id
+        WHERE project_id = '${projectLiteral}'
+          AND name = '${lastNameLiteral}'
+          AND created_at >= ${startTs}
+          AND created_at <= ${extendedEndTs}
+          AND ${E}.profile_id != ''
+        GROUP BY resolved_pid
+      ),
+      per_user_per_bucket AS (
+        SELECT
+          ui.b_0 AS b_0,
+          arrayJoin(arrayDistinct(arrayMap(o -> ${bucketExpr}, ui.opens))) AS open_bucket,
+          arrayMin(arrayFilter(o -> ${bucketExpr} = open_bucket, ui.opens)) AS first_open,
+          uf.finishes AS finishes
+        FROM user_installs ui
+        LEFT JOIN user_finishes uf ON uf.resolved_pid = ui.resolved_pid
+      ),
+      agg AS (
+        SELECT
+          open_bucket AS event_day,
+          b_0,
+          count() AS total_first,
+          countIf(arrayExists(
+            f -> f >= first_open AND f <= first_open + INTERVAL ${funnelWindowSeconds} SECOND,
+            finishes
+          )) AS conversions,
+          round(
+            100.0 * countIf(arrayExists(
+              f -> f >= first_open AND f <= first_open + INTERVAL ${funnelWindowSeconds} SECOND,
+              finishes
+            )) / count(),
+            2
+          ) AS conversion_rate_percentage
+        FROM per_user_per_bucket
+        GROUP BY event_day, b_0
+      )
+      SELECT event_day, b_0, total_first, conversions, conversion_rate_percentage
+      FROM (
+        SELECT *, dense_rank() OVER (ORDER BY _bucket_rate DESC) AS _bucket_rank
+        FROM (
+          SELECT *, avg(conversion_rate_percentage) OVER (PARTITION BY b_0) AS _bucket_rate
+          FROM agg
+        )
+      )
+      WHERE _bucket_rank <= ${topNLimit}
+      ORDER BY _bucket_rate DESC, event_day ASC
+    `;
+    }
 
     return `
       WITH ${filteredProfilesCte}
@@ -391,7 +491,7 @@ export class ConversionService {
       ),
       user_events AS (
         SELECT
-          coalesce(nullIf(al.canonical, ''), ${TABLE_NAMES.events}.profile_id) AS resolved_pid,
+          coalesce(nullIf(al.canonical, ''), ${getEventsTableForRange(startDate)}.profile_id) AS resolved_pid,
           groupArrayIf(
             toDateTime64(created_at, 3),
             name = '${firstNameLiteral}' AND created_at <= ${endTs}
@@ -400,13 +500,13 @@ export class ConversionService {
             toDateTime64(created_at, 3),
             name = '${lastNameLiteral}'
           ) AS finishes
-        FROM ${TABLE_NAMES.events}
-        LEFT JOIN al ON al.alias = ${TABLE_NAMES.events}.profile_id
+        FROM ${getEventsTableForRange(startDate)}
+        LEFT JOIN al ON al.alias = ${getEventsTableForRange(startDate)}.profile_id
         WHERE project_id = '${projectLiteral}'
           AND name IN ('${firstNameLiteral}', '${lastNameLiteral}')
           AND created_at >= ${startTs}
           AND created_at <= ${extendedEndTs}
-          AND ${TABLE_NAMES.events}.profile_id != ''${filteredProfilesJoin}
+          AND ${getEventsTableForRange(startDate)}.profile_id != ''${filteredProfilesJoin}
         GROUP BY resolved_pid
         HAVING length(opens) > 0
       ),
@@ -506,10 +606,11 @@ export class ConversionService {
     // Ensure materialized columns cache is warm so getSelectPropertyKey works synchronously
     await getMaterializedColumns('events');
 
-    // Single-scan array-aggregate fast path. 3-7x speedup vs the multi-CTE
-    // ASOF JOIN path below. Anything unsupported (breakdowns, holds,
-    // cohorts, custom events, session group, TTC, profile.* filters) falls
-    // through unchanged.
+    // Array-aggregate fast path. 3-7x speedup vs the multi-CTE ASOF JOIN path
+    // below. Single-scan for no breakdown; split-scan for ONE simple event-level
+    // property breakdown. Everything else (holds, cohorts, custom events, session
+    // group, TTC, profile.*/cohort breakdowns, multi-breakdown) falls through
+    // unchanged to the ASOF path.
     const hasIncompatibleFilters = (event: IChartEvent) =>
       (event.filters ?? []).some(
         (f) =>
@@ -518,11 +619,25 @@ export class ConversionService {
           f.operator === 'notInCohort',
       );
 
+    // The array fast path now also supports ONE simple event-level property
+    // breakdown (split-scan variant). profile.* / cohort / cohort: breakdowns
+    // and multi-breakdown still fall through to the ASOF path unchanged.
+    const singleBreakdown = breakdowns.length === 1 ? breakdowns[0] : undefined;
+    const isSimpleEventBreakdown = (b?: {
+      name: string;
+      cohortId?: string;
+    }): boolean =>
+      !!b &&
+      !b.cohortId &&
+      !b.name.startsWith('profile.') &&
+      !b.name.startsWith('cohort:');
+
     const canUseArrayPath =
       events.length === 2 &&
       funnelGroup !== 'session_id' &&
       cohortIds.length === 0 &&
-      breakdowns.length === 0 &&
+      (breakdowns.length === 0 ||
+        (breakdowns.length === 1 && isSimpleEventBreakdown(singleBreakdown))) &&
       holdProperties.length === 0 &&
       measuring === 'conversion_rate' &&
       !hasIncompatibleFilters(firstEvent) &&
@@ -544,6 +659,8 @@ export class ConversionService {
           extendedEndDate,
           funnelWindowSeconds,
           interval,
+          breakdown: singleBreakdown,
+          limit,
         });
 
         const rawResult = await this.client.query({
@@ -556,6 +673,7 @@ export class ConversionService {
             total_first: number;
             conversions: number;
             conversion_rate_percentage: number;
+            [key: string]: string | number;
           }[];
         };
 

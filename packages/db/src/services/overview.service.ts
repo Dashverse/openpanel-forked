@@ -3,7 +3,7 @@ import { getCache } from '@openpanel/redis';
 import { type IChartEventFilter, zTimeInterval } from '@openpanel/validation';
 import { omit } from 'ramda';
 import { z } from 'zod';
-import { TABLE_NAMES, ch } from '../clickhouse/client';
+import { TABLE_NAMES, ch, getEventsTableForRange } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import { getEventFiltersWhereClause } from './chart.service';
 
@@ -144,7 +144,7 @@ export class OverviewService {
         `${clix.toStartOf('created_at', interval as any, timezone)} AS date`,
         'sum(revenue) AS total_revenue',
       ])
-      .from(TABLE_NAMES.events)
+      .from(getEventsTableForRange(startDate))
       .where('project_id', '=', projectId)
       .where('name', '=', 'revenue')
       .where('revenue', '>', 0)
@@ -380,7 +380,7 @@ export class OverviewService {
         'uniq(profile_id) AS unique_visitors',
         'uniq(session_id) AS total_sessions',
       ])
-      .from(TABLE_NAMES.events)
+      .from(getEventsTableForRange(startDate))
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('created_at', 'BETWEEN', [
@@ -437,7 +437,7 @@ export class OverviewService {
         '(SELECT total_sessions FROM overall_unique_visitors) AS overall_total_sessions',
         '(SELECT bounce_rate FROM overall_bounce_rate) AS overall_bounce_rate',
       ])
-      .from(`${TABLE_NAMES.events} AS e`)
+      .from(`${getEventsTableForRange(startDate)} AS e`)
       .leftJoin(
         'daily_session_stats AS dss',
         `${clix.toStartOf('e.created_at', interval as any)} = dss.date`,
@@ -542,7 +542,7 @@ export class OverviewService {
         'uniq(session_id) as count',
         'round(avg(duration)/1000, 2) as avg_duration',
       ])
-      .from(TABLE_NAMES.events, false)
+      .from(getEventsTableForRange(startDate), false)
       .where('project_id', '=', projectId)
       .where('name', '=', 'screen_view')
       .where('path', '!=', '')
@@ -669,7 +669,7 @@ export class OverviewService {
   }) {
     return clix(this.client, timezone)
       .select(['DISTINCT session_id'])
-      .from(TABLE_NAMES.events)
+      .from(getEventsTableForRange(startDate))
       .where('project_id', '=', projectId)
       .where('created_at', 'BETWEEN', [
         clix.datetime(startDate, 'toDateTime'),

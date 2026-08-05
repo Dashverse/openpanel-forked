@@ -49,6 +49,7 @@ class CustomLogger implements Logger {
 
 export const TABLE_NAMES = {
   events: 'events',
+  events_v2: 'events_v2',
   events_daily_stats: 'events_daily_stats',
   profiles: 'profiles',
   alias: 'profile_aliases',
@@ -66,6 +67,39 @@ export const TABLE_NAMES = {
   profile_event_property_summary_mv: 'profile_event_property_summary_mv',
   session_replay_chunks: 'session_replay_chunks',
 };
+
+/**
+ * Route analytics reads to `events_v2` (the name-first sort-key table) when the
+ * query's range is fully inside the window events_v2 is known to hold complete.
+ *
+ * events_v2 is fed live by the `events_to_v2` dual-write MV from T0 forward and
+ * backfilled day-by-day before T0. So it is complete only from a moving boundary
+ * — `EVENTS_V2_MIN_DATE` — which we lower as backfill verifies older days.
+ *
+ * Gated OFF by default (`EVENTS_V2_ENABLED`): zero behavior change until set.
+ * A query whose `startDate` is before the boundary (or missing) stays on `events`,
+ * so we never serve a range events_v2 doesn't fully cover. Conservative on purpose.
+ *
+ * `startDate` / `EVENTS_V2_MIN_DATE` are 'YYYY-MM-DD[ HH:MM:SS]' strings — a
+ * lexicographic compare is chronological for that fixed format.
+ */
+export function getEventsTableForRange(startDate?: string | null): string {
+  const enabled =
+    process.env.EVENTS_V2_ENABLED === '1' ||
+    process.env.EVENTS_V2_ENABLED === 'true';
+  if (!enabled) return TABLE_NAMES.events;
+
+  const minDate = process.env.EVENTS_V2_MIN_DATE?.trim();
+  const table =
+    minDate && startDate && String(startDate) >= minDate
+      ? TABLE_NAMES.events_v2
+      : TABLE_NAMES.events;
+
+  // Visible routing decision (only logs when routing is enabled). Grep the dev
+  // process output for `[events-routing]` to see events vs events_v2 per query.
+  logger.info(`[events-routing] -> ${table}`, { table, startDate, minDate });
+  return table;
+}
 
 /**
  * Check if ClickHouse is running in clustered mode
