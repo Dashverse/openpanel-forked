@@ -7,6 +7,8 @@ import {
   ch,
   formatClickhouseDate,
   getEventsTableForRange,
+  resolvedProfileIdSql,
+  aliasResolutionNeedsCte,
 } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import {
@@ -155,11 +157,13 @@ export class ConversionService {
       // the SELECT output alias (also `profile_id`), yielding a circular join key
       // (al.alias = coalesce(al.canonical, profile_id)) that ClickHouse rejects.
       const rawProfileId = `${getEventsTableForRange(startDate)}.profile_id`;
-      const aliasJoin = resolveProfile
-        ? `\n        LEFT JOIN al ON al.alias = ${rawProfileId}`
-        : '';
+      // dict on -> dictGet (no JOIN); dict off -> al CTE + JOIN (unchanged).
+      const aliasJoin =
+        resolveProfile && aliasResolutionNeedsCte()
+          ? `\n        LEFT JOIN al ON al.alias = ${rawProfileId}`
+          : '';
       const profileIdExpr = resolveProfile
-        ? `coalesce(nullIf(al.canonical, ''), ${rawProfileId})`
+        ? resolvedProfileIdSql(projectId.replace(/'/g, "''"), rawProfileId)
         : null;
       const selectList = selectColumns
         .map((c) =>
@@ -385,10 +389,29 @@ export class ConversionService {
       ),`
         : '';
 
+    const E = getEventsTableForRange(startDate);
+
     const filteredProfilesJoin =
       allFilterClauses.length > 0
-        ? `\n          AND ${getEventsTableForRange(startDate)}.profile_id IN (SELECT profile_id FROM filtered_profiles)`
+        ? `\n          AND ${E}.profile_id IN (SELECT profile_id FROM filtered_profiles)`
         : '';
+
+    // Alias resolution: dictGet (in-RAM, no al CTE/JOIN) when PROFILE_ALIAS_DICT
+    // is set; otherwise the al CTE + LEFT JOIN — byte-identical to before. See
+    // client.ts resolvedProfileIdSql / aliasResolutionNeedsCte.
+    const aliasCte = aliasResolutionNeedsCte()
+      ? `al AS (
+        SELECT alias, argMax(profile_id, created_at) AS canonical
+        FROM ${TABLE_NAMES.alias}
+        WHERE project_id = '${projectLiteral}'
+        GROUP BY alias
+      ),
+      `
+      : '';
+    const aliasJoin = aliasResolutionNeedsCte()
+      ? `\n        LEFT JOIN al ON al.alias = ${E}.profile_id`
+      : '';
+    const resolvedPid = resolvedProfileIdSql(projectLiteral, `${E}.profile_id`);
 
     // Split-scan breakdown variant. Opens (first event) are grouped per
     // (resolved_pid, b_0) so the breakdown value comes from the START event;
@@ -397,7 +420,6 @@ export class ConversionService {
     // empty/different). Matches the ASOF path's "convert on the user" semantic +
     // its dense_rank top-N breakdown limiting. See docs/conversion-chart-perf.md.
     if (breakdown) {
-      const E = getEventsTableForRange(startDate);
       const breakdownExpr = getSelectPropertyKey(
         breakdown.name,
         projectId,
@@ -405,20 +427,12 @@ export class ConversionService {
       );
       const topNLimit = limit ?? 50;
       return `
-      WITH ${filteredProfilesCte}
-      al AS (
-        SELECT alias, argMax(profile_id, created_at) AS canonical
-        FROM ${TABLE_NAMES.alias}
-        WHERE project_id = '${projectLiteral}'
-        GROUP BY alias
-      ),
-      user_installs AS (
+      WITH ${filteredProfilesCte}${aliasCte}user_installs AS (
         SELECT
-          coalesce(nullIf(al.canonical, ''), ${E}.profile_id) AS resolved_pid,
+          ${resolvedPid} AS resolved_pid,
           ${breakdownExpr} AS b_0,
           groupArray(toDateTime64(created_at, 3)) AS opens
-        FROM ${E}
-        LEFT JOIN al ON al.alias = ${E}.profile_id
+        FROM ${E}${aliasJoin}
         WHERE project_id = '${projectLiteral}'
           AND name = '${firstNameLiteral}'
           AND created_at >= ${startTs}
@@ -429,10 +443,9 @@ export class ConversionService {
       ),
       user_finishes AS (
         SELECT
-          coalesce(nullIf(al.canonical, ''), ${E}.profile_id) AS resolved_pid,
+          ${resolvedPid} AS resolved_pid,
           groupArray(toDateTime64(created_at, 3)) AS finishes
-        FROM ${E}
-        LEFT JOIN al ON al.alias = ${E}.profile_id
+        FROM ${E}${aliasJoin}
         WHERE project_id = '${projectLiteral}'
           AND name = '${lastNameLiteral}'
           AND created_at >= ${startTs}
@@ -482,16 +495,9 @@ export class ConversionService {
     }
 
     return `
-      WITH ${filteredProfilesCte}
-      al AS (
-        SELECT alias, argMax(profile_id, created_at) AS canonical
-        FROM ${TABLE_NAMES.alias}
-        WHERE project_id = '${projectLiteral}'
-        GROUP BY alias
-      ),
-      user_events AS (
+      WITH ${filteredProfilesCte}${aliasCte}user_events AS (
         SELECT
-          coalesce(nullIf(al.canonical, ''), ${getEventsTableForRange(startDate)}.profile_id) AS resolved_pid,
+          ${resolvedPid} AS resolved_pid,
           groupArrayIf(
             toDateTime64(created_at, 3),
             name = '${firstNameLiteral}' AND created_at <= ${endTs}
@@ -500,13 +506,12 @@ export class ConversionService {
             toDateTime64(created_at, 3),
             name = '${lastNameLiteral}'
           ) AS finishes
-        FROM ${getEventsTableForRange(startDate)}
-        LEFT JOIN al ON al.alias = ${getEventsTableForRange(startDate)}.profile_id
+        FROM ${E}${aliasJoin}
         WHERE project_id = '${projectLiteral}'
           AND name IN ('${firstNameLiteral}', '${lastNameLiteral}')
           AND created_at >= ${startTs}
           AND created_at <= ${extendedEndTs}
-          AND ${getEventsTableForRange(startDate)}.profile_id != ''${filteredProfilesJoin}
+          AND ${E}.profile_id != ''${filteredProfilesJoin}
         GROUP BY resolved_pid
         HAVING length(opens) > 0
       ),
@@ -737,7 +742,9 @@ export class ConversionService {
       ]);
       resolveAliases = !startCustom && !endCustom;
     }
-    if (resolveAliases) {
+    // Only emit the `al` CTE when the dict is OFF; when on, buildSingleEventCte
+    // resolves via dictGet and no CTE/JOIN is needed.
+    if (resolveAliases && aliasResolutionNeedsCte()) {
       ctes.push(`al AS (
       SELECT alias, argMax(profile_id, created_at) AS canonical
       FROM ${TABLE_NAMES.alias}

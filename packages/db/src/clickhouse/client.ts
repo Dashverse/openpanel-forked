@@ -102,6 +102,52 @@ export function getEventsTableForRange(startDate?: string | null): string {
 }
 
 /**
+ * Anon→canonical identity resolution.
+ *
+ * `PROFILE_ALIAS_DICT` = the name of a ClickHouse DICTIONARY (e.g.
+ * `default.profile_alias_dict`, keyed by (project_id, alias) -> canonical) that
+ * resolves a device/anon profile_id to its identified user id via an in-RAM
+ * dictGet — replacing the per-query `al` CTE that scans the whole profile_aliases
+ * table (~33.7M rows) twice. Measured: 5.3s -> 0.38s on a breakdown funnel.
+ *
+ * Gated OFF by default: when the env var is unset (dev / self-hosted / any env
+ * without the dict) callers fall back to the `al` CTE + JOIN, byte-identical to
+ * before. Only prod (which has the dict loaded on every replica) sets it.
+ */
+export function getProfileAliasDict(): string | undefined {
+  const name = process.env.PROFILE_ALIAS_DICT?.trim();
+  return name && name.length > 0 ? name : undefined;
+}
+
+/**
+ * SQL expression that resolves `rawProfileId` (a qualified column, e.g.
+ * `events.profile_id`) to its canonical id.
+ * - dict enabled  -> `dictGetOrDefault(...)` (no `al` CTE / JOIN needed)
+ * - dict disabled -> `coalesce(nullIf(al.canonical, ''), rawProfileId)` (caller
+ *   MUST include the `al` CTE + `LEFT JOIN al` — see aliasResolutionNeedsCte).
+ *
+ * `projectLiteral` must already be escaped by the caller.
+ */
+export function resolvedProfileIdSql(
+  projectLiteral: string,
+  rawProfileId: string,
+): string {
+  const dict = getProfileAliasDict();
+  // Visible resolution path. Grep the dev process output for `[alias-resolution]`.
+  logger.info(
+    `[alias-resolution] -> ${dict ? `dictGet(${dict})` : 'al-cte (profile_aliases scan)'}`,
+  );
+  return dict
+    ? `dictGetOrDefault('${dict}', 'canonical', ('${projectLiteral}', ${rawProfileId}), ${rawProfileId})`
+    : `coalesce(nullIf(al.canonical, ''), ${rawProfileId})`;
+}
+
+/** True when the caller still needs to emit the `al` CTE + `LEFT JOIN al` (dict off). */
+export function aliasResolutionNeedsCte(): boolean {
+  return !getProfileAliasDict();
+}
+
+/**
  * Check if ClickHouse is running in clustered mode
  * Clustered mode = production (not self-hosted)
  * Non-clustered mode = self-hosted environments
