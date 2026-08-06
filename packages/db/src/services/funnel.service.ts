@@ -7,7 +7,12 @@ import type {
 import { last, reverse, uniq } from 'ramda';
 import sqlstring from 'sqlstring';
 import { ch, formatClickhouseDate } from '../clickhouse/client';
-import { TABLE_NAMES, getEventsTableForRange } from '../clickhouse/client';
+import {
+  TABLE_NAMES,
+  getEventsTableForRange,
+  resolvedProfileIdSql,
+  aliasResolutionNeedsCte,
+} from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import { createSqlBuilder } from '../sql-builder';
 import {
@@ -218,17 +223,21 @@ export class FunnelService {
     funnelGroup: string | undefined | null,
     fromClause: string,
     resolveAliases = false,
+    projectId?: string,
   ): [string, string] {
     if (funnelGroup === 'session_id') {
       return [`${fromClause}.session_id`, 'session_id'];
     }
     // Base: session-stitched profile_id (an event's session may already carry the
-    // identified profile_id). Identity-merge layers on top — resolve the event's
-    // profile_id to its canonical via the `al` CTE so a user's anon + identified
-    // events collapse to one id across sessions. No-op when `al` is empty.
+    // identified profile_id). Identity-merge layers on top — resolve `base` to its
+    // canonical so a user's anon + identified events collapse to one id.
+    // dict on -> dictGet (no `al` CTE/JOIN); dict off -> coalesce over `al`.
     const base = `COALESCE(nullIf(s.pid, ''), ${fromClause}.profile_id)`;
+    // Look up the RAW event profile_id in the alias map (same column the `al` CTE
+    // joins on), falling back to the session-stitched `base`. Both dict + CTE
+    // modes now group identically.
     const expr = resolveAliases
-      ? `coalesce(nullIf(al.canonical, ''), ${base})`
+      ? resolvedProfileIdSql(projectId ?? '', `${fromClause}.profile_id`, base)
       : base;
     return [expr, 'profile_id'];
   }
@@ -540,7 +549,12 @@ export class FunnelService {
       withClauses.length === 0; // no custom-event CTEs
 
     // Determine group column using the actual fromClause (not hardcoded table name)
-    const group = this.resolveFunnelGroup(funnelGroup, fromClause, resolveAliases);
+    const group = this.resolveFunnelGroup(
+      funnelGroup,
+      fromClause,
+      resolveAliases,
+      projectId,
+    );
 
     const filteredProfilesClauses = canPrefilterUsers
       ? [
@@ -780,7 +794,9 @@ export class FunnelService {
     // Identity-merge alias map: join the event's profile_id to its canonical so the
     // group expression (resolveFunnelGroup) can collapse anon -> identified. One
     // scan of profile_aliases per query; empty for projects with no aliases.
-    if (resolveAliases) {
+    // Only emit the `al` CTE + JOIN when the dict is OFF; when on, the group
+    // expression resolves via dictGet (in-RAM) and no scan/join is needed.
+    if (resolveAliases && aliasResolutionNeedsCte()) {
       funnelCte.leftJoin('al', `al.alias = ${fromClause}.profile_id`);
       funnelQuery.with(
         'al',
@@ -921,20 +937,22 @@ export class FunnelService {
       // first/last-step JOIN stitches a user's anon and identified events. Mirrors
       // the main funnel; `gid` avoids shadowing the raw profile_id column. No-op
       // when the alias map is empty.
-      const ttcAliasCte = resolveAliases
-        ? `al AS (
+      const ttcAliasCte =
+        resolveAliases && aliasResolutionNeedsCte()
+          ? `al AS (
           SELECT alias, argMax(profile_id, created_at) AS canonical
           FROM ${TABLE_NAMES.alias}
           WHERE project_id = ${sqlstring.escape(projectId)}
           GROUP BY alias
         ),
         `
-        : '';
-      const ttcAliasJoin = resolveAliases
-        ? '\n          LEFT JOIN al ON al.alias = profile_id'
-        : '';
+          : '';
+      const ttcAliasJoin =
+        resolveAliases && aliasResolutionNeedsCte()
+          ? '\n          LEFT JOIN al ON al.alias = profile_id'
+          : '';
       const ttcGid = resolveAliases
-        ? `coalesce(nullIf(al.canonical, ''), profile_id)`
+        ? resolvedProfileIdSql(projectId, 'profile_id')
         : 'profile_id';
 
       const ttcQuery = `

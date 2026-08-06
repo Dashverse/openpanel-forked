@@ -102,6 +102,61 @@ export function getEventsTableForRange(startDate?: string | null): string {
 }
 
 /**
+ * Anon→canonical identity resolution.
+ *
+ * `PROFILE_ALIAS_DICT` = the name of a ClickHouse DICTIONARY (e.g.
+ * `default.profile_alias_dict`, keyed by (project_id, alias) -> canonical) that
+ * resolves a device/anon profile_id to its identified user id via an in-RAM
+ * dictGet — replacing the per-query `al` CTE that scans the whole profile_aliases
+ * table (~33.7M rows) twice. Measured: 5.3s -> 0.38s on a breakdown funnel.
+ *
+ * Gated OFF by default: when the env var is unset (dev / self-hosted / any env
+ * without the dict) callers fall back to the `al` CTE + JOIN, byte-identical to
+ * before. Only prod (which has the dict loaded on every replica) sets it.
+ */
+export function getProfileAliasDict(): string | undefined {
+  const name = process.env.PROFILE_ALIAS_DICT?.trim();
+  return name && name.length > 0 ? name : undefined;
+}
+
+/**
+ * SQL expression resolving an id to its canonical.
+ * - `lookupKey`: the raw id looked up in the alias map (a qualified column, e.g.
+ *   `events.profile_id`). This MUST be the same column the `al` CTE joins on.
+ * - `fallback` (default = lookupKey): the value used when `lookupKey` has no
+ *   alias. In funnel this is the session-stitched id (COALESCE(s.pid, ...)); in
+ *   conversion it is just `lookupKey` itself.
+ *
+ * Both modes have identical semantics — "canonical(lookupKey) if aliased, else
+ * fallback":
+ * - dict on  -> coalesce(nullIf(dictGet(lookupKey), ''), fallback) (no CTE/JOIN)
+ * - dict off -> coalesce(nullIf(al.canonical, ''), fallback) (caller emits the
+ *   `al` CTE + `LEFT JOIN al ON al.alias = lookupKey`; see aliasResolutionNeedsCte).
+ *
+ * The dict name + projectId are escaped (they never reach SQL raw).
+ */
+export function resolvedProfileIdSql(
+  projectId: string,
+  lookupKey: string,
+  fallback: string = lookupKey,
+): string {
+  const dict = getProfileAliasDict();
+  // Visible resolution path. Grep the dev process output for `[alias-resolution]`.
+  logger.info(
+    `[alias-resolution] -> ${dict ? `dictGet(${dict})` : 'al-cte (profile_aliases scan)'}`,
+  );
+  if (dict) {
+    return `coalesce(nullIf(dictGetOrDefault(${sqlstring.escape(dict)}, 'canonical', (${sqlstring.escape(projectId)}, ${lookupKey}), ''), ''), ${fallback})`;
+  }
+  return `coalesce(nullIf(al.canonical, ''), ${fallback})`;
+}
+
+/** True when the caller still needs to emit the `al` CTE + `LEFT JOIN al` (dict off). */
+export function aliasResolutionNeedsCte(): boolean {
+  return !getProfileAliasDict();
+}
+
+/**
  * Check if ClickHouse is running in clustered mode
  * Clustered mode = production (not self-hosted)
  * Non-clustered mode = self-hosted environments
