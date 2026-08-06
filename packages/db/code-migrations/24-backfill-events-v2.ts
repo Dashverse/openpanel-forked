@@ -23,12 +23,17 @@ import { getIsCluster } from './helpers';
  * --end="2026-08-03 12:24:32" (never the full day) to avoid clobbering live rows.
  *
  * Idempotent + resumable per window:
- *   - events_v2 count == events count for [start,end) -> skip (re-applying the loop
- *     Job resumes where it left off; finished days are a ~1s count-check).
+ *   - events_v2 count >= events count for [start,end) -> skip (done; a completed
+ *     pre-T0 day sits at source + a little residue). Re-applying the loop Job
+ *     resumes where it left off; finished days are a ~1s count-check.
  *   - fresh window (count == 0) -> INSERT.
- *   - PARTIAL count (a prior crash) -> FAIL the job. We never auto-delete or
- *     re-insert on top of a partial (that would duplicate); clean + re-run that
- *     window manually if/when we decide to.
+ *   - small residue (0 < count < RESIDUE_MAX_RATIO of source) -> the live dual-write
+ *     MV seeded this pre-T0 day with late-arriving events (old created_at inserted
+ *     after T0). INSERT the full window over it; events_v2 is a plain
+ *     ReplicatedMergeTree (no dedup) so the tiny overlap is duplicated (accepted;
+ *     OPTIMIZE ... DEDUPLICATE BY id later if exact counts are ever needed).
+ *   - LARGE partial (>= RESIDUE_MAX_RATIO, a prior crash mid-INSERT) -> FAIL the
+ *     job; re-inserting would double a big chunk. Clean + re-run manually.
  *
  * CPU throttle (why 4 threads): migration 22 peaked 77% CPU at 8 threads with NO
  * competing writer. We now ALSO run the live dual-write MV, so we start at HALF
@@ -143,17 +148,27 @@ export async function up() {
   }
 
   // Step 1: resume / idempotency check.
+  // Late-arriver residue tolerance: the live dual-write MV seeds each pre-T0 day
+  // with a small trickle of old-created_at events inserted after T0. Below this
+  // fraction of source = residue (insert over it); above = a crashed partial (fail).
+  const RESIDUE_MAX_RATIO = 0.05;
   const dstTotal = await countWindow(DST, start, end);
   console.log(`[1] Existing ${DST}: ${dstTotal.toLocaleString()} rows`);
-  if (dstTotal === srcTotal) {
-    console.log('    Already backfilled (counts match) — skipping.');
+  // >= (not ==): a completed pre-T0 day carries source + a little residue, so it
+  // lands at or just above source. Either way it's done.
+  if (dstTotal >= srcTotal) {
+    console.log('    Already backfilled (>= source rows) — skipping.');
     return;
   }
 
   if (isDry) {
-    if (dstTotal > 0) {
+    if (dstTotal > srcTotal * RESIDUE_MAX_RATIO) {
       console.log(
-        `\n[DRY RUN] Partial (${dstTotal.toLocaleString()}/${srcTotal.toLocaleString()}) — would FAIL job (clean + re-run manually).`,
+        `\n[DRY RUN] Large partial (${dstTotal.toLocaleString()}/${srcTotal.toLocaleString()}) — would FAIL job (likely a crashed run; clean + re-run manually).`,
+      );
+    } else if (dstTotal > 0) {
+      console.log(
+        `\n[DRY RUN] Late-arriver residue (${dstTotal.toLocaleString()}/${srcTotal.toLocaleString()}) — would INSERT full window over it (small overlap duplicated, accepted).`,
       );
     } else {
       console.log('\n[DRY RUN] Fresh window — would INSERT.');
@@ -161,12 +176,22 @@ export async function up() {
     return;
   }
 
-  // A partial window means a prior run crashed mid-INSERT. We don't auto-clean or
-  // re-insert on top (that would duplicate) — just fail the job so it's visible.
-  // We monitor + clean + re-run this window manually if/when we decide to.
-  if (dstTotal > 0) {
+  // Distinguish two "partial" cases:
+  //  - Small residue (< RESIDUE_MAX_RATIO of source): the live dual-write MV seeded
+  //    this pre-T0 window with late-arriving events (old created_at inserted after
+  //    T0). That's correct data. events_v2 is a plain ReplicatedMergeTree (no
+  //    dedup), so re-inserting the full window duplicates the residue — accepted
+  //    (tiny fraction; OPTIMIZE ... 202608 DEDUPLICATE BY id later if ever needed).
+  //  - Large partial (>= RESIDUE_MAX_RATIO): a prior run almost certainly crashed
+  //    mid-INSERT. Re-inserting over that would double a big chunk — fail loudly.
+  if (dstTotal > srcTotal * RESIDUE_MAX_RATIO) {
     throw new Error(
-      `Partial ${DST} for [${start}, ${end}): ${dstTotal} of ${srcTotal} rows present — failing job; clean + re-run this window manually.`,
+      `Large partial ${DST} for [${start}, ${end}): ${dstTotal} of ${srcTotal} rows present (> ${RESIDUE_MAX_RATIO * 100}% of source) — likely a crashed run; clean + re-run this window manually.`,
+    );
+  }
+  if (dstTotal > 0) {
+    console.log(
+      `    Late-arriver residue (${dstTotal.toLocaleString()}/${srcTotal.toLocaleString()}, ${((dstTotal / srcTotal) * 100).toFixed(2)}%) — inserting full window over it; the small overlap is duplicated (accepted).`,
     );
   }
 
@@ -190,15 +215,19 @@ export async function up() {
   const sec = Math.round((Date.now() - t0) / 1000);
   console.log(`    Done in ${Math.floor(sec / 60)}m ${sec % 60}s`);
 
-  // Step 4: verify parity
+  // Step 4: verify parity. We inserted the full window ON TOP of any pre-existing
+  // late-arriver residue, so expect at least (residue + source) rows. `>=` (not ==)
+  // tolerates a few new late-arrivers the live MV may add during the INSERT, while
+  // still catching a short INSERT (dstAfter < expected = a real problem).
+  const expected = dstTotal + srcTotal;
   const dstAfter = await countWindow(DST, start, end);
-  const ok = dstAfter === srcTotal;
+  const ok = dstAfter >= expected;
   console.log(
-    `\n[3] Verify: ${SRC}=${srcTotal.toLocaleString()} ${DST}=${dstAfter.toLocaleString()} -> ${ok ? 'MATCH ✓' : 'MISMATCH ✗ (re-run this window)'}`,
+    `\n[3] Verify: expected >= ${expected.toLocaleString()} (src ${srcTotal.toLocaleString()} + residue ${dstTotal.toLocaleString()}) ; ${DST}=${dstAfter.toLocaleString()} -> ${ok ? 'MATCH ✓' : 'MISMATCH ✗ (re-run this window)'}`,
   );
   if (!ok) {
     throw new Error(
-      `Row-count mismatch for [${start}, ${end}): ${SRC}=${srcTotal} ${DST}=${dstAfter}`,
+      `Row-count too low for [${start}, ${end}): expected >= ${expected} (src ${srcTotal} + residue ${dstTotal}), got ${DST}=${dstAfter} — INSERT fell short; clean + re-run.`,
     );
   }
 
