@@ -20,16 +20,11 @@ export const average = (arr: (number | null)[], includeZero = false) => {
 export const sum = (arr: (number | null | undefined)[]): number =>
   round(arr.filter(isNumber).reduce((acc, item) => acc + item, 0));
 
-// Fold instead of `Math.min(...arr)` — spreading a large array (e.g. a
-// high-cardinality breakdown's flattened data points) exceeds V8's argument
-// limit and throws "Maximum call stack size exceeded". reduce() has no such cap.
-// Empty-input semantics preserved: min([]) -> Infinity, max([]) -> -Infinity
-// (matching Math.min()/Math.max()).
 export const min = (arr: (number | null | undefined)[]): number =>
-  arr.filter(isNumber).reduce((m, n) => (n < m ? n : m), Number.POSITIVE_INFINITY);
+  Math.min(...arr.filter(isNumber));
 
 export const max = (arr: (number | null | undefined)[]): number =>
-  arr.filter(isNumber).reduce((m, n) => (n > m ? n : m), Number.NEGATIVE_INFINITY);
+  Math.max(...arr.filter(isNumber));
 
 export const isFloat = (n: number) => n % 1 !== 0;
 
