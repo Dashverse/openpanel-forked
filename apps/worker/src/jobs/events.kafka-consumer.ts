@@ -92,7 +92,19 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
     const assignedNow = new Set(partitions.map(Number));
     for (const prev of ownedPartitions) {
       if (!assignedNow.has(prev)) {
-        kafkaPartitionOwner.remove(String(prev), POD);
+        const p = String(prev);
+        kafkaPartitionOwner.remove(p, POD);
+        // Also clear the per-partition GAUGES for partitions this pod no longer
+        // owns. Unlike the owner gauge, these had no clear-on-rebalance: after a
+        // rebalance *without* a pod restart, the former owner kept serving a
+        // FROZEN value (e.g. a stale lag of ~500) from its still-live /metrics,
+        // which pollutes the dashboard and reads as a phantom backlog under Max
+        // aggregation — even though the new owner's real lag is 0. Counters
+        // (consumed/errors/reprocessed) are intentionally NOT cleared: their
+        // per-pod cumulative values stay correct when summed across pods.
+        kafkaConsumerLag.remove(p);
+        kafkaCommittedOffset.remove(p);
+        kafkaHighWatermark.remove(p);
       }
     }
     for (const partition of assignedNow) {
