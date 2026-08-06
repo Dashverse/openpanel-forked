@@ -163,7 +163,7 @@ export class ConversionService {
           ? `\n        LEFT JOIN al ON al.alias = ${rawProfileId}`
           : '';
       const profileIdExpr = resolveProfile
-        ? resolvedProfileIdSql(projectId.replace(/'/g, "''"), rawProfileId)
+        ? resolvedProfileIdSql(projectId, rawProfileId)
         : null;
       const selectList = selectColumns
         .map((c) =>
@@ -411,7 +411,7 @@ export class ConversionService {
     const aliasJoin = aliasResolutionNeedsCte()
       ? `\n        LEFT JOIN al ON al.alias = ${E}.profile_id`
       : '';
-    const resolvedPid = resolvedProfileIdSql(projectLiteral, `${E}.profile_id`);
+    const resolvedPid = resolvedProfileIdSql(projectId, `${E}.profile_id`);
 
     // Split-scan breakdown variant. Opens (first event) are grouped per
     // (resolved_pid, b_0) so the breakdown value comes from the START event;

@@ -120,26 +120,35 @@ export function getProfileAliasDict(): string | undefined {
 }
 
 /**
- * SQL expression that resolves `rawProfileId` (a qualified column, e.g.
- * `events.profile_id`) to its canonical id.
- * - dict enabled  -> `dictGetOrDefault(...)` (no `al` CTE / JOIN needed)
- * - dict disabled -> `coalesce(nullIf(al.canonical, ''), rawProfileId)` (caller
- *   MUST include the `al` CTE + `LEFT JOIN al` — see aliasResolutionNeedsCte).
+ * SQL expression resolving an id to its canonical.
+ * - `lookupKey`: the raw id looked up in the alias map (a qualified column, e.g.
+ *   `events.profile_id`). This MUST be the same column the `al` CTE joins on.
+ * - `fallback` (default = lookupKey): the value used when `lookupKey` has no
+ *   alias. In funnel this is the session-stitched id (COALESCE(s.pid, ...)); in
+ *   conversion it is just `lookupKey` itself.
  *
- * `projectLiteral` must already be escaped by the caller.
+ * Both modes have identical semantics — "canonical(lookupKey) if aliased, else
+ * fallback":
+ * - dict on  -> coalesce(nullIf(dictGet(lookupKey), ''), fallback) (no CTE/JOIN)
+ * - dict off -> coalesce(nullIf(al.canonical, ''), fallback) (caller emits the
+ *   `al` CTE + `LEFT JOIN al ON al.alias = lookupKey`; see aliasResolutionNeedsCte).
+ *
+ * The dict name + projectId are escaped (they never reach SQL raw).
  */
 export function resolvedProfileIdSql(
-  projectLiteral: string,
-  rawProfileId: string,
+  projectId: string,
+  lookupKey: string,
+  fallback: string = lookupKey,
 ): string {
   const dict = getProfileAliasDict();
   // Visible resolution path. Grep the dev process output for `[alias-resolution]`.
   logger.info(
     `[alias-resolution] -> ${dict ? `dictGet(${dict})` : 'al-cte (profile_aliases scan)'}`,
   );
-  return dict
-    ? `dictGetOrDefault('${dict}', 'canonical', ('${projectLiteral}', ${rawProfileId}), ${rawProfileId})`
-    : `coalesce(nullIf(al.canonical, ''), ${rawProfileId})`;
+  if (dict) {
+    return `coalesce(nullIf(dictGetOrDefault(${sqlstring.escape(dict)}, 'canonical', (${sqlstring.escape(projectId)}, ${lookupKey}), ''), ''), ${fallback})`;
+  }
+  return `coalesce(nullIf(al.canonical, ''), ${fallback})`;
 }
 
 /** True when the caller still needs to emit the `al` CTE + `LEFT JOIN al` (dict off). */

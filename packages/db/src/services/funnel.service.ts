@@ -233,8 +233,11 @@ export class FunnelService {
     // canonical so a user's anon + identified events collapse to one id.
     // dict on -> dictGet (no `al` CTE/JOIN); dict off -> coalesce over `al`.
     const base = `COALESCE(nullIf(s.pid, ''), ${fromClause}.profile_id)`;
+    // Look up the RAW event profile_id in the alias map (same column the `al` CTE
+    // joins on), falling back to the session-stitched `base`. Both dict + CTE
+    // modes now group identically.
     const expr = resolveAliases
-      ? resolvedProfileIdSql((projectId ?? '').replace(/'/g, "''"), base)
+      ? resolvedProfileIdSql(projectId ?? '', `${fromClause}.profile_id`, base)
       : base;
     return [expr, 'profile_id'];
   }
@@ -949,7 +952,7 @@ export class FunnelService {
           ? '\n          LEFT JOIN al ON al.alias = profile_id'
           : '';
       const ttcGid = resolveAliases
-        ? resolvedProfileIdSql(projectId.replace(/'/g, "''"), 'profile_id')
+        ? resolvedProfileIdSql(projectId, 'profile_id')
         : 'profile_id';
 
       const ttcQuery = `
