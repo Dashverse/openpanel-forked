@@ -573,6 +573,7 @@ function getChartSqlFromPropertyMV({
   startDate,
   endDate,
   projectId,
+  limit,
 }: {
   event: IGetChartDataInput['event'];
   breakdowns: IGetChartDataInput['breakdowns'];
@@ -581,6 +582,7 @@ function getChartSqlFromPropertyMV({
   endDate: string;
   projectId: string;
   timezone: string;
+  limit?: number;
 }): string {
   // Gate guarantees XOR(filter, breakdown): exactly one is present.
   // Both bind the same property_key on the MV; filter pins property_value,
@@ -658,14 +660,46 @@ function getChartSqlFromPropertyMV({
     ? `ORDER BY label_1 ASC, ${dateGroupBy} ASC ${fillClause}`
     : `ORDER BY ${dateGroupBy} ASC\n    ${fillClause}`;
 
-  const sql = `SELECT
+  // Breakdown mode: cap to the top-N property values by the same metric,
+  // mirroring the events path's `top_breakdowns LIMIT`. Without this the MV
+  // returns EVERY distinct value (76k+ for high-card props like `reason`), and
+  // the per-series WITH FILL multiplies that by the interval count — 610k+ rows
+  // to the client, which overflows the formatter's `Math.max(...spread)`. The
+  // frontend only renders the top `limit` series anyway, so this is result-
+  // equivalent, just bounded.
+  const rankExpr =
+    event.segment === 'user'
+      ? 'uniqExact(t.profile_id)'
+      : 'countMerge(t.event_count)';
+  const topValuesCte =
+    isBreakdown && limit
+      ? `WITH top_values AS (
+      SELECT t.property_value
+      FROM profile_event_property_summary_mv t
+      WHERE t.project_id = ${sqlstring.escape(projectId)}
+        AND t.name = ${sqlstring.escape(event.name)}
+        AND t.property_key = ${sqlstring.escape(propKey)}
+        AND t.event_date >= toDateTime(${sqlstring.escape(startDate)})
+        AND t.event_date <= toDateTime(${sqlstring.escape(endDate)})
+      GROUP BY t.property_value
+      ORDER BY ${rankExpr} DESC
+      LIMIT ${Math.floor(limit)}
+    )
+    `
+      : '';
+  const breakdownLimitClause =
+    isBreakdown && limit
+      ? '\n      AND t.property_value IN (SELECT property_value FROM top_values)'
+      : '';
+
+  const sql = `${topValuesCte}SELECT
       ${sqlstring.escape(event.name)} as label_0,${breakdownSelect}
       ${countExpr},
       ${dateSelect}
     FROM profile_event_property_summary_mv t
     WHERE t.project_id = ${sqlstring.escape(projectId)}
       AND t.name = ${sqlstring.escape(event.name)}
-      AND t.property_key = ${sqlstring.escape(propKey)}${valueClause}
+      AND t.property_key = ${sqlstring.escape(propKey)}${valueClause}${breakdownLimitClause}
       AND t.event_date >= toDateTime(${sqlstring.escape(startDate)})
       AND t.event_date <= toDateTime(${sqlstring.escape(endDate)})
     GROUP BY ${breakdownGroupBy}${dateGroupBy}
@@ -1006,6 +1040,7 @@ export async function getChartSql({
       endDate,
       projectId,
       timezone,
+      limit,
     });
   }
 
@@ -1045,6 +1080,14 @@ export async function getChartSql({
 
   if (useCohortMV) {
     sb.from = `${TABLE_NAMES.profile_event_summary_mv} e`;
+  } else {
+    // Route the standard trend/breakdown main query to events_v2 when the range
+    // qualifies. createSqlBuilder()'s default `from` is hardcoded `events e` (v1);
+    // #404 routed the breakdown CTEs (getEventsTableForRange) but not this main
+    // FROM, so breakdown/trend charts scanned the slow name-last v1 table while
+    // their CTEs read v2. The custom-event and distinct paths reassign sb.from
+    // below, so this only sets the default for the regular events path.
+    sb.from = `${getEventsTableForRange(startDate)} e`;
   }
 
   // Create CTEs for all cohorts (used by main query only)
@@ -1450,7 +1493,14 @@ export async function getChartSql({
        ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForTotal ? `${cohortJoinsForTotal} ` : ''}${totalCountWhere}`,
     );
 
-    sb.select.total_unique_count = `(SELECT total_count FROM total_unique) as total_count`;
+    // CROSS JOIN (not a scalar subquery) so filter columns inside total_unique
+    // (e.g. `platform`) bind to total_unique's own FROM, not the outer `e`.
+    // The `(SELECT total_count FROM total_unique)` scalar-subquery form makes
+    // ClickHouse's analyzer treat a bare filter column as a correlated reference
+    // to `e.<col>` and fail ("Resolved identifier ... with correlated column").
+    // total_unique returns exactly one row, so CROSS JOIN never fans out.
+    sb.joins.total_unique = `CROSS JOIN total_unique`;
+    sb.select.total_unique_count = `any(total_unique.total_count) as total_count`;
   }
 
   const sql = `${getWith()}${getSelect()} ${getFrom()} ${getJoins()} ${getWhere()} ${getGroupBy()} ${getOrderBy()} ${getFill()}`;
