@@ -22,12 +22,24 @@ if (process.env.NITRO) {
       preset: 'node-server',
       compatibilityDate: '2025-10-21',
       serveStatic: true,
+      // Missing hashed assets must 404 instead of falling through to the SSR
+      // renderer — otherwise the HTML response gets cached under the .js URL
+      // with the immutable header below, permanently (2026-07-08 incident).
+      handlers: [{ route: '/assets/**', handler: './src/server/assets-404.ts' }],
       routeRules: {
         // Content-hashed build assets: a new build produces new URLs,
         // so these are safe to cache forever at the edge and browser.
         '/assets/**': {
           headers: {
             'cache-control': 'public, max-age=31536000, immutable',
+          },
+        },
+        // Tracking script embedded by external sites; not hashed, so it
+        // needs a short TTL — but no-cache would turn every tracked-site
+        // pageview into an origin hit on the dashboard pod.
+        '/op1.js': {
+          headers: {
+            'cache-control': 'public, max-age=300, stale-while-revalidate=3600',
           },
         },
         // SSR HTML and unhashed public files change in place between
