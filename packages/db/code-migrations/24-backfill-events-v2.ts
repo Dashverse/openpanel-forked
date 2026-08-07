@@ -132,11 +132,22 @@ export async function up() {
   // but this caps a runaway at ~20 GB (under Aiven's ~23 GB per-query ceiling) so
   // it dies as a recoverable Code 241 on THAT query, never OOMs the shared server.
   const maxMemoryBytes = process.env.BACKFILL_MAX_MEMORY_BYTES || '20000000000';
+  // events_v2 is a 1:1 row copy re-sorted into the new key, so it writes many
+  // parts; the background MERGES of those parts are the real CPU cost. Bigger
+  // insert blocks => fewer, larger parts => far fewer merges (the main lever).
+  const insertBlockSize =
+    process.env.BACKFILL_INSERT_BLOCK_SIZE || '8000000';
+  // Optional read/write throttle (bytes/sec) so parts are created no faster than
+  // merges can absorb, capping peak CPU. 0 = unlimited (default); set e.g.
+  // 150000000 (~150 MB/s) to run gentle next to live traffic.
+  const maxSpeedBytes = process.env.BACKFILL_MAX_SPEED_BYTES || '0';
 
   console.log('='.repeat(60));
   console.log(`  BACKFILL ${SRC} -> ${DST}`);
   console.log(`  Window: [${start}, ${end})`);
-  console.log(`  Mode:   ${isDry ? 'DRY RUN' : 'EXECUTE'}  threads=${maxThreads}`);
+  console.log(
+    `  Mode:   ${isDry ? 'DRY RUN' : 'EXECUTE'}  threads=${maxThreads}  block=${insertBlockSize}  speedBytes=${maxSpeedBytes}`,
+  );
   console.log('='.repeat(60));
 
   // Step 0: source count
@@ -204,7 +215,9 @@ export async function up() {
     SETTINGS
       max_threads = ${maxThreads},
       max_insert_threads = ${maxThreads},
-      max_insert_block_size = 1000000,
+      max_insert_block_size = ${insertBlockSize},
+      min_insert_block_size_rows = ${insertBlockSize},
+      max_execution_speed_bytes = ${maxSpeedBytes},
       optimize_trivial_insert_select = 1,
       max_memory_usage = ${maxMemoryBytes},
       max_execution_time = ${maxExecSec}`;
