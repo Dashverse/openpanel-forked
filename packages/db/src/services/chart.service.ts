@@ -1542,6 +1542,8 @@ async function setupCustomEventCTE(
   const customEventSQL = await expandCustomEventToSQL(
     { ...customEvent, projectId },
     baseWhere,
+    undefined,
+    startDate,
   );
 
   addCte('custom_event_data', customEventSQL);
