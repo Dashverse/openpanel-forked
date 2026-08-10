@@ -17,6 +17,7 @@ import {
   TABLE_NAMES,
   formatClickhouseDate,
   getEventsTableForRange,
+  getPropertyMvTableForRange,
 } from '../clickhouse/client';
 import { createSqlBuilder } from '../sql-builder';
 import {
@@ -561,7 +562,16 @@ function canUsePropertyMV(
   // Date-only comparison. startDate is a DateTime string like
   // '2026-04-07 00:00:00'; slice off the time so a same-day cutoff
   // doesn't reject the query on hour-of-day.
-  if (startDate.slice(0, 10) < getPropertyMVCutoffDate()) return false;
+  //
+  // When v2 property-MV routing is ON (PROPERTY_MV_V2_MIN_DATE set), the
+  // effective cutoff is the v2 window start: only ranges v2 covers use the MV
+  // (getChartSqlFromPropertyMV then reads the anon-correct v2 table). Ranges
+  // before it return false and fall through to the events_v2/events path
+  // (correct) instead of the undercounting v1 MV. Env unset = legacy v1-retention
+  // cutoff, unchanged.
+  const v2Cutoff = process.env.PROPERTY_MV_V2_MIN_DATE?.trim();
+  const cutoff = v2Cutoff ? v2Cutoff.slice(0, 10) : getPropertyMVCutoffDate();
+  if (startDate.slice(0, 10) < cutoff) return false;
 
   return true;
 }
@@ -667,6 +677,11 @@ function getChartSqlFromPropertyMV({
   // to the client, which overflows the formatter's `Math.max(...spread)`. The
   // frontend only renders the top `limit` series anyway, so this is result-
   // equivalent, just bounded.
+  // Route to the anon-inclusive v2 property MV when the range starts >= the
+  // Jul-1 cutoff; otherwise v1 (which has full history). Same schema, so only
+  // the table name changes.
+  const propTable = getPropertyMvTableForRange(startDate);
+
   const rankExpr =
     event.segment === 'user'
       ? 'uniqExact(t.profile_id)'
@@ -675,7 +690,7 @@ function getChartSqlFromPropertyMV({
     isBreakdown && limit
       ? `WITH top_values AS (
       SELECT t.property_value
-      FROM profile_event_property_summary_mv t
+      FROM ${propTable} t
       WHERE t.project_id = ${sqlstring.escape(projectId)}
         AND t.name = ${sqlstring.escape(event.name)}
         AND t.property_key = ${sqlstring.escape(propKey)}
@@ -696,7 +711,7 @@ function getChartSqlFromPropertyMV({
       ${sqlstring.escape(event.name)} as label_0,${breakdownSelect}
       ${countExpr},
       ${dateSelect}
-    FROM profile_event_property_summary_mv t
+    FROM ${propTable} t
     WHERE t.project_id = ${sqlstring.escape(projectId)}
       AND t.name = ${sqlstring.escape(event.name)}
       AND t.property_key = ${sqlstring.escape(propKey)}${valueClause}${breakdownLimitClause}
