@@ -1602,6 +1602,20 @@ export function getEventFiltersWhereClause(
       return;
     }
 
+    // Properties are stored as strings in ClickHouse. For comparison operators (gt/lt/gte/lte),
+    // we need to cast to the right type based on the value:
+    // - Numeric values (e.g. '42.5') → toFloat64 comparison
+    // - Datetime values (e.g. '2026-03-28 10:39:19') → string comparison (lexicographic order matches chronological for ISO format)
+    // - Other strings → string comparison
+    const isNumericValue = (val: string) => /^-?\d+(\.\d+)?$/.test(val.trim());
+    const buildComparison = (column: string, op: string, val: string) => {
+      const escaped = sqlstring.escape(val);
+      if (isNumericValue(val)) {
+        return `toFloat64OrZero(${column}) ${op} toFloat64(${escaped})`;
+      }
+      return `${column} ${op} ${escaped}`;
+    };
+
     if (
       name.startsWith('properties.') ||
       name.startsWith('profile.properties.')
@@ -1750,17 +1764,11 @@ export function getEventFiltersWhereClause(
         case 'gt': {
           if (isWildcard) {
             where[id] = `arrayExists(x -> ${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(x) > toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison('x', '>', String(val).trim()))
               .join(' OR ')}, ${whereFrom})`;
           } else {
             where[id] = `(${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(${whereFrom}) > toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison(whereFrom, '>', String(val).trim()))
               .join(' OR ')})`;
           }
           break;
@@ -1768,17 +1776,11 @@ export function getEventFiltersWhereClause(
         case 'lt': {
           if (isWildcard) {
             where[id] = `arrayExists(x -> ${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(x) < toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison('x', '<', String(val).trim()))
               .join(' OR ')}, ${whereFrom})`;
           } else {
             where[id] = `(${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(${whereFrom}) < toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison(whereFrom, '<', String(val).trim()))
               .join(' OR ')})`;
           }
           break;
@@ -1786,17 +1788,11 @@ export function getEventFiltersWhereClause(
         case 'gte': {
           if (isWildcard) {
             where[id] = `arrayExists(x -> ${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(x) >= toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison('x', '>=', String(val).trim()))
               .join(' OR ')}, ${whereFrom})`;
           } else {
             where[id] = `(${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(${whereFrom}) >= toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison(whereFrom, '>=', String(val).trim()))
               .join(' OR ')})`;
           }
           break;
@@ -1804,17 +1800,11 @@ export function getEventFiltersWhereClause(
         case 'lte': {
           if (isWildcard) {
             where[id] = `arrayExists(x -> ${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(x) <= toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison('x', '<=', String(val).trim()))
               .join(' OR ')}, ${whereFrom})`;
           } else {
             where[id] = `(${value
-              .map(
-                (val) =>
-                  `toFloat64OrZero(${whereFrom}) <= toFloat64(${sqlstring.escape(String(val).trim())})`,
-              )
+              .map((val) => buildComparison(whereFrom, '<=', String(val).trim()))
               .join(' OR ')})`;
           }
           break;
