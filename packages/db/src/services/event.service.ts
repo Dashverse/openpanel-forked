@@ -394,11 +394,18 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
   const promises = [sessionBuffer.add(event), eventBuffer.add(event)];
 
   if (payload.profileId) {
+    // For attribution events, include af_adset in the profile
+    const isAttributionEvent = payload.name === 'appsflyerInstallWebhook';
+    const attributionProperties = isAttributionEvent
+      ? { af_adset: payload.properties?.af_adset }
+      : {};
+
     const profile: IServiceUpsertProfile = {
       id: String(payload.profileId),
       isExternal: payload.profileId !== payload.deviceId,
       projectId: payload.projectId,
       properties: {
+        ...attributionProperties,
         path: payload.path,
         country: payload.country,
         city: payload.city,
@@ -420,9 +427,11 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
 
     if (
       profile.isExternal ||
-      (profile.isExternal === false && payload.name === 'session_start')
+      (profile.isExternal === false && payload.name === 'session_start') ||
+      isAttributionEvent
     ) {
-      promises.push(upsertProfile(profile, true));
+      const isFromEvent = !isAttributionEvent;
+      promises.push(upsertProfile(profile, isFromEvent));
     }
   }
 
