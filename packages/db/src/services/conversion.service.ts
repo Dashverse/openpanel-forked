@@ -102,6 +102,7 @@ export class ConversionService {
         },
         baseWhere,
         neededColumns,
+        startDate,
       );
 
       return `${cteName} AS (${sql})`;
@@ -249,6 +250,8 @@ export class ConversionService {
               definition: customEvent.definition as any,
             },
             baseWhere,
+            undefined,
+            startDate,
           );
           return `custom_event_${index} AS (${sql})`;
         }

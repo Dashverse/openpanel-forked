@@ -1,6 +1,6 @@
 import sqlstring from 'sqlstring';
 import type { ICustomEventDefinition } from '@openpanel/validation';
-import { TABLE_NAMES } from '../clickhouse/client';
+import { getEventsTableForRange } from '../clickhouse/client';
 import { db } from '../prisma-client';
 import { getEventFiltersWhereClause, getMaterializedColumns } from './chart.service';
 
@@ -40,6 +40,7 @@ function buildCustomEventSourceQuery(
   sourceEvent: { name: string; filters?: any[] },
   baseWhere: string[], // Additional WHERE conditions from outer query
   materializedColumnsSelect: string, // Materialized columns to include
+  dataSource: string, // Source table (events or events_v2, routed by caller)
 ): string {
   const whereClauses = [
     `project_id = ${sqlstring.escape(projectId)}`,
@@ -61,7 +62,7 @@ function buildCustomEventSourceQuery(
   // IMPORTANT: REPLACE must come immediately after *, then additional columns
   return `
     SELECT * REPLACE(${sqlstring.escape(customEventName)} AS name)${materializedColumnsSelect}
-    FROM ${TABLE_NAMES.events}
+    FROM ${dataSource}
     WHERE ${whereClauses.join(' AND ')}
   `;
 }
@@ -98,8 +99,14 @@ export async function expandCustomEventToSQL(
   },
   baseWhere: string[] = [],
   selectColumns?: string[],
+  startDate?: string,
 ): Promise<string> {
   const definition = customEvent.definition;
+
+  // Route the underlying event scan to events_v2 when the range qualifies
+  // (name-first key prunes `name IN (...)` hard — the biggest win for custom
+  // events). Falls back to `events` when startDate is undefined / routing is off.
+  const dataSource = getEventsTableForRange(startDate);
 
   // Get materialized column names to explicitly include in SELECT
   // (SELECT * doesn't include materialized columns in CTEs)
@@ -133,7 +140,7 @@ export async function expandCustomEventToSQL(
       const eventNames = definition.events.map((e) => sqlstring.escape(e.name));
       return `
         SELECT ${selectList}
-        FROM ${TABLE_NAMES.events}
+        FROM ${dataSource}
         WHERE project_id = ${sqlstring.escape(customEvent.projectId)}
           AND name IN (${eventNames.join(', ')})
           AND ${baseWhere.join(' AND ')}
@@ -151,7 +158,7 @@ export async function expandCustomEventToSQL(
         const filterWhere = getEventFiltersWhereClause(sourceEvent.filters, customEvent.projectId);
         whereClauses.push(...Object.values(filterWhere));
       }
-      return `SELECT ${selectList} FROM ${TABLE_NAMES.events} WHERE ${whereClauses.join(' AND ')}`;
+      return `SELECT ${selectList} FROM ${dataSource} WHERE ${whereClauses.join(' AND ')}`;
     });
     return sourceQueries.join(' UNION ALL ');
   }
@@ -169,7 +176,7 @@ export async function expandCustomEventToSQL(
 
     return `
       SELECT * REPLACE(${sqlstring.escape(customEvent.name)} AS name)${materializedColumnsSelect}
-      FROM ${TABLE_NAMES.events}
+      FROM ${dataSource}
       WHERE ${whereClauses.join(' AND ')}
     `;
   }
@@ -184,6 +191,7 @@ export async function expandCustomEventToSQL(
       sourceEvent,
       baseWhere,
       materializedColumnsSelect,
+      dataSource,
     ),
   );
 

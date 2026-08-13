@@ -1557,10 +1557,17 @@ async function setupCustomEventCTE(
   const customEventSQL = await expandCustomEventToSQL(
     { ...customEvent, projectId },
     baseWhere,
+    undefined,
+    startDate,
   );
 
   addCte('custom_event_data', customEventSQL);
-  sb.from = 'custom_event_data';
+  // Alias as `e` so the shared join clauses (cohort breakdown at
+  // getCohortJoin / getProfileJoin, all keyed on `e.profile_id`) resolve — the
+  // non-custom path sets `<events table> e`, so custom events must match. Without
+  // the alias, a custom-event chart WITH a cohort breakdown fails with
+  // "Unknown expression identifier `e.profile_id`".
+  sb.from = 'custom_event_data e';
 }
 
 export function getEventFiltersWhereClause(
