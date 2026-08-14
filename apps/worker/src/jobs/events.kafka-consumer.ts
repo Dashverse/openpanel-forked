@@ -39,6 +39,38 @@ const resolvedHWM = new Map<string, number>();
 // container hostname is the pod name; fall back to something non-empty locally.
 const POD = process.env.HOSTNAME || process.env.POD_NAME || 'unknown';
 
+// Routing key that keeps a device's/profile's events serial so the non-atomic
+// session-buffer read-modify-write can't race. When produced via the Kafka
+// protocol this is the record key (m.key). The Azure Event Hubs producer routes
+// by an AMQP partitionKey that is NOT exposed as the Kafka key, so m.key is
+// empty there — fall back to __groupId carried in the payload (the exact value
+// the producer partitioned by; set in packages/queue/src/eventhub-producer.ts),
+// then currentDeviceId, then a per-offset singleton as a last resort. Same-key
+// events share one ordered partition, so grouping by it restores serial-per-key.
+// (Incident 2026-08-14: empty m.key made every message its own singleton group
+// → a device's events processed in parallel → duplicate/uncollapsible session
+// rows.)
+const messageGroupKey = (m: KafkaMessage): string => {
+  if (m.key) {
+    return m.key.toString();
+  }
+  if (m.value) {
+    try {
+      const p = JSON.parse(m.value.toString()) as {
+        __groupId?: string;
+        currentDeviceId?: string;
+      };
+      const k = p.__groupId || p.currentDeviceId;
+      if (k) {
+        return k;
+      }
+    } catch {
+      // malformed value → fall through to a singleton group
+    }
+  }
+  return `__no_key__:${m.offset}`;
+};
+
 // Partitions this pod currently owns, so on the next GROUP_JOIN we can clear the
 // owner gauge for any partition that moved to another member (otherwise a stale
 // `owner=1` would linger and make two pods look like they own the same one).
@@ -161,11 +193,13 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
 
       // Group by partition key (= deviceId or `${projectId}:${profileId}`).
       // Same-key messages stay serial so sessionBuffer/session-end-job state
-      // can't race; different keys run in parallel via Promise.all.
-      // Keyless messages get their own singleton group.
+      // can't race; different keys run in parallel via Promise.all. The key
+      // comes from m.key (Kafka protocol) or the payload's __groupId/deviceId
+      // (Azure Event Hubs, whose partitionKey isn't exposed as m.key) — see
+      // messageGroupKey. Only a truly unidentifiable message becomes a singleton.
       const groups = new Map<string, KafkaMessage[]>();
       for (const m of batch.messages) {
-        const key = m.key ? m.key.toString() : `__no_key__:${m.offset}`;
+        const key = messageGroupKey(m);
         const arr = groups.get(key);
         if (arr) {
           arr.push(m);
