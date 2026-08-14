@@ -3,10 +3,13 @@ import {
   type Consumer,
   Kafka,
   type KafkaConfig,
-  logLevel,
-  type Producer,
   type SASLOptions,
+  logLevel,
 } from 'kafkajs';
+import {
+  disconnectEventHubProducer,
+  produceViaEventHub,
+} from './eventhub-producer';
 import type { EventsQueuePayloadIncomingEvent } from './queues';
 
 export type { KafkaMessage } from 'kafkajs';
@@ -57,27 +60,15 @@ export const KAFKA_HEARTBEAT_INTERVAL_MS = Number.parseInt(
   10,
 );
 
-// Producer fail-fast knobs. Defaults give a worst-case total of a few seconds
-// instead of kafkajs's stock ~150s, so a broker outage doesn't park HTTP
-// requests on the track path long enough to saturate the LB.
+// Client fail-fast knobs (used by the consumer's Kafka client). Defaults give a
+// worst-case connect/request of a few seconds instead of kafkajs's stock ~150s,
+// so a broker hiccup fails fast instead of hanging.
 export const KAFKA_REQUEST_TIMEOUT_MS = Number.parseInt(
   process.env.KAFKA_REQUEST_TIMEOUT_MS || '5000',
   10,
 );
 export const KAFKA_CONNECTION_TIMEOUT_MS = Number.parseInt(
   process.env.KAFKA_CONNECTION_TIMEOUT_MS || '2000',
-  10,
-);
-export const KAFKA_PRODUCER_RETRIES = Number.parseInt(
-  process.env.KAFKA_PRODUCER_RETRIES || '2',
-  10,
-);
-export const KAFKA_PRODUCER_INITIAL_RETRY_MS = Number.parseInt(
-  process.env.KAFKA_PRODUCER_INITIAL_RETRY_MS || '100',
-  10,
-);
-export const KAFKA_PRODUCER_MAX_RETRY_MS = Number.parseInt(
-  process.env.KAFKA_PRODUCER_MAX_RETRY_MS || '1000',
   10,
 );
 
@@ -157,113 +148,15 @@ const getKafka = (): Kafka => {
   return kafka;
 };
 
-let producer: Producer | null = null;
-let producerConnectPromise: Promise<Producer> | null = null;
-
-const getProducer = async (): Promise<Producer> => {
-  if (producer) {
-    return producer;
-  }
-  if (!producerConnectPromise) {
-    const client = getKafka();
-    const p = client.producer({
-      idempotent: true,
-      // 1 (not 5) to avoid in-flight reordering after a transient broker hiccup:
-      // with idempotency on and low retries, reordered batches trip
-      // OUT_OF_ORDER_SEQUENCE_NUMBER and stick the producer per-partition.
-      maxInFlightRequests: 1,
-      allowAutoTopicCreation: true,
-      retry: {
-        retries: KAFKA_PRODUCER_RETRIES,
-        initialRetryTime: KAFKA_PRODUCER_INITIAL_RETRY_MS,
-        maxRetryTime: KAFKA_PRODUCER_MAX_RETRY_MS,
-        factor: 2,
-      },
-    });
-    producerConnectPromise = p
-      .connect()
-      .then(() => {
-        producer = p;
-        kafkaLogger.info('kafka producer connected', {
-          brokers: KAFKA_BROKERS,
-          topic: KAFKA_EVENTS_TOPIC,
-        });
-        return p;
-      })
-      .catch((err) => {
-        producerConnectPromise = null;
-        throw err;
-      });
-  }
-  return producerConnectPromise;
-};
-
-// Kafka error codes that mean the producer's PID/sequence state is
-// permanently out of sync with the broker for some partition — only a
-// fresh PID (new producer instance) can recover.
-//   45 OUT_OF_ORDER_SEQUENCE_NUMBER
-//   46 DUPLICATE_SEQUENCE_NUMBER
-//   47 INVALID_PRODUCER_EPOCH
-//   65 UNKNOWN_PRODUCER_ID
-const FATAL_PRODUCER_ERROR_CODES = new Set<number>([45, 46, 47, 65]);
-
-const isFatalProducerError = (err: unknown): boolean => {
-  if (!err || typeof err !== 'object') {
-    return false;
-  }
-  const name = (err as { name?: string }).name;
-  // Retries-exceeded leaves the idempotent producer's sequence state
-  // suspect (broker may have persisted a batch we gave up on), so treat
-  // it as fatal-for-this-producer too.
-  if (name === 'KafkaJSNumberOfRetriesExceeded') {
-    return true;
-  }
-  if (name === 'KafkaJSProtocolError') {
-    const code = (err as { code?: number }).code;
-    return typeof code === 'number' && FATAL_PRODUCER_ERROR_CODES.has(code);
-  }
-  return false;
-};
-
-const resetProducer = (broken: Producer): void => {
-  if (producer !== broken) {
-    return;
-  }
-  producer = null;
-  producerConnectPromise = null;
-  broken.disconnect().catch((err) => {
-    kafkaLogger.warn('kafka producer disconnect after fatal error failed', {
-      err,
-    });
-  });
-};
-
-export const produceIncomingEvent = async (
+// Produce one event to the events topic via the Azure Event Hubs buffered
+// producer (auto-batches → no per-request round-trip, no mif=1 pile-up / OOM).
+// The events CONSUMER is still kafkajs — an AMQP-produced object body round-
+// trips to it as clean JSON (verified on the prod topic). Requires
+// EVENTHUB_CONNECTION_STRING; there is no kafkajs producer path anymore.
+export const produceIncomingEvent = (
   payload: EventsQueuePayloadIncomingEvent['payload'],
   partitionKey: string,
-): Promise<void> => {
-  const p = await getProducer();
-  try {
-    await p.send({
-      topic: KAFKA_EVENTS_TOPIC,
-      timeout: KAFKA_REQUEST_TIMEOUT_MS,
-      messages: [
-        {
-          key: Buffer.from(partitionKey),
-          value: Buffer.from(JSON.stringify(payload)),
-        },
-      ],
-    });
-  } catch (err) {
-    if (isFatalProducerError(err)) {
-      kafkaLogger.warn('kafka producer in fatal state; resetting for next call', {
-        err,
-      });
-      resetProducer(p);
-    }
-    throw err;
-  }
-};
+): Promise<void> => produceViaEventHub(payload, partitionKey);
 
 const consumers = new Set<Consumer>();
 
@@ -284,7 +177,7 @@ export const createKafkaEventsConsumer = (options?: {
 };
 
 export const disconnectKafka = async (): Promise<void> => {
-  const tasks: Promise<unknown>[] = [];
+  const tasks: Promise<unknown>[] = [disconnectEventHubProducer()];
   for (const c of consumers) {
     tasks.push(
       c.disconnect().catch((err) => {
@@ -293,15 +186,5 @@ export const disconnectKafka = async (): Promise<void> => {
     );
   }
   consumers.clear();
-  if (producer) {
-    const p = producer;
-    producer = null;
-    producerConnectPromise = null;
-    tasks.push(
-      p.disconnect().catch((err) => {
-        kafkaLogger.error('kafka producer disconnect error', { err });
-      }),
-    );
-  }
   await Promise.all(tasks);
 };
