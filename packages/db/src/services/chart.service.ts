@@ -1397,8 +1397,21 @@ export async function getChartSql({
   }
 
   if (event.segment === 'one_event_per_user') {
+    // `SELECT *` omits MATERIALIZED columns, so the outer query's filters or
+    // breakdowns on a materialized column (e.g. `source`) fail inside this
+    // subquery with "Unknown expression identifier `source`". Project the
+    // materialized columns explicitly (same as the custom-event CTE path).
+    // Exclude `name` — already provided by `*` — to avoid a duplicate column.
+    const materializedColumns = await getMaterializedColumns('events');
+    const materializedColumnNames = Object.values(materializedColumns).filter(
+      (col) => col.replace(/`/g, '') !== 'name',
+    );
+    const materializedColumnsSelect =
+      materializedColumnNames.length > 0
+        ? `, ${materializedColumnNames.join(', ')}`
+        : '';
     sb.from = `(
-      SELECT DISTINCT ON (profile_id) * from ${getEventsTableForRange(startDate)} ${getJoins()} WHERE ${join(
+      SELECT DISTINCT ON (profile_id) *${materializedColumnsSelect} from ${getEventsTableForRange(startDate)} ${getJoins()} WHERE ${join(
         sb.where,
         ' AND ',
       )}
