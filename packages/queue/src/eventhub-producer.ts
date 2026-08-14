@@ -178,7 +178,14 @@ export const produceViaEventHub = async (
         // and JSON.parses it once; a pre-stringified string double-encodes and
         // the consumer gets a string instead of the payload (round-trip verified
         // on the prod topic). Never JSON.stringify here.
-        body: payload,
+        //
+        // __groupId carries the routing key INSIDE the body on purpose: Event
+        // Hubs uses the AMQP partitionKey (below) only for partition routing —
+        // it does NOT surface as the Kafka record key on the consumer, so the
+        // consumer can't group by m.key to serialize a device's events. The
+        // body round-trips reliably, so the consumer groups by __groupId instead
+        // (incident 2026-08-14: keyless messages raced the session buffer).
+        body: { ...payload, __groupId: partitionKey },
         properties: { __cid: cid },
       },
       // partitionKey keeps a device's events on one partition (ordering);
