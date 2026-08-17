@@ -36,9 +36,13 @@ type Props = {
 };
 
 // Conversion % label shown on top of each funnel bar.
+// Integer labels for readability, but show one decimal for small non-zero
+// values (0 < n < 1) so a real 0.2% isn't rounded down to a misleading "0%"
+// (the table shows 0.2%, so the graph must not disagree).
 const formatPercentLabel = (value: number | string | undefined) => {
   const n = Number(value);
-  return Number.isFinite(n) ? `${Math.round(n)}%` : '';
+  if (!Number.isFinite(n)) return '';
+  return n > 0 && n < 1 ? `${Math.round(n * 10) / 10}%` : `${Math.round(n)}%`;
 };
 
 export const Metric = ({
