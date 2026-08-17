@@ -33,9 +33,17 @@ export function ConversionTable({
     short: true,
   });
 
-  // Get all unique dates from the first series
+  // Union of dates across ALL series, sorted. Breakdown conversion series don't
+  // share the same dates (each value only has the days it had a cohort), so
+  // keying off series[0] truncated the day columns to whichever value was
+  // sparsest — dropping recent days other series had.
   const dates = useMemo(
-    () => data.current[0]?.data.map((item) => item.date) ?? [],
+    () =>
+      Array.from(
+        new Set(
+          data.current.flatMap((serie) => serie.data.map((item) => item.date)),
+        ),
+      ).sort(),
     [data.current],
   );
 

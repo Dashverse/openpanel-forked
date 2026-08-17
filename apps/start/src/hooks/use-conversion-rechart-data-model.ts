@@ -9,19 +9,20 @@ export function useConversionRechartDataModel(
       return [];
     }
 
-    // Get all unique dates from the first series (all series should have same dates)
-    const dates = series[0].data.map((item) => item.date);
+    // X-axis dates = the UNION of dates across ALL series, sorted.
+    // The old code used only `series[0].data` on the assumption that "all series
+    // share the same dates" — but breakdown conversion series do NOT: a breakdown
+    // value only has points on days it had a cohort. If series[0] happened to be a
+    // sparse value (e.g. one that only converted on a day or two), the whole x-axis
+    // truncated to those days, silently dropping recent days that OTHER series had.
+    const dates = Array.from(
+      new Set(series.flatMap((serie) => serie.data.map((item) => item.date))),
+    ).sort();
 
     return dates.map((date) => {
-      const baseItem = series[0].data.find((item) => item.date === date);
-      if (!baseItem) {
-        return {
-          date,
-          timestamp: new Date(date).getTime(),
-        };
-      }
-
-      // Build data object with all series values
+      // Build the point from EVERY series' value for this date (each may or may not
+      // have data on a given day). No early-return keyed on series[0] — that would
+      // drop a date present only in later series.
       const dataPoint: Record<string, any> = {
         date,
         timestamp: new Date(date).getTime(),
