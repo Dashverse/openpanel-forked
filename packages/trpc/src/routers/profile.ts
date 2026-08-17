@@ -13,6 +13,8 @@ import {
   getProfiles,
 } from '@openpanel/db';
 
+import { zChartEventFilter } from '@openpanel/validation';
+
 import { createTRPCRouter, protectedProcedure } from '../trpc';
 
 export const profileRouter = createTRPCRouter({
@@ -81,6 +83,31 @@ export const profileRouter = createTRPCRouter({
         take: z.number().default(50),
         search: z.string().optional(),
         isExternal: z.boolean().optional(),
+        filters: z.array(zChartEventFilter).optional(),
+        events: z.array(z.string()).optional(),
+        range: z.string().optional(),
+        startDate: z.string().nullish(),
+        endDate: z.string().nullish(),
+        lastSeenDir: z.enum(['ASC', 'DESC']).optional(),
+        lastSeenStart: z.string().nullish(),
+        lastSeenEnd: z.string().nullish(),
+        // "did event OP N times" threshold. between/notBetween use value2.
+        eventCount: z
+          .object({
+            operator: z.enum([
+              'eq',
+              'ne',
+              'gt',
+              'gte',
+              'lt',
+              'lte',
+              'between',
+              'notBetween',
+            ]),
+            value: z.number().int().min(0),
+            value2: z.number().int().min(0).optional(),
+          })
+          .optional(),
       }),
     )
     .query(async ({ input }) => {

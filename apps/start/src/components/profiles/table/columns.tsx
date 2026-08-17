@@ -1,15 +1,34 @@
 import { ProjectLink } from '@/components/links';
 import { SerieIcon } from '@/components/report-chart/common/serie-icon';
-import { Tooltiper } from '@/components/ui/tooltip';
-import { formatDateTime, formatTime } from '@/utils/date';
+import { useProfilesSort } from '@/hooks/use-profiles-sort';
 import { getProfileName } from '@/utils/getters';
 import type { ColumnDef } from '@tanstack/react-table';
-import { isToday } from 'date-fns';
+import { ArrowDownIcon, ArrowUpIcon } from 'lucide-react';
 
 import type { IServiceProfile } from '@openpanel/db';
 
 import { ColumnCreatedAt } from '@/components/column-created-at';
 import { ProfileAvatar } from '../profile-avatar';
+
+// Clickable "Last seen" header — toggles created_at asc/desc, Mixpanel-style.
+function LastSeenHeader() {
+  const { dir, toggleDir } = useProfilesSort();
+  return (
+    <button
+      type="button"
+      onClick={toggleDir}
+      className="group flex items-center gap-1 select-none hover:text-foreground"
+      title={`Sorted ${dir === 'desc' ? 'newest first' : 'oldest first'} — click to flip`}
+    >
+      Last seen
+      {dir === 'desc' ? (
+        <ArrowDownIcon className="size-3.5 opacity-70" />
+      ) : (
+        <ArrowUpIcon className="size-3.5 opacity-70" />
+      )}
+    </button>
+  );
+}
 
 export function useColumns(type: 'profiles' | 'power-users') {
   const columns: ColumnDef<IServiceProfile>[] = [
@@ -31,81 +50,54 @@ export function useColumns(type: 'profiles' | 'power-users') {
       },
     },
     {
-      accessorKey: 'referrer',
-      header: 'Referrer',
-      cell({ row }) {
-        const { referrer, referrer_name } = row.original.properties;
-        const ref = referrer_name || referrer;
-        return (
-          <div className="flex min-w-0 items-center gap-2">
-            <SerieIcon name={ref} />
-            <span className="truncate">{ref}</span>
-          </div>
-        );
-      },
+      accessorKey: 'email',
+      header: 'Email',
+      cell: ({ row }) => <span className="truncate">{row.original.email}</span>,
+    },
+    {
+      accessorKey: 'id',
+      header: 'Distinct ID',
+      cell: ({ row }) => (
+        <span className="truncate font-mono text-xs text-muted-foreground">
+          {row.original.id}
+        </span>
+      ),
+    },
+    {
+      accessorKey: 'createdAt',
+      // Sortable only on the profiles list (power-users uses a different query).
+      header: type === 'profiles' ? () => <LastSeenHeader /> : 'Last seen',
+      size: ColumnCreatedAt.size,
+      cell: ({ row }) => (
+        <ColumnCreatedAt exact>{row.original.createdAt}</ColumnCreatedAt>
+      ),
     },
     {
       accessorKey: 'country',
       header: 'Country',
       cell({ row }) {
-        const { country, city } = row.original.properties;
+        const { country } = row.original.properties;
         return (
           <div className="flex min-w-0 items-center gap-2">
             <SerieIcon name={country} />
-            <span className="truncate">{city}</span>
+            <span className="truncate">{country}</span>
           </div>
         );
       },
     },
     {
-      accessorKey: 'os',
-      header: 'OS',
-      cell({ row }) {
-        const { os } = row.original.properties;
-        return (
-          <div className="flex min-w-0 items-center gap-2">
-            <SerieIcon name={os} />
-            <span className="truncate">{os}</span>
-          </div>
-        );
-      },
+      accessorKey: 'region',
+      header: 'Region',
+      cell: ({ row }) => (
+        <span className="truncate">{row.original.properties.region}</span>
+      ),
     },
     {
-      accessorKey: 'browser',
-      header: 'Browser',
-      cell({ row }) {
-        const { browser } = row.original.properties;
-        return (
-          <div className="flex min-w-0 items-center gap-2">
-            <SerieIcon name={browser} />
-            <span className="truncate">{browser}</span>
-          </div>
-        );
-      },
-    },
-    {
-      accessorKey: 'model',
-      header: 'Model',
-      cell({ row }) {
-        const { model, brand } = row.original.properties;
-        return (
-          <div className="flex min-w-0 items-center gap-2">
-            <SerieIcon name={brand} />
-            <span className="truncate">
-              {brand} / {model}
-            </span>
-          </div>
-        );
-      },
-    },
-    {
-      accessorKey: 'createdAt',
-      header: 'Last seen',
-      size: ColumnCreatedAt.size,
-      cell: ({ row }) => {
-        const item = row.original;
-        return <ColumnCreatedAt>{item.createdAt}</ColumnCreatedAt>;
-      },
+      accessorKey: 'city',
+      header: 'City',
+      cell: ({ row }) => (
+        <span className="truncate">{row.original.properties.city}</span>
+      ),
     },
   ];
 
