@@ -754,6 +754,7 @@ export const chartRouter = createTRPCRouter({
         funnelGroup,
         fromClause,
         resolveAliases,
+        projectId,
       );
       const groupedByProfile = group[1] === 'profile_id';
 
