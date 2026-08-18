@@ -32,6 +32,12 @@
  */
 import type { ClickHouseSettings } from '@clickhouse/client';
 import { ch, chQuery } from '../clickhouse/client';
+import {
+  markArchiving,
+  markVerified,
+  markVerifyFailed,
+  reconcileArchiveDay,
+} from '../services/replay-archive-day.service';
 
 const CONTAINER = process.env.REPLAY_ARCHIVE_CONTAINER || 'clickhouse-export';
 const CONN = process.env.AZURE_BLOB_CONNECTION_STRING || '';
@@ -415,7 +421,9 @@ async function archiveProject(day: DayPlan, p: ProjectPlan): Promise<boolean> {
   return true;
 }
 
-async function verifyDay(day: DayPlan): Promise<boolean> {
+type VerifyResult = { ok: boolean; idxN: number; srcN: number };
+
+async function verifyDay(day: DayPlan): Promise<VerifyResult> {
   // Gate: everything we indexed for this day must equal the source. Both count
   // physical day-N chunks (populateSliceIndex filters started_at to the day), so
   // they match even for midnight-crossing sessions. This is a cheap aggregate —
@@ -431,6 +439,13 @@ async function verifyDay(day: DayPlan): Promise<boolean> {
   );
   const idxN = Number(idx?.n ?? -1);
   const srcN = Number(src?.n ?? -2);
+  // Unreadable counts (missing row / non-numeric) must NOT slip through as
+  // verified — the sentinels (-1, -2) would otherwise satisfy `idxN < srcN ===
+  // false` and mark the day archived with negative counts. Treat as failed.
+  if (!Number.isFinite(idxN) || !Number.isFinite(srcN) || idxN < 0 || srcN < 0) {
+    log(`  verify day: unreadable counts index=${idxN} ch=${srcN} — failing`);
+    return { ok: false, idxN, srcN };
+  }
   // Completeness is one-directional: the archive must hold AT LEAST every source
   // chunk. index < ch => some chunks were never written to a blob => INCOMPLETE,
   // fail (loud, blocks deletion of this day). index >= ch => nothing missing;
@@ -442,7 +457,7 @@ async function verifyDay(day: DayPlan): Promise<boolean> {
     log(
       `  verify day: index=${idxN} ch=${srcN} INCOMPLETE — ${srcN - idxN} chunk(s) not archived`,
     );
-    return false;
+    return { ok: false, idxN, srcN };
   }
   // Independent spot-check: actually read a few of the smallest per-session
   // blobs back and confirm their row counts. Guards against an indexed-but-
@@ -457,13 +472,26 @@ async function verifyDay(day: DayPlan): Promise<boolean> {
     const got = await countBlob(s.blob_path);
     if (got !== Number(s.chunks)) {
       log(`  verify day: sample ${s.blob_path} blob=${got} idx=${s.chunks} MISMATCH`);
-      return false;
+      return { ok: false, idxN, srcN };
     }
   }
   log(
     `  verify day: index=${idxN} ch=${srcN} OK${idxN > srcN ? ` (+${idxN - srcN} blob-superset drift)` : ''} (+${samples.length} blob samples)`,
   );
-  return true;
+  return { ok: true, idxN, srcN };
+}
+
+/**
+ * Best-effort status write. Postgres status is observability, not the archive's
+ * job — a DB hiccup (or a pod without DATABASE_URL) must NEVER fail an archive
+ * run, so every write is swallowed here with a loud log.
+ */
+async function status(fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    log(`  WARN: status write failed (non-fatal): ${String(err)}`);
+  }
 }
 
 async function archiveDay(day: DayPlan): Promise<boolean> {
@@ -479,15 +507,68 @@ async function archiveDay(day: DayPlan): Promise<boolean> {
     }
     return true;
   }
-  for (const p of projects) {
-    if (!(await archiveProject(day, p))) return false;
-  }
-  if (!(await verifyDay(day))) {
-    log(`  STOP: ${day.date} count mismatch — leaving unarchived for retry`);
+  await status(() => markArchiving(day.date));
+  // archiveProject signals failure by THROWING (exportSlice / populateSliceIndex),
+  // never by returning false — so catch it here: record the failure (without
+  // clobbering counts) and return false so this day is retried and the OTHER
+  // days still run, instead of the throw aborting the whole batch.
+  try {
+    for (const p of projects) {
+      await archiveProject(day, p);
+    }
+  } catch (err) {
+    log(`  ${day.date} export failed: ${String(err)}`);
+    await status(() =>
+      markVerifyFailed(day.date, `export failed: ${String(err)}`),
+    );
     return false;
   }
+  const v = await verifyDay(day);
+  if (!v.ok) {
+    log(`  STOP: ${day.date} count mismatch — leaving unarchived for retry`);
+    await status(() =>
+      markVerifyFailed(day.date, `verify failed: index=${v.idxN} ch=${v.srcN}`, {
+        chChunks: v.srcN,
+        blobChunks: v.idxN,
+      }),
+    );
+    return false;
+  }
+  const sessions = projects.reduce((n, p) => n + p.sessions, 0);
+  await status(() => markVerified(day.date, v.srcN, v.idxN, sessions));
   log(`  ${day.date} done`);
   return true;
+}
+
+/**
+ * Upsert a status row for EVERY settled day from counts alone, so the table is
+ * complete — including days already fully archived (which the archiver skips and
+ * would otherwise never record). Count-only: `blob >= ch` → archived, else
+ * pending; verifiedAt is left for the per-day verify path. Best-effort.
+ */
+async function reconcileAllStatus(): Promise<void> {
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - SETTLE_DAYS);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  const parts = await chQuery<{ partition: string; rows: string }>(
+    `SELECT partition, sum(rows) AS rows
+       FROM system.parts
+      WHERE table = '${TABLE}' AND database = currentDatabase() AND active
+      GROUP BY partition`,
+    LIGHT_SETTINGS,
+  );
+  const indexed = await chQuery<{ dt: string; chunks: string }>(
+    `SELECT toString(dt) AS dt, sum(chunks) AS chunks FROM ${INDEX} FINAL GROUP BY dt`,
+    LIGHT_SETTINGS,
+  );
+  const idxMap = new Map(indexed.map((r) => [r.dt, Number(r.chunks)]));
+  for (const p of parts) {
+    const date = partitionToDate(p.partition);
+    if (!date || date < MIN_DAY || date > cutoffStr) continue;
+    const rows = Number(p.rows);
+    if (rows === 0) continue;
+    await reconcileArchiveDay(date, rows, idxMap.get(date) ?? 0);
+  }
 }
 
 async function main(): Promise<number> {
@@ -495,6 +576,9 @@ async function main(): Promise<number> {
   log(
     `start container=${CONTAINER} settleDays=${SETTLE_DAYS} sessionsPerBatch=${TARGET_SESSIONS_PER_BATCH} maxDays=${MAX_DAYS_PER_RUN} blockSize=${MAX_BLOCK_SIZE} rearchive=${REARCHIVE} dryRun=${DRY_RUN}`,
   );
+
+  // Refresh the per-day status table for all settled days (observability only).
+  await status(() => reconcileAllStatus());
 
   const plans = await planDays();
   if (plans.length === 0) {
