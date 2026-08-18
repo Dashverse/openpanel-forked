@@ -11,6 +11,7 @@
     "migrate:deploy": "pnpm migrate:deploy:db && pnpm migrate:deploy:code",
     "materialize:analyze": "pnpm with-env jiti ./src/cli/materialize.ts",
     "archive:replay": "pnpm with-env jiti ./src/cli/archive-replay-chunks.ts",
+    "status:replay": "pnpm with-env jiti ./src/cli/replay-archive-status.ts",
     "duplicate-events": "pnpm with-env jiti ./scripts/find-duplicate-events.ts",
     "typecheck": "tsc --noEmit",
     "with-env": "dotenv -e ../../.env -c --"

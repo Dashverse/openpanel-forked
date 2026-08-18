@@ -569,3 +569,29 @@ model Cohort {
   @@map("cohorts")
   @@index([projectId])
 }
+
+/// Per-day lifecycle record for the session-replay CH→Azure-Blob archive.
+/// Populated by src/cli/archive-replay-chunks.ts; observational + audit only —
+/// the archive job never drops CH partitions. Deletion (when built) will
+/// re-verify freshly at delete time and set deletedAt; the job does not.
+/// Granularity is per-day because a CH partition is toYYYYMMDD(started_at)
+/// (one partition per day, all projects) — the same unit as verifyDay and the
+/// eventual DROP PARTITION.
+model ReplayArchiveDay {
+  day         DateTime  @id @db.Date // the archived day (UTC)
+  /// pending | archiving | archived | verify_failed
+  status      String
+  chChunks    BigInt? // CH source chunk count at last check
+  blobChunks  BigInt? // archive-index chunk count at last check
+  driftChunks Int? // blobChunks - chChunks (benign blob-superset, if > 0)
+  sessions    Int? // archived session count for the day
+  archivedAt  DateTime? // first time the day was count-complete (index >= ch)
+  verifiedAt  DateTime? // last time the full verify passed (count + blob sample)
+  verifyError String? // reason when status = verify_failed
+  lastRunAt   DateTime // last time the archive job touched this day
+  deletedAt   DateTime? // reserved for the future delete phase; job never sets it
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  @@map("replay_archive_days")
+}
