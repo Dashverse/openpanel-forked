@@ -306,6 +306,21 @@ function ReplayContent({
     trpc.session.replayMeta.queryOptions({ sessionId, projectId }),
   );
 
+  // Surface which store this replay is served from (Azure Blob archive vs the
+  // ClickHouse hot table). Logged once per session; also shown as a badge below.
+  const replaySource = replayMeta?.source;
+  useEffect(() => {
+    if (replaySource) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `%c[replay] session ${sessionId} served from ${
+          replaySource === 'blob' ? 'AZURE BLOB' : 'CLICKHOUSE'
+        }`,
+        `color:#fff;background:${replaySource === 'blob' ? '#2563eb' : '#6b7280'};padding:2px 6px;border-radius:4px`,
+      );
+    }
+  }, [replaySource, sessionId]);
+
   const events = eventsData?.data ?? [];
   // Memoize the flat events array so its identity is stable across re-renders
   // (replayMeta landing, buffering state flipping, etc.) — otherwise rrweb's
@@ -348,7 +363,26 @@ function ReplayContent({
       );
     }
     if (hasReplay) {
-      return <ReplayPlayer events={playerEvents} skipInactive={skipInactive} />;
+      return (
+        <div className="relative">
+          {replaySource ? (
+            <div
+              className={cn(
+                'absolute right-2 top-2 z-10 rounded px-2 py-0.5 text-xs font-medium text-white shadow',
+                replaySource === 'blob' ? 'bg-blue-600' : 'bg-neutral-500',
+              )}
+              title={
+                replaySource === 'blob'
+                  ? 'Served from Azure Blob archive'
+                  : 'Served from ClickHouse hot table'
+              }
+            >
+              {replaySource === 'blob' ? 'Azure Blob' : 'ClickHouse'}
+            </div>
+          ) : null}
+          <ReplayPlayer events={playerEvents} skipInactive={skipInactive} />
+        </div>
+      );
     }
     return (
       <div
