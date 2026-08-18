@@ -42,7 +42,7 @@ type Props = {
 const formatPercentLabel = (value: number | string | undefined) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return '';
-  return n > 0 && n < 1 ? `${Math.round(n * 10) / 10}%` : `${Math.round(n)}%`;
+  return n > 0 && n < 1 ? `${Math.round(n * 100) / 100}%` : `${Math.round(n)}%`;
 };
 
 export const Metric = ({
