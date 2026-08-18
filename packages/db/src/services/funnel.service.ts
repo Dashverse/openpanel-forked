@@ -229,11 +229,21 @@ export class FunnelService {
     if (funnelGroup === 'session_id') {
       return [`${fromClause}.session_id`, 'session_id'];
     }
-    // Base: session-stitched profile_id (an event's session may already carry the
-    // identified profile_id). Identity-merge layers on top — resolve `base` to its
-    // canonical so a user's anon + identified events collapse to one id.
-    // dict on -> dictGet (no `al` CTE/JOIN); dict off -> coalesce over `al`.
-    const base = `COALESCE(nullIf(s.pid, ''), ${fromClause}.profile_id)`;
+    // Base: the event's own profile_id.
+    //
+    // Previously this was session-stitched: `COALESCE(nullIf(s.pid,''), profile_id)`
+    // (upstream), on the theory that a session already carries the identified id.
+    // But `session_id` is NOT a reliable per-user key on every project — notably on
+    // the Kafka-path projects (frameo/shortreels) hit by the session-dup incident,
+    // where many *different* users' events share a session_id. There, `s.pid`
+    // collapses distinct users onto a handful of shared session pids (observed: a
+    // funnel with 14 real completers listed only 4 in "View Users").
+    //
+    // Identity-merge via profile_aliases/dictGet (layered below) already bridges a
+    // user's anon -> identified events correctly, making the session stitch
+    // redundant, so we drop it. resolveAliases=false (dict off / no aliases) now
+    // keys on the raw profile_id.
+    const base = `${fromClause}.profile_id`;
     // Look up the RAW event profile_id in the alias map (same column the `al` CTE
     // joins on), falling back to the session-stitched `base`. Both dict + CTE
     // modes now group identically.
@@ -303,27 +313,6 @@ export class FunnelService {
     }
 
     return query;
-  }
-
-  buildSessionsCte({
-    projectId,
-    startDate,
-    endDate,
-    timezone,
-  }: {
-    projectId: string;
-    startDate: string;
-    endDate: string;
-    timezone: string;
-  }) {
-    return clix(this.client, timezone)
-      .select(['profile_id as pid', 'id as sid'])
-      .from(TABLE_NAMES.sessions)
-      .where('project_id', '=', projectId)
-      .where('created_at', 'BETWEEN', [
-        clix.datetime(startDate, 'toDateTime'),
-        clix.datetime(endDate, 'toDateTime'),
-      ]);
   }
 
   private fillFunnel(
@@ -736,17 +725,6 @@ export class FunnelService {
       });
     });
 
-    // Create the sessions CTE if needed
-    const sessionsCte =
-      group[0] !== 'session_id'
-        ? this.buildSessionsCte({
-            projectId,
-            startDate,
-            endDate,
-            timezone,
-          })
-        : null;
-
     // Base funnel query with CTEs
     const funnelQuery = clix(this.client, timezone);
 
@@ -762,10 +740,6 @@ export class FunnelService {
       funnelQuery.with(getCohortCteName(cohortId), cohortQuery);
     });
 
-    if (sessionsCte) {
-      funnelCte.leftJoin('sessions s', `s.sid = ${fromClause}.session_id`);
-      funnelQuery.with('sessions', sessionsCte);
-    }
 
     // Register the `filtered_profiles` pre-CTE + WHERE clause when the gate
     // above was satisfied. The funnelCte's main scan becomes

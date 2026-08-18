@@ -754,18 +754,9 @@ export const chartRouter = createTRPCRouter({
         funnelGroup,
         fromClause,
         resolveAliases,
+        projectId,
       );
       const groupedByProfile = group[1] === 'profile_id';
-
-      // Create sessions CTE if grouping by profile_id (needs sessions.pid lookup)
-      const sessionsCte = groupedByProfile
-        ? funnelService.buildSessionsCte({
-            projectId,
-            startDate,
-            endDate,
-            timezone,
-          })
-        : null;
 
       // When grouped by profile_id, the group column is already aliased to
       // profile_id; only add a separate profile_id select in session-grouped mode.
@@ -805,11 +796,6 @@ export const chartRouter = createTRPCRouter({
       // Register custom-event CTEs (if any) on the outer query
       for (const withClause of withClauses) {
         query.with(withClause.name, withClause.query);
-      }
-
-      if (sessionsCte) {
-        funnelCte.leftJoin('sessions s', `s.sid = ${fromClause}.session_id`);
-        query.with('sessions', sessionsCte);
       }
 
       // Identity-merge alias map — mirrors getFunnel (funnel.service.ts:782-791). Join
