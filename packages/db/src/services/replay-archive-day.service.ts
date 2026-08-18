@@ -106,20 +106,27 @@ export async function markVerified(
   });
 }
 
-/** Mark a day whose archival is incomplete / failed verification. */
+/**
+ * Mark a day whose archival is incomplete / failed verification. Counts are
+ * optional: pass them for a real verify mismatch; omit them for an export throw
+ * (no reliable counts) so we don't clobber a previously-recorded real count.
+ */
 export async function markVerifyFailed(
   day: string,
-  chChunks: number,
-  blobChunks: number,
   error: string,
+  counts?: { chChunks: number; blobChunks: number },
 ): Promise<void> {
   const now = new Date();
   const data = {
     status: 'verify_failed' as ReplayDayStatus,
-    chChunks: BigInt(chChunks),
-    blobChunks: BigInt(blobChunks),
     verifyError: error,
     lastRunAt: now,
+    ...(counts
+      ? {
+          chChunks: BigInt(counts.chChunks),
+          blobChunks: BigInt(counts.blobChunks),
+        }
+      : {}),
   };
   await db.replayArchiveDay.upsert({
     where: { day: toDay(day) },

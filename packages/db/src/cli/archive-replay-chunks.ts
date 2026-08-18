@@ -439,6 +439,13 @@ async function verifyDay(day: DayPlan): Promise<VerifyResult> {
   );
   const idxN = Number(idx?.n ?? -1);
   const srcN = Number(src?.n ?? -2);
+  // Unreadable counts (missing row / non-numeric) must NOT slip through as
+  // verified — the sentinels (-1, -2) would otherwise satisfy `idxN < srcN ===
+  // false` and mark the day archived with negative counts. Treat as failed.
+  if (!Number.isFinite(idxN) || !Number.isFinite(srcN) || idxN < 0 || srcN < 0) {
+    log(`  verify day: unreadable counts index=${idxN} ch=${srcN} — failing`);
+    return { ok: false, idxN, srcN };
+  }
   // Completeness is one-directional: the archive must hold AT LEAST every source
   // chunk. index < ch => some chunks were never written to a blob => INCOMPLETE,
   // fail (loud, blocks deletion of this day). index >= ch => nothing missing;
@@ -501,24 +508,29 @@ async function archiveDay(day: DayPlan): Promise<boolean> {
     return true;
   }
   await status(() => markArchiving(day.date));
-  for (const p of projects) {
-    if (!(await archiveProject(day, p))) {
-      await status(() =>
-        markVerifyFailed(day.date, day.rows, 0, `export failed for ${p.projectId}`),
-      );
-      return false;
+  // archiveProject signals failure by THROWING (exportSlice / populateSliceIndex),
+  // never by returning false — so catch it here: record the failure (without
+  // clobbering counts) and return false so this day is retried and the OTHER
+  // days still run, instead of the throw aborting the whole batch.
+  try {
+    for (const p of projects) {
+      await archiveProject(day, p);
     }
+  } catch (err) {
+    log(`  ${day.date} export failed: ${String(err)}`);
+    await status(() =>
+      markVerifyFailed(day.date, `export failed: ${String(err)}`),
+    );
+    return false;
   }
   const v = await verifyDay(day);
   if (!v.ok) {
     log(`  STOP: ${day.date} count mismatch — leaving unarchived for retry`);
     await status(() =>
-      markVerifyFailed(
-        day.date,
-        v.srcN,
-        v.idxN,
-        `verify failed: index=${v.idxN} ch=${v.srcN}`,
-      ),
+      markVerifyFailed(day.date, `verify failed: index=${v.idxN} ch=${v.srcN}`, {
+        chChunks: v.srcN,
+        blobChunks: v.idxN,
+      }),
     );
     return false;
   }
