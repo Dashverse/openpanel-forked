@@ -213,19 +213,37 @@ async function planDays(): Promise<DayPlan[]> {
   const indexedChunks = new Map(indexed.map((r) => [r.dt, Number(r.chunks)]));
 
   const plans: DayPlan[] = [];
+  const drift: string[] = [];
   for (const p of parts) {
     const date = partitionToDate(p.partition);
     if (!date) continue;
     if (date < MIN_DAY || date > cutoffStr) continue; // garbage/future or unsettled
     const rows = Number(p.rows);
     if (rows === 0) continue; // TTL husk — nothing to archive
-    if (!REARCHIVE && indexedChunks.get(date) === rows) continue; // fully archived
+    const idx = indexedChunks.get(date) ?? 0;
+    // Backlog = only days with UNARCHIVED chunks (index < rows). `index >= rows`
+    // means every source chunk is already in a blob, so it is NOT a backlog and
+    // must not gate newer days. `index > rows` (blob superset) happens when CH
+    // dropped/merged a few chunks after archival, or a re-archive double-counted
+    // — the SAFE direction (nothing missing), so we surface it as drift but do
+    // not re-queue it. (Before: `=== rows` treated a 2-chunk drift on an old,
+    // fully-archived day as "pending"; stop-on-failure then halted ALL newer
+    // archival — the 2026-08 replay-archive stall that stayed silent for 10 days.)
+    if (!REARCHIVE && idx >= rows) {
+      if (idx > rows) drift.push(`${date} (index=${idx} > ch=${rows})`);
+      continue;
+    }
     plans.push({
       date,
       dayInt: Number(p.partition),
       bytes: Number(p.bytes),
       rows,
     });
+  }
+  if (drift.length) {
+    log(
+      `NOTE: ${drift.length} fully-archived day(s) show index>ch drift (blob superset, not a backlog): ${drift.join(', ')}`,
+    );
   }
   return plans.sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -413,8 +431,17 @@ async function verifyDay(day: DayPlan): Promise<boolean> {
   );
   const idxN = Number(idx?.n ?? -1);
   const srcN = Number(src?.n ?? -2);
-  if (idxN !== srcN) {
-    log(`  verify day: index=${idxN} ch=${srcN} MISMATCH`);
+  // Completeness is one-directional: the archive must hold AT LEAST every source
+  // chunk. index < ch => some chunks were never written to a blob => INCOMPLETE,
+  // fail (loud, blocks deletion of this day). index >= ch => nothing missing;
+  // index > ch is benign drift (CH shed a few chunks post-archival, or a
+  // re-archive double-counted) — pass the count gate and let the blob spot-check
+  // below prove the bytes are actually there. (Exact `!==` used to fail a
+  // fully-archived day over a harmless 2-chunk superset.)
+  if (idxN < srcN) {
+    log(
+      `  verify day: index=${idxN} ch=${srcN} INCOMPLETE — ${srcN - idxN} chunk(s) not archived`,
+    );
     return false;
   }
   // Independent spot-check: actually read a few of the smallest per-session
@@ -434,7 +461,7 @@ async function verifyDay(day: DayPlan): Promise<boolean> {
     }
   }
   log(
-    `  verify day: index=${idxN} ch=${srcN} OK (+${samples.length} blob samples)`,
+    `  verify day: index=${idxN} ch=${srcN} OK${idxN > srcN ? ` (+${idxN - srcN} blob-superset drift)` : ''} (+${samples.length} blob samples)`,
   );
   return true;
 }
@@ -463,7 +490,7 @@ async function archiveDay(day: DayPlan): Promise<boolean> {
   return true;
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   if (!CONN) throw new Error('AZURE_BLOB_CONNECTION_STRING is required');
   log(
     `start container=${CONTAINER} settleDays=${SETTLE_DAYS} sessionsPerBatch=${TARGET_SESSIONS_PER_BATCH} maxDays=${MAX_DAYS_PER_RUN} blockSize=${MAX_BLOCK_SIZE} rearchive=${REARCHIVE} dryRun=${DRY_RUN}`,
@@ -472,7 +499,7 @@ async function main(): Promise<void> {
   const plans = await planDays();
   if (plans.length === 0) {
     log('nothing to archive — all settled days already indexed');
-    return;
+    return 0;
   }
   const batch = plans.slice(0, MAX_DAYS_PER_RUN);
   log(
@@ -480,15 +507,33 @@ async function main(): Promise<void> {
   );
 
   let ok = 0;
+  const failed: string[] = [];
   for (const day of batch) {
-    if (!(await archiveDay(day))) break; // stop-on-failure keeps the watermark gapless
-    ok++;
+    // Never break on a single day's failure: each day is independently indexed,
+    // so a failed day just stays pending (index<rows) and retries next run — it
+    // must not block the OTHER days. (Before: `break` on the first failure let
+    // one stuck day silently halt all newer archival.)
+    if (await archiveDay(day)) {
+      ok++;
+    } else {
+      failed.push(day.date);
+    }
   }
   log(`done: archived ${ok}/${batch.length} day(s) this run`);
+  if (failed.length) {
+    // Loud + non-zero exit so the k8s Job is marked Failed and the
+    // k8s.job.failed_pods alert fires — a partial/blocked run must NEVER look
+    // like success (that silent-success gap hid a 10-day stall).
+    // eslint-disable-next-line no-console
+    console.error(
+      `[archive-replay] FAILED: ${failed.length}/${batch.length} day(s) did not complete (blob incomplete vs ClickHouse): ${failed.join(', ')}`,
+    );
+  }
+  return failed.length;
 }
 
 main()
-  .then(() => process.exit(0))
+  .then((failedDays) => process.exit(failedDays > 0 ? 1 : 0))
   .catch((err) => {
     // eslint-disable-next-line no-console
     console.error('[archive-replay] FATAL', err);
