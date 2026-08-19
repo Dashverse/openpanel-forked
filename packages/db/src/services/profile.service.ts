@@ -851,9 +851,23 @@ export async function getProfileIdCluster(
     `SELECT coalesce(nullIf(argMax(profile_id, created_at), ''), ${escProfile}) AS canonical FROM ${TABLE_NAMES.alias} WHERE project_id = ${escProject} AND alias = ${escProfile}`,
   );
   const canonical = canonicalRows[0]?.canonical || profileId;
+  const escCanonical = sqlstring.escape(canonical);
 
+  // Keep only aliases whose *latest* mapping still points to this canonical. An
+  // alias reassigned to another profile keeps its old row (profile_id is part of
+  // the sort key), so filtering on profile_id alone would resurrect a device that
+  // now belongs to a different user and expose its events on the wrong profile.
+  // Restrict to candidate aliases that ever pointed here, then argMax each to its
+  // current canonical.
   const aliasRows = await chQuery<{ alias: string }>(
-    `SELECT DISTINCT alias FROM ${TABLE_NAMES.alias} WHERE project_id = ${escProject} AND profile_id = ${sqlstring.escape(canonical)}`,
+    `SELECT alias FROM ${TABLE_NAMES.alias}
+       WHERE project_id = ${escProject}
+         AND alias IN (
+           SELECT alias FROM ${TABLE_NAMES.alias}
+           WHERE project_id = ${escProject} AND profile_id = ${escCanonical}
+         )
+       GROUP BY alias
+       HAVING argMax(profile_id, created_at) = ${escCanonical}`,
   );
 
   return uniq(
