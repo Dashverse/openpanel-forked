@@ -38,6 +38,10 @@ function Component() {
       {
         projectId,
         profileId,
+        // Show the full journey: identified profile + its anonymous device
+        // aliases merged into one timeline (pre-login events live under the
+        // anon device id, resolved via profile_aliases).
+        mergeIdentity: true,
         filters,
         startDate: startDate || undefined,
         endDate: endDate || undefined,

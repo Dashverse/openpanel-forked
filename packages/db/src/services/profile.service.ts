@@ -13,6 +13,7 @@ import {
   chQuery,
   convertClickhouseDateToJs,
   formatClickhouseDate,
+  getProfileAliasDict,
 } from '../clickhouse/client';
 import { createSqlBuilder } from '../sql-builder';
 import { getOrganizationByProjectIdCached } from './organization.service';
@@ -814,6 +815,51 @@ export async function getProfiles(ids: string[], projectId: string) {
 }
 
 export const getProfilesCached = cacheable(getProfiles, 60 * 5);
+
+/**
+ * Resolve a profile_id to its full identity cluster: the canonical (identified)
+ * profile_id plus every anonymous device id (alias) that resolves to it. Used by
+ * the profile page to show the complete pre-login + post-login journey — anon
+ * events live under the device id, identified events under the canonical, and
+ * profile_aliases links them (the same map funnels/conversions resolve through).
+ *
+ * Two steps:
+ *  1. Forward-resolve the input to its canonical (the input may itself be an anon
+ *     device id). dictGet when PROFILE_ALIAS_DICT is set (in-RAM); otherwise an
+ *     alias-keyed lookup, which hits profile_aliases' (project_id, alias) sort key
+ *     and is cheap.
+ *  2. Reverse-lookup every alias of that canonical. profile_aliases is sorted by
+ *     alias, so filtering on profile_id is a full scan — hence this is cached.
+ */
+export async function getProfileIdCluster(
+  projectId: string,
+  profileId: string,
+): Promise<string[]> {
+  if (!profileId) {
+    return [];
+  }
+
+  const dict = getProfileAliasDict();
+  const escProject = sqlstring.escape(projectId);
+  const escProfile = sqlstring.escape(profileId);
+
+  const canonicalRows = await chQuery<{ canonical: string }>(
+    dict
+      ? `SELECT coalesce(nullIf(dictGetOrDefault(${sqlstring.escape(dict)}, 'canonical', (${escProject}, ${escProfile}), ''), ''), ${escProfile}) AS canonical`
+      : `SELECT coalesce(nullIf(argMax(profile_id, created_at), ''), ${escProfile}) AS canonical FROM ${TABLE_NAMES.alias} WHERE project_id = ${escProject} AND alias = ${escProfile}`,
+  );
+  const canonical = canonicalRows[0]?.canonical || profileId;
+
+  const aliasRows = await chQuery<{ alias: string }>(
+    `SELECT DISTINCT alias FROM ${TABLE_NAMES.alias} WHERE project_id = ${escProject} AND profile_id = ${sqlstring.escape(canonical)}`,
+  );
+
+  return uniq(
+    [canonical, profileId, ...aliasRows.map((r) => r.alias)].filter(Boolean),
+  );
+}
+
+export const getProfileIdClusterCached = cacheable(getProfileIdCluster, 60 * 10);
 
 // Columns the profile LIST renders. `properties` IS needed here — the table's
 // Country/OS/Browser/Model/Referrer columns read from it (e.g.
