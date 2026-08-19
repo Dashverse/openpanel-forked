@@ -585,6 +585,28 @@ export class MaterializeColumnsService {
         `,
       });
 
+      // Mirror event-property materializations onto events_v2 (the name-first
+      // table). Custom-event charts do `SELECT * REPLACE(...), <materialized
+      // cols> FROM events_v2`, so any column that exists on `events` but not
+      // events_v2 throws "Unknown expression identifier". Best-effort: events_v2
+      // may not exist (self-hosted) — log and continue rather than fail the run.
+      if (table === 'events') {
+        try {
+          await chMigrationClient.command({
+            query: `
+              ALTER TABLE events_v2
+              ADD COLUMN IF NOT EXISTS \`${candidate.columnName}\` String
+              MATERIALIZED properties['${candidate.propertyKey}']
+            `,
+          });
+        } catch (error) {
+          this.logger.warn(
+            `Could not mirror column ${candidate.columnName} to events_v2 (continuing)`,
+            { error },
+          );
+        }
+      }
+
       // Record in database with targetTable
       await db.materializedColumn.create({
         data: {
