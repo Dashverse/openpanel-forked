@@ -13,7 +13,6 @@ import {
   chQuery,
   convertClickhouseDateToJs,
   formatClickhouseDate,
-  getProfileAliasDict,
 } from '../clickhouse/client';
 import { createSqlBuilder } from '../sql-builder';
 import { getOrganizationByProjectIdCached } from './organization.service';
@@ -825,9 +824,12 @@ export const getProfilesCached = cacheable(getProfiles, 60 * 5);
  *
  * Two steps:
  *  1. Forward-resolve the input to its canonical (the input may itself be an anon
- *     device id). dictGet when PROFILE_ALIAS_DICT is set (in-RAM); otherwise an
- *     alias-keyed lookup, which hits profile_aliases' (project_id, alias) sort key
- *     and is cheap.
+ *     device id). Uses an alias-keyed lookup on profile_aliases — its
+ *     (project_id, alias) sort key makes this a cheap point lookup, and unlike
+ *     the RAM alias dict it is authoritative: the dict refresh lags behind
+ *     profile_aliases inserts, so a freshly-aliased device can dictGet-MISS and
+ *     silently drop the post-login half. Correctness over the ~1ms dict saving —
+ *     this runs at most once per profile per cache window anyway.
  *  2. Reverse-lookup every alias of that canonical. profile_aliases is sorted by
  *     alias, so filtering on profile_id is a full scan — hence this is cached.
  */
@@ -839,14 +841,14 @@ export async function getProfileIdCluster(
     return [];
   }
 
-  const dict = getProfileAliasDict();
   const escProject = sqlstring.escape(projectId);
   const escProfile = sqlstring.escape(profileId);
 
+  // If the input is an anon device id, this returns its canonical; if it is
+  // already a canonical (no alias row), argMax over the empty set yields '' and
+  // we fall back to the input.
   const canonicalRows = await chQuery<{ canonical: string }>(
-    dict
-      ? `SELECT coalesce(nullIf(dictGetOrDefault(${sqlstring.escape(dict)}, 'canonical', (${escProject}, ${escProfile}), ''), ''), ${escProfile}) AS canonical`
-      : `SELECT coalesce(nullIf(argMax(profile_id, created_at), ''), ${escProfile}) AS canonical FROM ${TABLE_NAMES.alias} WHERE project_id = ${escProject} AND alias = ${escProfile}`,
+    `SELECT coalesce(nullIf(argMax(profile_id, created_at), ''), ${escProfile}) AS canonical FROM ${TABLE_NAMES.alias} WHERE project_id = ${escProject} AND alias = ${escProfile}`,
   );
   const canonical = canonicalRows[0]?.canonical || profileId;
 
