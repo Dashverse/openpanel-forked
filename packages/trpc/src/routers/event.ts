@@ -13,6 +13,7 @@ import {
   getConversionEventNames,
   getEventList,
   getEventMetasCached,
+  getProfileIdClusterCached,
   getSettingsForProject,
   overviewService,
 } from '@openpanel/db';
@@ -93,11 +94,23 @@ export const eventRouter = createTRPCRouter({
         endDate: z.date().optional(),
         events: z.array(z.string()).optional(),
         columnVisibility: z.record(z.string(), z.boolean()).optional(),
+        // Profile page: merge the identified profile with its anonymous device
+        // aliases so the timeline shows the full pre-login + post-login journey.
+        mergeIdentity: z.boolean().optional(),
       }),
     )
-    .query(async ({ input: { columnVisibility, ...input } }) => {
+    .query(async ({ input: { columnVisibility, mergeIdentity, ...input } }) => {
+      // Resolve the canonical + anonymous-alias id set once (cached). Passed as a
+      // literal `profile_id IN (...)` list — resolving inline as a subquery would
+      // re-scan the 36M-row profile_aliases table on every page/paginate.
+      const profileIds =
+        mergeIdentity && input.profileId
+          ? await getProfileIdClusterCached(input.projectId, input.profileId)
+          : undefined;
+
       const items = await getEventList({
         ...input,
+        profileIds,
         take: 50,
         cursor: input.cursor ? new Date(input.cursor) : undefined,
         select: {

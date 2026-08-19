@@ -13,6 +13,7 @@ import {
   chQuery,
   convertClickhouseDateToJs,
   formatClickhouseDate,
+  getEventsTableForRange,
 } from '../clickhouse/client';
 import { type Query, clix } from '../clickhouse/query-builder';
 import type { EventMeta, Prisma } from '../prisma-client';
@@ -436,6 +437,10 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
 export interface GetEventListOptions {
   projectId: string;
   profileId?: string;
+  // Identity-merge: when set, list events for ALL of these profile_ids (a
+  // canonical id + its anonymous device aliases) so the profile page shows the
+  // full pre-login + post-login journey. Takes precedence over `profileId`.
+  profileIds?: string[];
   sessionId?: string;
   take: number;
   cursor?: number | Date;
@@ -454,6 +459,7 @@ export async function getEventList(options: GetEventListOptions) {
     take,
     projectId,
     profileId,
+    profileIds,
     sessionId,
     events,
     filters,
@@ -465,21 +471,44 @@ export async function getEventList(options: GetEventListOptions) {
   } = options;
   const { sb, getSql, join } = createSqlBuilder();
 
+  // Route reads to events_v2 (name-first ORDER BY) — parity with `events` within
+  // the retained TTL window, but a `profile_id` / `name IN (...)` lookup prunes to
+  // a fraction of the rows (measured 13x fewer for name+profile). Explicit ranges
+  // predating EVENTS_V2_MIN_DATE fall back to `events`; cursor-window reads anchor
+  // at "now" so they always resolve to events_v2.
+  const routeStartDate = startDate
+    ? formatClickhouseDate(startDate)
+    : formatClickhouseDate(new Date());
+  sb.from = `${getEventsTableForRange(routeStartDate)} e`;
+
   const MAX_DATE_INTERVAL_IN_DAYS = 365;
+  // When searching a *specific* event (name filter, not the "*" wildcard), the
+  // name+profile pruning on events_v2 makes a single full-range scan cheap — so
+  // skip the 0.5d expanding-window retries, which otherwise re-scan the whole
+  // project once per doubling step to reach an event that fired weeks ago.
+  const hasSpecificEventFilter =
+    !!events && events.length > 0 && !events.includes('*');
   // Cap the date interval to prevent infinity
-  const safeDateIntervalInDays = Math.min(
-    dateIntervalInDays,
-    MAX_DATE_INTERVAL_IN_DAYS,
-  );
+  const safeDateIntervalInDays = hasSpecificEventFilter
+    ? MAX_DATE_INTERVAL_IN_DAYS
+    : Math.min(dateIntervalInDays, MAX_DATE_INTERVAL_IN_DAYS);
+
+  // When the caller passes an explicit [startDate, endDate] (e.g. the profile
+  // page's default "last 15 days", or a user-picked range), that BETWEEN clause
+  // below bounds the scan — so skip the rolling expanding-window entirely and let
+  // the range drive it (only the cursor upper-bound is needed for pagination).
+  const hasExplicitRange = !!(startDate && endDate);
 
   if (typeof cursor === 'number') {
     sb.offset = Math.max(0, (cursor ?? 0) * take);
   } else if (cursor instanceof Date) {
-    sb.where.cursorWindow = `created_at >= toDateTime64(${sqlstring.escape(formatClickhouseDate(cursor))}, 3) - INTERVAL ${safeDateIntervalInDays} DAY`;
+    if (!hasExplicitRange) {
+      sb.where.cursorWindow = `created_at >= toDateTime64(${sqlstring.escape(formatClickhouseDate(cursor))}, 3) - INTERVAL ${safeDateIntervalInDays} DAY`;
+    }
     sb.where.cursor = `created_at <= ${sqlstring.escape(formatClickhouseDate(cursor))}`;
   }
 
-  if (!cursor) {
+  if (!cursor && !hasExplicitRange) {
     sb.where.cursorWindow = `created_at >= toDateTime64(${sqlstring.escape(formatClickhouseDate(new Date()))}, 3) - INTERVAL ${safeDateIntervalInDays} DAY`;
   }
 
@@ -595,7 +624,12 @@ export async function getEventList(options: GetEventListOptions) {
     sb.select.revenue = 'revenue';
   }
 
-  if (profileId) {
+  if (profileIds && profileIds.length > 0) {
+    sb.where.profileId = `profile_id IN (${join(
+      profileIds.map((id) => sqlstring.escape(id)),
+      ',',
+    )})`;
+  } else if (profileId) {
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
   }
 
@@ -604,7 +638,7 @@ export async function getEventList(options: GetEventListOptions) {
   }
 
   if (startDate && endDate) {
-    sb.where.created_at = `toDate(created_at) BETWEEN toDate('${formatClickhouseDate(startDate)}') AND toDate('${formatClickhouseDate(endDate)}')`;
+    sb.where.created_at = `created_at BETWEEN toDateTime('${formatClickhouseDate(startDate)}') AND toDateTime('${formatClickhouseDate(endDate)}')`;
   }
 
   const selectedEventNames = events?.includes('*') ? [] : (events ?? []);
@@ -661,19 +695,30 @@ export const getEventsCountCached = cacheable(getEventsCount, 60 * 10);
 export async function getEventsCount({
   projectId,
   profileId,
+  profileIds,
   events,
   filters,
   startDate,
   endDate,
 }: Omit<GetEventListOptions, 'cursor' | 'take'>) {
   const { sb, getSql, join } = createSqlBuilder();
+  // Match getEventList: read from events_v2 for the same sort-key pruning.
+  const routeStartDate = startDate
+    ? formatClickhouseDate(startDate)
+    : formatClickhouseDate(new Date());
+  sb.from = `${getEventsTableForRange(routeStartDate)} e`;
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
-  if (profileId) {
+  if (profileIds && profileIds.length > 0) {
+    sb.where.profileId = `profile_id IN (${join(
+      profileIds.map((id) => sqlstring.escape(id)),
+      ',',
+    )})`;
+  } else if (profileId) {
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
   }
 
   if (startDate && endDate) {
-    sb.where.created_at = `toDate(created_at) BETWEEN toDate('${formatClickhouseDate(startDate)}') AND toDate('${formatClickhouseDate(endDate)}')`;
+    sb.where.created_at = `created_at BETWEEN toDateTime('${formatClickhouseDate(startDate)}') AND toDateTime('${formatClickhouseDate(endDate)}')`;
   }
 
   const selectedEventNames = events?.includes('*') ? [] : (events ?? []);

@@ -815,6 +815,68 @@ export async function getProfiles(ids: string[], projectId: string) {
 
 export const getProfilesCached = cacheable(getProfiles, 60 * 5);
 
+/**
+ * Resolve a profile_id to its full identity cluster: the canonical (identified)
+ * profile_id plus every anonymous device id (alias) that resolves to it. Used by
+ * the profile page to show the complete pre-login + post-login journey — anon
+ * events live under the device id, identified events under the canonical, and
+ * profile_aliases links them (the same map funnels/conversions resolve through).
+ *
+ * Two steps:
+ *  1. Forward-resolve the input to its canonical (the input may itself be an anon
+ *     device id). Uses an alias-keyed lookup on profile_aliases — its
+ *     (project_id, alias) sort key makes this a cheap point lookup, and unlike
+ *     the RAM alias dict it is authoritative: the dict refresh lags behind
+ *     profile_aliases inserts, so a freshly-aliased device can dictGet-MISS and
+ *     silently drop the post-login half. Correctness over the ~1ms dict saving —
+ *     this runs at most once per profile per cache window anyway.
+ *  2. Reverse-lookup every alias of that canonical. profile_aliases is sorted by
+ *     alias, so filtering on profile_id is a full scan — hence this is cached.
+ */
+export async function getProfileIdCluster(
+  projectId: string,
+  profileId: string,
+): Promise<string[]> {
+  if (!profileId) {
+    return [];
+  }
+
+  const escProject = sqlstring.escape(projectId);
+  const escProfile = sqlstring.escape(profileId);
+
+  // If the input is an anon device id, this returns its canonical; if it is
+  // already a canonical (no alias row), argMax over the empty set yields '' and
+  // we fall back to the input.
+  const canonicalRows = await chQuery<{ canonical: string }>(
+    `SELECT coalesce(nullIf(argMax(profile_id, created_at), ''), ${escProfile}) AS canonical FROM ${TABLE_NAMES.alias} WHERE project_id = ${escProject} AND alias = ${escProfile}`,
+  );
+  const canonical = canonicalRows[0]?.canonical || profileId;
+  const escCanonical = sqlstring.escape(canonical);
+
+  // Keep only aliases whose *latest* mapping still points to this canonical. An
+  // alias reassigned to another profile keeps its old row (profile_id is part of
+  // the sort key), so filtering on profile_id alone would resurrect a device that
+  // now belongs to a different user and expose its events on the wrong profile.
+  // Restrict to candidate aliases that ever pointed here, then argMax each to its
+  // current canonical.
+  const aliasRows = await chQuery<{ alias: string }>(
+    `SELECT alias FROM ${TABLE_NAMES.alias}
+       WHERE project_id = ${escProject}
+         AND alias IN (
+           SELECT alias FROM ${TABLE_NAMES.alias}
+           WHERE project_id = ${escProject} AND profile_id = ${escCanonical}
+         )
+       GROUP BY alias
+       HAVING argMax(profile_id, created_at) = ${escCanonical}`,
+  );
+
+  return uniq(
+    [canonical, profileId, ...aliasRows.map((r) => r.alias)].filter(Boolean),
+  );
+}
+
+export const getProfileIdClusterCached = cacheable(getProfileIdCluster, 60 * 10);
+
 // Columns the profile LIST renders. `properties` IS needed here — the table's
 // Country/OS/Browser/Model/Referrer columns read from it (e.g.
 // properties['country']). ClickHouse Maps are read whole, so we can't cheaply
