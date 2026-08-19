@@ -1,11 +1,10 @@
 import { EventsFilters } from '@/components/events/filters/events-filters';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
+import { LastSeenPicker } from '@/components/profiles/last-seen-picker';
 import { Skeleton } from '@/components/skeleton';
-import { Button } from '@/components/ui/button';
 import { useDataTableColumnVisibility } from '@/components/ui/data-table/data-table-hooks';
 import { DataTableToolbarContainer } from '@/components/ui/data-table/data-table-toolbar';
 import { DataTableViewOptions } from '@/components/ui/data-table/data-table-view-options';
-import { pushModal } from '@/modals';
 import type { RouterInputs, RouterOutputs } from '@/trpc/client';
 import { cn } from '@/utils/cn';
 import type { IServiceEvent } from '@openpanel/db';
@@ -14,8 +13,8 @@ import type { Table } from '@tanstack/react-table';
 import { getCoreRowModel, useReactTable } from '@tanstack/react-table';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import type { TRPCInfiniteData } from '@trpc/tanstack-react-query';
-import { format } from 'date-fns';
-import { CalendarIcon, Loader2Icon } from 'lucide-react';
+import { format, parse } from 'date-fns';
+import { CalendarIcon, Loader2Icon, XIcon } from 'lucide-react';
 import { parseAsIsoDateTime, useQueryState } from 'nuqs';
 import { last } from 'ramda';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -32,10 +31,15 @@ type Props = {
     >,
     unknown
   >;
+  // Label for the date button when no explicit range is picked. The profile page
+  // passes "Last 15 days" (its default feed window) / "All time" (while searching).
+  emptyRangeLabel?: string;
 };
 
 const LOADING_DATA = [{}, {}, {}, {}, {}, {}, {}, {}, {}] as IServiceEvent[];
 const ROW_HEIGHT = 40;
+// DB-format the LastSeenPicker reads/writes (naive, project timezone).
+const DB_FMT = 'yyyy-MM-dd HH:mm:ss';
 
 interface VirtualizedEventsTableProps {
   table: Table<IServiceEvent>;
@@ -265,7 +269,7 @@ const VirtualizedEventsTable = ({
   );
 };
 
-export const EventsTable = ({ query }: Props) => {
+export const EventsTable = ({ query, emptyRangeLabel }: Props) => {
   const { isLoading } = query;
   const columns = useColumns();
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
@@ -333,7 +337,11 @@ export const EventsTable = ({ query }: Props) => {
 
   return (
     <>
-      <EventsTableToolbar query={query} table={table} />
+      <EventsTableToolbar
+        query={query}
+        table={table}
+        emptyRangeLabel={emptyRangeLabel}
+      />
       <VirtualizedEventsTable
         table={table}
         data={data}
@@ -358,40 +366,55 @@ export const EventsTable = ({ query }: Props) => {
 function EventsTableToolbar({
   query,
   table,
+  emptyRangeLabel,
 }: {
   query: Props['query'];
   table: Table<IServiceEvent>;
+  emptyRangeLabel?: string;
 }) {
   const [startDate, setStartDate] = useQueryState(
     'startDate',
     parseAsIsoDateTime,
   );
   const [endDate, setEndDate] = useQueryState('endDate', parseAsIsoDateTime);
+  const hasRange = !!(startDate && endDate);
 
   return (
     <div className="flex flex-col gap-2 mb-4">
       <DataTableToolbarContainer className="mb-0">
         <div className="flex flex-1 flex-wrap items-center gap-2">
           <EventListener onRefresh={() => query.refetch()} />
-          <Button
-            variant="outline"
-            size="sm"
-            icon={CalendarIcon}
-            onClick={() => {
-              pushModal('DateRangerPicker', {
-                onChange: ({ startDate, endDate }) => {
-                  setStartDate(startDate);
-                  setEndDate(endDate);
-                },
-                startDate: startDate || undefined,
-                endDate: endDate || undefined,
-              });
+          {/* Reuses the #371 dual-month "Last seen" calendar. DB-format strings
+              in/out; the events feed stores the range as ISO dates. */}
+          <LastSeenPicker
+            startDate={startDate ? format(startDate, DB_FMT) : null}
+            endDate={endDate ? format(endDate, DB_FMT) : null}
+            onApply={(start, end) => {
+              setStartDate(parse(start, DB_FMT, new Date()));
+              // "Since" mode returns a null end — roll to now so both bounds are
+              // set (the feed query treats [start, end] as an explicit window).
+              setEndDate(end ? parse(end, DB_FMT, new Date()) : new Date());
             }}
+            className="inline-flex h-8 items-center gap-2 rounded-md border bg-card px-3 text-sm font-medium transition-colors hover:bg-accent"
           >
-            {startDate && endDate
-              ? `${format(startDate, 'MMM d')} - ${format(endDate, 'MMM d')}`
-              : 'Date range'}
-          </Button>
+            <CalendarIcon className="size-4 text-muted-foreground" />
+            {hasRange
+              ? `${format(startDate!, 'MMM d')} - ${format(endDate!, 'MMM d')}`
+              : (emptyRangeLabel ?? 'Date range')}
+          </LastSeenPicker>
+          {hasRange && (
+            <button
+              type="button"
+              title="Clear date range"
+              onClick={() => {
+                setStartDate(null);
+                setEndDate(null);
+              }}
+              className="flex size-8 items-center justify-center rounded-md border bg-card text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <XIcon className="size-4" />
+            </button>
+          )}
         </div>
         <DataTableViewOptions table={table} />
       </DataTableToolbarContainer>

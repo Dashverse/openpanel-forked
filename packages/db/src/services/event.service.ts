@@ -493,14 +493,22 @@ export async function getEventList(options: GetEventListOptions) {
     ? MAX_DATE_INTERVAL_IN_DAYS
     : Math.min(dateIntervalInDays, MAX_DATE_INTERVAL_IN_DAYS);
 
+  // When the caller passes an explicit [startDate, endDate] (e.g. the profile
+  // page's default "last 15 days", or a user-picked range), that BETWEEN clause
+  // below bounds the scan — so skip the rolling expanding-window entirely and let
+  // the range drive it (only the cursor upper-bound is needed for pagination).
+  const hasExplicitRange = !!(startDate && endDate);
+
   if (typeof cursor === 'number') {
     sb.offset = Math.max(0, (cursor ?? 0) * take);
   } else if (cursor instanceof Date) {
-    sb.where.cursorWindow = `created_at >= toDateTime64(${sqlstring.escape(formatClickhouseDate(cursor))}, 3) - INTERVAL ${safeDateIntervalInDays} DAY`;
+    if (!hasExplicitRange) {
+      sb.where.cursorWindow = `created_at >= toDateTime64(${sqlstring.escape(formatClickhouseDate(cursor))}, 3) - INTERVAL ${safeDateIntervalInDays} DAY`;
+    }
     sb.where.cursor = `created_at <= ${sqlstring.escape(formatClickhouseDate(cursor))}`;
   }
 
-  if (!cursor) {
+  if (!cursor && !hasExplicitRange) {
     sb.where.cursorWindow = `created_at >= toDateTime64(${sqlstring.escape(formatClickhouseDate(new Date()))}, 3) - INTERVAL ${safeDateIntervalInDays} DAY`;
   }
 
