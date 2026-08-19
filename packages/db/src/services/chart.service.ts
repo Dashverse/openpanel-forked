@@ -1073,8 +1073,10 @@ export async function getChartSql({
     with: addCte,
   } = createSqlBuilder();
 
-  // Determine if we can use profile_event_summary_mv instead of raw events table
-  // for cohort-only breakdown queries (no property breakdowns/filters, day+ interval)
+  // RETIRED: profile_event_summary_mv carries `profile_id != device_id`, so it is
+  // anon-excluded and UNDERCOUNTS pre-login/anonymous users. Cohort-breakdown
+  // trend counts now read events_v2 (anon-inclusive, correct) like every other
+  // chart — see the no-wrong-data policy. Forced off so the MV can be dropped.
   const hasCohortBreakdown = breakdowns.some(
     (b) => b.name.startsWith('cohort:') || b.cohortId,
   );
@@ -1085,6 +1087,7 @@ export async function getChartSql({
     (f) => f.name.startsWith('properties.') || f.name.startsWith('profile.'),
   );
   const useCohortMV =
+    false &&
     !customEvent &&
     hasCohortBreakdown &&
     allBreakdownsAreCohort &&
@@ -1986,33 +1989,6 @@ export function getEventFiltersWhereClause(
   });
 
   return where;
-}
-
-/**
- * Generate WHERE clause for global cohort filters
- * These filters apply to the entire chart, not just specific events
- */
-export function getGlobalCohortFiltersWhereClause(
-  cohortFilters: Array<{
-    cohortId: string;
-    operator: 'inCohort' | 'notInCohort';
-  }>,
-  projectId: string,
-): string {
-  if (!cohortFilters || cohortFilters.length === 0) {
-    return '';
-  }
-
-  const conditions = cohortFilters.map((filter) => {
-    const subquery = getCohortMembershipSubquery(filter.cohortId);
-
-    return filter.operator === 'inCohort'
-      ? `profile_id IN (${subquery})`
-      : `profile_id NOT IN (${subquery})`;
-  });
-
-  // AND logic between multiple cohort filters
-  return conditions.join(' AND ');
 }
 
 export function getChartStartEndDate(
