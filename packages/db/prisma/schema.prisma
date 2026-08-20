@@ -310,6 +310,10 @@ model Report {
   name         String
   interval     Interval
   range        String    @default("30d")
+  // Custom range bounds (ISO strings), persisted so a saved report with
+  // range='custom' restores its dates instead of falling back to a preset.
+  startDate    String?
+  endDate      String?
   chartType    ChartType
   lineType     String    @default("monotone")
   breakdowns   Json

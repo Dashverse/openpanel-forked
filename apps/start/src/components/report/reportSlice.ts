@@ -109,9 +109,11 @@ export const reportSlice = createSlice({
           action.payload.chartType,
         ),
         limit: action.payload.limit ?? state.limit,
-        range: '7d',
-        startDate: null,
-        endDate: null,
+        // Respect the saved report's range so a saved custom range (and its
+        // dates) restores on open instead of always resetting to 7d.
+        range: action.payload.range ?? '7d',
+        startDate: action.payload.startDate ?? null,
+        endDate: action.payload.endDate ?? null,
         dirty: false,
         ready: true,
       };
