@@ -11,7 +11,13 @@ import type { IChartEventFilter } from '@openpanel/validation';
 
 import { ch, chQuery, TABLE_NAMES } from '../clickhouse/client';
 import { db } from '../prisma-client';
-import { getEventFiltersWhereClause } from './chart.service';
+import { operatorClause } from './filter-operators';
+
+// v2 property MV (profile_event_property_summary_v2) is anon-inclusive but only
+// backfilled from this date forward; June/pre-July is dirty/partial. Property
+// cohorts whose timeframe STARTS on/after this route to v2 (all projects); older
+// ones fall back to the anon-excluded v1 MV. Env-overridable coverage date.
+const COHORTS_V2_START_DATE = process.env.COHORTS_V2_START_DATE || '2026-07-01';
 
 /**
  * Build time constraint SQL from timeframe
@@ -37,6 +43,32 @@ function buildTimeConstraint(timeframe: Timeframe): string {
       return `created_at >= toDate('${start}')`;
     }
   }
+}
+
+/**
+ * The UTC start day of a criterion's timeframe. Relative "Nd" resolves to
+ * N days before today; absolute uses its `start`. Used only to gate v1 vs v2.
+ */
+function criteriaTimeframeStart(timeframe: Timeframe): Date {
+  if (timeframe.type === 'relative') {
+    const match = timeframe.value.match(/^(\d+)d$/);
+    const days = match ? Number.parseInt(match[1]!, 10) : 0;
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - days);
+    return d;
+  }
+  return new Date(`${timeframe.start}T00:00:00Z`);
+}
+
+/**
+ * Property cohorts route to the anon-inclusive v2 MV only when the whole
+ * timeframe sits within v2's coverage window (start >= COHORTS_V2_START_DATE);
+ * otherwise fall back to v1 so we never read a partial/absent v2 range.
+ */
+function canRouteCohortToV2(criteria: EventCriteria): boolean {
+  const start = criteriaTimeframeStart(criteria.timeframe);
+  const gate = new Date(`${COHORTS_V2_START_DATE}T00:00:00Z`);
+  return start.getTime() >= gate.getTime();
 }
 
 /**
@@ -74,56 +106,39 @@ export function buildEventCriteriaQuery(
     ? `AND profile_id IN (${profileIdPrefilter})`
     : '';
 
-  // Build event filters
-  const filterWhere = filters.length > 0
-    ? getEventFiltersWhereClause(filters)
-    : {};
-  const filterClauses = Object.values(filterWhere);
-  const filterClause = filterClauses.length > 0
-    ? `AND ${filterClauses.join(' AND ')}`
-    : '';
-
   // Check if there are event property filters
   const hasEventPropertyFilters = filters.some(
     (f) => f.name.startsWith('properties.') && !f.name.startsWith('profile.properties.')
   );
 
-  // Use property-aware MV for event property filters
+  // PROPERTY criteria ("did X where flag=Y") → property summary MV. Anon-inclusive
+  // v2 when the timeframe sits in v2's coverage window, else the v1 fallback. Both
+  // MVs share the same schema (name/property_key/property_value/event_date/
+  // countMerge(event_count)/profile_id) so this is a pure table-name swap.
   if (hasEventPropertyFilters) {
+    const propertyTable = canRouteCohortToV2(criteria)
+      ? TABLE_NAMES.profile_event_property_summary_v2
+      : TABLE_NAMES.profile_event_property_summary_mv;
+
     const propertyFilters = filters.filter(
       (f) => f.name.startsWith('properties.')
     );
 
-    // Build WHERE conditions for property filters
+    // One `(property_key = k AND <value predicate>)` per filter, OR'd together.
+    // operatorClause handles ALL operators (contains/doesNotContain/gt/regex/…);
+    // the old inline switch fell through to `IN` for anything but is/isNot/
+    // contains/doesNotContain — silently inverting doesNotContain etc.
     const propertyConditions = propertyFilters.map((filter) => {
       const propertyKey = filter.name.replace('properties.', '');
       const { value, operator } = filter;
-
-      switch (operator) {
-        case 'is':
-          if (value.length === 1) {
-            return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value = ${sqlstring.escape(String(value[0]).trim())})`;
-          }
-          return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value IN (${value.map((val) => sqlstring.escape(String(val).trim())).join(', ')}))`;
-        case 'isNot':
-          if (value.length === 1) {
-            return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value != ${sqlstring.escape(String(value[0]).trim())})`;
-          }
-          return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value NOT IN (${value.map((val) => sqlstring.escape(String(val).trim())).join(', ')}))`;
-        case 'contains':
-          return `(property_key = ${sqlstring.escape(propertyKey)} AND (${value.map((val) => `property_value LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`).join(' OR ')}))`;
-        case 'doesNotContain':
-          return `(property_key = ${sqlstring.escape(propertyKey)} AND (${value.map((val) => `property_value NOT LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`).join(' AND ')}))`;
-        default:
-          return `(property_key = ${sqlstring.escape(propertyKey)} AND property_value IN (${value.map((val) => sqlstring.escape(String(val).trim())).join(', ')}))`;
-      }
+      return `(property_key = ${sqlstring.escape(propertyKey)} AND ${operatorClause('property_value', operator, value)})`;
     }).join(' OR ');
 
     if (frequency) {
       const frequencyOp = getFrequencyOperator(frequency);
       return `
         SELECT profile_id
-        FROM ${TABLE_NAMES.profile_event_property_summary_mv}
+        FROM ${propertyTable}
         WHERE project_id = ${sqlstring.escape(projectId)}
           AND name = ${sqlstring.escape(name)}
           AND ${timeConstraint.replace('created_at', 'event_date')}
@@ -136,7 +151,7 @@ export function buildEventCriteriaQuery(
 
     return `
       SELECT DISTINCT profile_id
-      FROM ${TABLE_NAMES.profile_event_property_summary_mv}
+      FROM ${propertyTable}
       WHERE project_id = ${sqlstring.escape(projectId)}
         AND name = ${sqlstring.escape(name)}
         AND ${timeConstraint.replace('created_at', 'event_date')}
@@ -145,27 +160,31 @@ export function buildEventCriteriaQuery(
     `;
   }
 
-  // cohort_events_mv: name is 2nd in sort key (vs profile_id 2nd in
-  // profile_event_summary_mv) — much better prefix match for these filters.
+  // NAME-ONLY criteria ("did X", any N×) → raw events. The property MV explodes
+  // each event into one row per property (ARRAY JOIN), so countMerge over it
+  // massively overcounts frequency; and cohort_events_mv is anon-excluded. Raw
+  // events is exact for any frequency, anon-inclusive, and faster than v2 here
+  // (name is an effective sort-key prefix via the proj_funnel projection). Uses
+  // created_at + plain count() — no event_date/countMerge rewrite.
   if (frequency) {
     const frequencyOp = getFrequencyOperator(frequency);
 
     return `
       SELECT profile_id
-      FROM ${TABLE_NAMES.cohort_events_mv}
+      FROM ${TABLE_NAMES.events}
       WHERE project_id = ${sqlstring.escape(projectId)}
         AND name = ${sqlstring.escape(name)}
         AND ${timeConstraint}
         ${prefilterClause}
       GROUP BY profile_id
-      HAVING sum(event_count) ${frequencyOp}
+      HAVING count() ${frequencyOp}
     `;
   }
 
   // For simple "did event" queries
   return `
     SELECT DISTINCT profile_id
-    FROM ${TABLE_NAMES.cohort_events_mv}
+    FROM ${TABLE_NAMES.events}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND name = ${sqlstring.escape(name)}
       AND ${timeConstraint}
