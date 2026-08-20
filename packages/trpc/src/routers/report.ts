@@ -72,7 +72,11 @@ export const reportRouter = createTRPCRouter({
           breakdowns: report.breakdowns,
           chartType: report.chartType,
           lineType: report.lineType,
-          range: report.range === 'custom' ? '30d' : report.range,
+          range: report.range,
+          // Persist custom bounds so a saved custom range restores on reopen
+          // (for everyone), instead of the old '30d' downgrade that dropped them.
+          startDate: report.range === 'custom' ? (report.startDate ?? null) : null,
+          endDate: report.range === 'custom' ? (report.endDate ?? null) : null,
           formula: report.formula,
           previous: report.previous ?? false,
           unit: report.unit,
@@ -123,7 +127,11 @@ export const reportRouter = createTRPCRouter({
           breakdowns: report.breakdowns,
           chartType: report.chartType,
           lineType: report.lineType,
-          range: report.range === 'custom' ? '30d' : report.range,
+          range: report.range,
+          // Persist custom bounds so a saved custom range restores on reopen
+          // (for everyone), instead of the old '30d' downgrade that dropped them.
+          startDate: report.range === 'custom' ? (report.startDate ?? null) : null,
+          endDate: report.range === 'custom' ? (report.endDate ?? null) : null,
           formula: report.formula,
           previous: report.previous ?? false,
           unit: report.unit,

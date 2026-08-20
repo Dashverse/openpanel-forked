@@ -85,6 +85,8 @@ export function transformReport(
       report.range in deprecated_timeRanges
         ? '30d'
         : (report.range as IChartRange),
+    startDate: report.startDate ?? undefined,
+    endDate: report.endDate ?? undefined,
     previous: report.previous ?? false,
     formula: report.formula ?? undefined,
     metric: report.metric ?? 'sum',
