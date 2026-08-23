@@ -10,7 +10,7 @@ import { ch, formatClickhouseDate } from '../clickhouse/client';
 import {
   TABLE_NAMES,
   getEventsTableForRange,
-  resolvedProfileIdSql,
+  resolvedPersonIdSql,
   aliasResolutionNeedsCte,
 } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
@@ -249,7 +249,7 @@ export class FunnelService {
     // mixpanel-proxy split), falling back to profile_id. Same key the `al` CTE
     // joins on. Both dict + CTE modes group identically.
     const expr = resolveAliases
-      ? resolvedProfileIdSql(projectId ?? '', `${fromClause}.device_id`, base)
+      ? resolvedPersonIdSql(projectId ?? '', `${fromClause}.device_id`, base)
       : base;
     return [expr, 'profile_id'];
   }
@@ -928,7 +928,7 @@ export class FunnelService {
           ? '\n          LEFT JOIN al ON al.alias = device_id'
           : '';
       const ttcGid = resolveAliases
-        ? resolvedProfileIdSql(projectId, 'device_id', 'profile_id')
+        ? resolvedPersonIdSql(projectId, 'device_id', 'profile_id')
         : 'profile_id';
 
       const ttcQuery = `

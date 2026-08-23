@@ -7,7 +7,7 @@ import {
   ch,
   formatClickhouseDate,
   getEventsTableForRange,
-  resolvedProfileIdSql,
+  resolvedPersonIdSql,
   aliasResolutionNeedsCte,
 } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
@@ -167,7 +167,7 @@ export class ConversionService {
           ? `\n        LEFT JOIN al ON al.alias = ${rawDeviceId}`
           : '';
       const profileIdExpr = resolveProfile
-        ? resolvedProfileIdSql(projectId, rawDeviceId, rawProfileId)
+        ? resolvedPersonIdSql(projectId, rawDeviceId, rawProfileId)
         : null;
       const selectList = selectColumns
         .map((c) =>
@@ -417,7 +417,7 @@ export class ConversionService {
     const aliasJoin = aliasResolutionNeedsCte()
       ? `\n        LEFT JOIN al ON al.alias = ${E}.device_id`
       : '';
-    const resolvedPid = resolvedProfileIdSql(projectId, `${E}.device_id`, `${E}.profile_id`);
+    const resolvedPid = resolvedPersonIdSql(projectId, `${E}.device_id`, `${E}.profile_id`);
 
     // Split-scan breakdown variant. Opens (first event) are grouped per
     // (resolved_pid, b_0) so the breakdown value comes from the START event;

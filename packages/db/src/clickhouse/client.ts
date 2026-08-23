@@ -175,6 +175,27 @@ export function resolvedProfileIdSql(
   return `coalesce(nullIf(al.canonical, ''), ${fallback})`;
 }
 
+/**
+ * Resolve an event to its canonical person id — the ONE resolver funnels /
+ * conversions / charts should use.
+ *
+ * `profile_aliases` is keyed on `$device_id` (= the `device_id` column), NOT the
+ * anon `distinct_id` that the mixpanel-proxy lands in `profile_id`. Frameo's
+ * device-id sync made `distinct_id != $device_id`, so looking up the alias on
+ * `profile_id` misses and drops conversions. This looks up the alias on
+ * `deviceIdKey` and falls back to `profileIdKey` — a no-op where they're equal
+ * (native / single-SDK projects), a fix where they differ (frameo split).
+ *
+ * The matching `al` CTE (dict off) MUST join on the same `deviceIdKey`.
+ */
+export function resolvedPersonIdSql(
+  projectId: string,
+  deviceIdKey: string,
+  profileIdKey: string,
+): string {
+  return resolvedProfileIdSql(projectId, deviceIdKey, profileIdKey);
+}
+
 /** True when the caller still needs to emit the `al` CTE + `LEFT JOIN al` (dict off). */
 export function aliasResolutionNeedsCte(): boolean {
   return !getProfileAliasDict();
