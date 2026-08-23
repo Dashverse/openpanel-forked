@@ -158,13 +158,16 @@ export class ConversionService {
       // the SELECT output alias (also `profile_id`), yielding a circular join key
       // (al.alias = coalesce(al.canonical, profile_id)) that ClickHouse rejects.
       const rawProfileId = `${getEventsTableForRange(startDate)}.profile_id`;
-      // dict on -> dictGet (no JOIN); dict off -> al CTE + JOIN (unchanged).
+      const rawDeviceId = `${getEventsTableForRange(startDate)}.device_id`;
+      // profile_aliases is keyed on $device_id (= device_id column), NOT the anon
+      // distinct_id that the proxy lands in profile_id. Resolve on device_id, fall
+      // back to profile_id. dict on -> dictGet (no JOIN); dict off -> al CTE + JOIN.
       const aliasJoin =
         resolveProfile && aliasResolutionNeedsCte()
-          ? `\n        LEFT JOIN al ON al.alias = ${rawProfileId}`
+          ? `\n        LEFT JOIN al ON al.alias = ${rawDeviceId}`
           : '';
       const profileIdExpr = resolveProfile
-        ? resolvedProfileIdSql(projectId, rawProfileId)
+        ? resolvedProfileIdSql(projectId, rawDeviceId, rawProfileId)
         : null;
       const selectList = selectColumns
         .map((c) =>
@@ -412,9 +415,9 @@ export class ConversionService {
       `
       : '';
     const aliasJoin = aliasResolutionNeedsCte()
-      ? `\n        LEFT JOIN al ON al.alias = ${E}.profile_id`
+      ? `\n        LEFT JOIN al ON al.alias = ${E}.device_id`
       : '';
-    const resolvedPid = resolvedProfileIdSql(projectId, `${E}.profile_id`);
+    const resolvedPid = resolvedProfileIdSql(projectId, `${E}.device_id`, `${E}.profile_id`);
 
     // Split-scan breakdown variant. Opens (first event) are grouped per
     // (resolved_pid, b_0) so the breakdown value comes from the START event;

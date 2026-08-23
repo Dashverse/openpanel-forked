@@ -803,7 +803,7 @@ export const chartRouter = createTRPCRouter({
       // collapses anon -> identified, yielding real profiles.id values. One scan of
       // profile_aliases; a no-op for projects with no aliases (coalesce keeps raw id).
       if (resolveAliases) {
-        funnelCte.leftJoin('al', `al.alias = ${fromClause}.profile_id`);
+        funnelCte.leftJoin('al', `al.alias = ${fromClause}.device_id`);
         query.with(
           'al',
           clix(ch, timezone)
