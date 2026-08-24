@@ -10,7 +10,7 @@ import { ch, formatClickhouseDate } from '../clickhouse/client';
 import {
   TABLE_NAMES,
   getEventsTableForRange,
-  resolvedProfileIdSql,
+  resolvedPersonIdSql,
   aliasResolutionNeedsCte,
 } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
@@ -244,11 +244,12 @@ export class FunnelService {
     // redundant, so we drop it. resolveAliases=false (dict off / no aliases) now
     // keys on the raw profile_id.
     const base = `${fromClause}.profile_id`;
-    // Look up the RAW event profile_id in the alias map (same column the `al` CTE
-    // joins on), falling back to the session-stitched `base`. Both dict + CTE
-    // modes now group identically.
+    // Look up the RAW event device_id in the alias map (the alias is keyed on
+    // $device_id, NOT the anon distinct_id that lands in profile_id — see the
+    // mixpanel-proxy split), falling back to profile_id. Same key the `al` CTE
+    // joins on. Both dict + CTE modes group identically.
     const expr = resolveAliases
-      ? resolvedProfileIdSql(projectId ?? '', `${fromClause}.profile_id`, base)
+      ? resolvedPersonIdSql(projectId ?? '', `${fromClause}.device_id`, base)
       : base;
     return [expr, 'profile_id'];
   }
@@ -772,7 +773,7 @@ export class FunnelService {
     // Only emit the `al` CTE + JOIN when the dict is OFF; when on, the group
     // expression resolves via dictGet (in-RAM) and no scan/join is needed.
     if (resolveAliases && aliasResolutionNeedsCte()) {
-      funnelCte.leftJoin('al', `al.alias = ${fromClause}.profile_id`);
+      funnelCte.leftJoin('al', `al.alias = ${fromClause}.device_id`);
       funnelQuery.with(
         'al',
         clix(this.client, timezone)
@@ -924,10 +925,10 @@ export class FunnelService {
           : '';
       const ttcAliasJoin =
         resolveAliases && aliasResolutionNeedsCte()
-          ? '\n          LEFT JOIN al ON al.alias = profile_id'
+          ? '\n          LEFT JOIN al ON al.alias = device_id'
           : '';
       const ttcGid = resolveAliases
-        ? resolvedProfileIdSql(projectId, 'profile_id')
+        ? resolvedPersonIdSql(projectId, 'device_id', 'profile_id')
         : 'profile_id';
 
       const ttcQuery = `
