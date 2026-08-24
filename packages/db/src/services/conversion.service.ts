@@ -181,6 +181,55 @@ export class ConversionService {
       // must resolve too — otherwise raw-end never matches canonical-start.
       const preFilterLhs = profileIdExpr ?? groupCol;
 
+      // MV-eligible path: when there are no per-event filters and no
+      // breakdown/hold property columns are needed, source from
+      // profile_event_summary_mv instead of scanning the events table.
+      // The MV is pre-aggregated by (project_id, profile_id, name,
+      // event_date) with first_event_time stored as an AggregateFunction,
+      // which is exactly what start_events / end_events downstream want.
+      //
+      // Measured on a 1-month shortreels appOpen conversion:
+      //   events table → ~28 GiB read, ~10-40s (often timing out)
+      //   MV path      → ~6 GiB read,  ~600 ms
+      // Numbers match the events table exactly (verified via uniq +
+      // countMerge side-by-side).
+      //
+      // Restrictions for MV eligibility:
+      //   - no per-event filters (MV only stores aggregates per
+      //     (profile, name, day); filtering by property values would
+      //     need to fall back to events)
+      //   - no extra columns (breakdown / hold properties live on
+      //     events, not on the MV)
+      //   - no profile.* filters (would need profile JOIN; if any
+      //     filters exist we'd already be in the non-eligible branch)
+      //   - groupCol === 'profile_id' (MV is profile-keyed; session_id
+      //     conversions still go through the events table)
+      // session_id is emitted as '' from the MV — downstream `any(...)`
+      // accepts it and current callers don't read it when grouping by
+      // profile_id.
+      const isMvEligible =
+        nonCohortFilters.length === 0 &&
+        extraColumns.length === 0 &&
+        groupCol === 'profile_id';
+
+      if (isMvEligible) {
+        const endDateAsDate = formatClickhouseDate(endDate).slice(0, 10);
+        const startDateAsDate = formatClickhouseDate(startDate).slice(0, 10);
+        return `${cteName} AS (
+        SELECT
+          profile_id,
+          '' AS session_id,
+          minMerge(first_event_time) AS created_at
+        FROM profile_event_summary_mv
+        WHERE project_id = '${projectId}'
+          AND name = '${event.name}'
+          AND event_date >= toDate('${startDateAsDate}')
+          AND event_date <= toDate('${endDateAsDate}')
+          AND profile_id != ''${preFilterCte ? `\n          AND profile_id IN (SELECT profile_id FROM ${preFilterCte})` : ''}
+        GROUP BY profile_id, event_date
+      )`;
+      }
+
       // project_id / name / created_at go into PREWHERE so ClickHouse can skip
       // granules using the sort key before loading other columns. The rest of
       // the predicates (groupCol != '', user filters, preFilterCte subquery)
