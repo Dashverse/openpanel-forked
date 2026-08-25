@@ -484,10 +484,21 @@ export class FunnelService {
     // Identity-merge: resolve anon profile_id -> canonical via profile_aliases so a
     // user's anon + identified events collapse into one funnel subject across
     // sessions. No-op for projects with no aliases (coalesce keeps the raw id), so
-    // no gating needed. Profile-level only; skipped for cohorts (cohort joins match
-    // raw profile_id). Custom events are fine — resolution is applied at the group
-    // level after the union, not inside the per-event CTEs.
-    const resolveAliases = funnelGroup !== 'session_id' && cohortIds.length === 0;
+    // no gating needed. Profile-level only. Custom events are fine — resolution is
+    // applied at the group level after the union, not inside the per-event CTEs.
+    //
+    // Cohorts: previously this was force-disabled when a cohort was present
+    // (cohort joins matched RAW profile_id, so a cross-identity funnel — anon
+    // `$ae_first_open` -> identified `trialStarted` inside a cohort — dropped later
+    // steps to 0). We now KEEP resolution on with cohorts WHEN THE DICT IS ON: the
+    // resolved group is a self-contained dictGet, the cohort membership is resolved
+    // to the same canonical (buildCohortMembershipQuery(resolveIdentity)), and the
+    // cohort JOIN keys on the resolved group — all three in one identity space.
+    // With the dict OFF we keep the old raw behavior to avoid the `al` CTE having
+    // to be reordered before the cohort joins.
+    const resolveAliases =
+      funnelGroup !== 'session_id' &&
+      (cohortIds.length === 0 || !aliasResolutionNeedsCte());
 
     // Hoist event filters to a `filtered_profiles` pre-CTE when conditions
     // allow (mirrors the conversion service's fast path). Filters inside
@@ -703,13 +714,18 @@ export class FunnelService {
       );
     }
 
-    // Add LEFT JOINs for all cohorts (much faster than IN subqueries)
+    // Add LEFT JOINs for all cohorts (much faster than IN subqueries).
+    // Key on the RESOLVED person (group[0]) so it lines up with the cohort
+    // membership, which is resolved to the same canonical when resolveAliases is
+    // on. When off (session group / dict off), group[0] is the raw profile_id and
+    // the membership is raw too — identical to the previous behavior.
+    const cohortJoinKey = resolveAliases ? group[0] : `${fromClause}.profile_id`;
     cohortIds.forEach((cohortId) => {
       const cohortAlias = getCohortAlias(cohortId);
       const cohortCte = getCohortCteName(cohortId);
       funnelCte.leftJoin(
         `${cohortCte} AS ${cohortAlias}`,
-        `${cohortAlias}.profile_id = ${fromClause}.profile_id`,
+        `${cohortAlias}.profile_id = ${cohortJoinKey}`,
       );
     });
 
@@ -734,10 +750,18 @@ export class FunnelService {
       funnelQuery.with(withClause.name, withClause.query);
     }
 
-    // Add cohort CTEs (computed once per query, not per row)
+    // Add cohort CTEs (computed once per query, not per row). Resolve membership
+    // to canonical when the funnel group is resolved, so the LEFT JOIN above lines
+    // up on the same identity space (anon device -> firebase).
     cohortIds.forEach((cohortId) => {
       const cohortMeta = cohortMetadata.get(cohortId);
-      const cohortQuery = buildCohortMembershipQuery(cohortId, projectId, cohortMeta);
+      const cohortQuery = buildCohortMembershipQuery(
+        cohortId,
+        projectId,
+        cohortMeta,
+        undefined,
+        resolveAliases,
+      );
       funnelQuery.with(getCohortCteName(cohortId), cohortQuery);
     });
 

@@ -9,7 +9,14 @@ import type {
 } from '@openpanel/validation';
 import type { IChartEventFilter } from '@openpanel/validation';
 
-import { ch, chQuery, TABLE_NAMES } from '../clickhouse/client';
+import {
+  ch,
+  chQuery,
+  TABLE_NAMES,
+  aliasResolutionNeedsCte,
+  resolvedPersonIdSql,
+  resolvedProfileIdSql,
+} from '../clickhouse/client';
 import { db } from '../prisma-client';
 import { operatorClause } from './filter-operators';
 
@@ -94,17 +101,48 @@ export function buildEventCriteriaQuery(
   projectId: string,
   criteria: EventCriteria,
   profileIdPrefilter?: string,
+  // When true (and the alias dict is loaded), the membership emits the
+  // CANONICAL person id instead of the raw profile_id, so a cohort JOINed onto
+  // an identity-resolved funnel/chart/conversion lines up on the same identity
+  // space (anon device -> firebase). Gated on the dict being ON: resolved*Sql
+  // returns a self-contained dictGet only then; with the dict off it references
+  // an `al` CTE that these standalone subqueries don't have, so we keep raw ids.
+  // Left false for standalone cohort computation (cohort_members / counts) to
+  // avoid changing stored membership.
+  resolveIdentity = false,
 ): string {
   const { name, filters, timeframe, frequency } = criteria;
 
   // Build time constraint
   const timeConstraint = buildTimeConstraint(timeframe);
 
-  // Caller-supplied prefilter shrinks the MV scan to a known small profile
-  // set (e.g. start_events_raw in conversion charts) before the GROUP BY.
-  const prefilterClause = profileIdPrefilter
-    ? `AND profile_id IN (${profileIdPrefilter})`
+  const resolve = resolveIdentity && !aliasResolutionNeedsCte();
+  // Events carry device_id (the alias key) -> resolve via device_id, fall back
+  // to profile_id. QUALIFY the raw columns with the table name: the SELECT
+  // aliases the resolved expr `AS profile_id`, and an unqualified `profile_id`
+  // inside the coalesce would bind to that output alias (circular) — which in a
+  // GROUP BY branch throws NOT_AN_AGGREGATE (the SELECT's raw col ends up not
+  // matching the GROUP BY key). Qualifying (events.profile_id) makes both sides
+  // the identical, unambiguous raw-column expression. Same pattern the
+  // conversion service uses.
+  const E = TABLE_NAMES.events;
+  const eventsPid = resolve
+    ? resolvedPersonIdSql(projectId, `${E}.device_id`, `${E}.profile_id`)
+    : 'profile_id';
+  // Caller-supplied prefilter shrinks the scan to a known small profile set
+  // (e.g. start_events_raw in conversion charts) before the GROUP BY. When we
+  // resolve, the prefilter set is the caller's RESOLVED ids (conversion's
+  // start_events_raw already emits resolved), so we compare the resolved expr —
+  // comparing raw profile_id would drop anon rows and under-match. When not
+  // resolving, compare raw profile_id (indexed → granule skipping).
+  const eventsPrefilter = profileIdPrefilter
+    ? `AND ${eventsPid} IN (${profileIdPrefilter})`
     : '';
+  // The property-summary MV has NO device_id column, so resolve via profile_id
+  // (valid post-2026-08-24: proxy #107 made anon profile_id == $device_id ==
+  // alias key). `mvPid`/`mvPrefilter` are computed inside the property branch
+  // below, once the concrete `propertyTable` (v1 vs v2) is known, so the raw
+  // column can be qualified with that table.
 
   // Check if there are event property filters
   const hasEventPropertyFilters = filters.some(
@@ -119,6 +157,15 @@ export function buildEventCriteriaQuery(
     const propertyTable = canRouteCohortToV2(criteria)
       ? TABLE_NAMES.profile_event_property_summary_v2
       : TABLE_NAMES.profile_event_property_summary_mv;
+
+    // Resolve via profile_id, QUALIFIED with the concrete propertyTable so the
+    // raw column can't bind to the `AS profile_id` output alias (see eventsPid).
+    const mvPid = resolve
+      ? resolvedProfileIdSql(projectId, `${propertyTable}.profile_id`)
+      : 'profile_id';
+    const mvPrefilter = profileIdPrefilter
+      ? `AND ${mvPid} IN (${profileIdPrefilter})`
+      : '';
 
     const propertyFilters = filters.filter(
       (f) => f.name.startsWith('properties.')
@@ -137,26 +184,26 @@ export function buildEventCriteriaQuery(
     if (frequency) {
       const frequencyOp = getFrequencyOperator(frequency);
       return `
-        SELECT profile_id
+        SELECT ${mvPid} AS profile_id
         FROM ${propertyTable}
         WHERE project_id = ${sqlstring.escape(projectId)}
           AND name = ${sqlstring.escape(name)}
           AND ${timeConstraint.replace('created_at', 'event_date')}
           AND (${propertyConditions})
-          ${prefilterClause}
-        GROUP BY profile_id
+          ${mvPrefilter}
+        GROUP BY ${mvPid}
         HAVING countMerge(event_count) ${frequencyOp}
       `;
     }
 
     return `
-      SELECT DISTINCT profile_id
+      SELECT DISTINCT ${mvPid} AS profile_id
       FROM ${propertyTable}
       WHERE project_id = ${sqlstring.escape(projectId)}
         AND name = ${sqlstring.escape(name)}
         AND ${timeConstraint.replace('created_at', 'event_date')}
         AND (${propertyConditions})
-        ${prefilterClause}
+        ${mvPrefilter}
     `;
   }
 
@@ -170,25 +217,25 @@ export function buildEventCriteriaQuery(
     const frequencyOp = getFrequencyOperator(frequency);
 
     return `
-      SELECT profile_id
+      SELECT ${eventsPid} AS profile_id
       FROM ${TABLE_NAMES.events}
       WHERE project_id = ${sqlstring.escape(projectId)}
         AND name = ${sqlstring.escape(name)}
         AND ${timeConstraint}
-        ${prefilterClause}
-      GROUP BY profile_id
+        ${eventsPrefilter}
+      GROUP BY ${eventsPid}
       HAVING count() ${frequencyOp}
     `;
   }
 
   // For simple "did event" queries
   return `
-    SELECT DISTINCT profile_id
+    SELECT DISTINCT ${eventsPid} AS profile_id
     FROM ${TABLE_NAMES.events}
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND name = ${sqlstring.escape(name)}
       AND ${timeConstraint}
-      ${prefilterClause}
+      ${eventsPrefilter}
   `;
 }
 
@@ -200,8 +247,12 @@ export function buildPropertyBasedCohortQuery(
   projectId: string,
   definition: PropertyBasedCohortDefinition,
   profileIdPrefilter?: string,
+  resolveIdentity = false,
 ): string {
   const { properties, operator } = definition.criteria;
+  const resolve = resolveIdentity && !aliasResolutionNeedsCte();
+  // profiles table has no device_id -> resolve the profile id itself.
+  const idExpr = resolve ? resolvedProfileIdSql(projectId, 'id') : 'id';
 
   // Build property filters
   const filterWhere = getProfileFiltersWhereClause(properties);
@@ -216,11 +267,11 @@ export function buildPropertyBasedCohortQuery(
   );
 
   const prefilterClause = profileIdPrefilter
-    ? `AND id IN (${profileIdPrefilter})`
+    ? `AND ${idExpr} IN (${profileIdPrefilter})`
     : '';
 
   return `
-    SELECT id as profile_id
+    SELECT ${idExpr} as profile_id
     FROM ${TABLE_NAMES.profiles} FINAL
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND (${filterClause})
@@ -240,8 +291,12 @@ export async function computeEventBasedCohort(
 ): Promise<string[]> {
   const { events, operator } = definition.criteria;
 
+  // Resolve to canonical person so a cohort's member list/count merges a user's
+  // anon + identified ids into ONE person (matches the resolved funnel/conversion
+  // usage). Gated dict-on inside the builder. INTERSECT/UNION over resolved sets
+  // is still correct (resolved persons in all / any criteria).
   const queries = events.map((eventCriteria) => {
-    return buildEventCriteriaQuery(projectId, eventCriteria);
+    return buildEventCriteriaQuery(projectId, eventCriteria, undefined, true);
   });
 
   // Combine queries based on AND/OR operator
@@ -267,8 +322,10 @@ export async function countEventBasedCohort(
 ): Promise<number> {
   const { events, operator } = definition.criteria;
 
+  // Resolve to canonical person (see computeEventBasedCohort) so the count is
+  // per-person, not per raw anon/identified id.
   const queries = events.map((eventCriteria) => {
-    return buildEventCriteriaQuery(projectId, eventCriteria);
+    return buildEventCriteriaQuery(projectId, eventCriteria, undefined, true);
   });
 
   // Combine queries based on AND/OR operator
@@ -423,8 +480,15 @@ export async function computePropertyBasedCohort(
     operator === 'and' ? ' AND ' : ' OR ',
   );
 
+  // Resolve profile id -> canonical person (dict-on) so a person with an anon +
+  // identified profile counts once. DISTINCT collapses the merged ids.
+  const resolve = !aliasResolutionNeedsCte();
+  const idExpr = resolve
+    ? resolvedProfileIdSql(projectId, `${TABLE_NAMES.profiles}.id`)
+    : 'id';
+
   const query = `
-    SELECT id as profile_id
+    SELECT DISTINCT ${idExpr} as profile_id
     FROM ${TABLE_NAMES.profiles} FINAL
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND (${filterClause})
@@ -456,8 +520,15 @@ export async function countPropertyBasedCohort(
     operator === 'and' ? ' AND ' : ' OR ',
   );
 
+  // Count distinct canonical persons (dict-on), not raw profile rows, so anon +
+  // identified profiles of the same person count once.
+  const resolve = !aliasResolutionNeedsCte();
+  const countExpr = resolve
+    ? `uniqExact(${resolvedProfileIdSql(projectId, `${TABLE_NAMES.profiles}.id`)})`
+    : 'count()';
+
   const query = `
-    SELECT count() as count
+    SELECT ${countExpr} as count
     FROM ${TABLE_NAMES.profiles} FINAL
     WHERE project_id = ${sqlstring.escape(projectId)}
       AND (${filterClause})

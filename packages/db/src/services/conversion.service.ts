@@ -848,11 +848,17 @@ export class ConversionService {
     //      date ranges against large cohorts.
     cohortIds.forEach((cohortId) => {
       const cohortMeta = cohortMetadata.get(cohortId);
+      // Resolve membership to canonical: `se.profile_id` (and the
+      // start_events_raw prefilter) already emit the RESOLVED person, so the
+      // cohort must too or the LEFT ANY JOIN never matches an anon-start /
+      // identified-end person. Takes effect only when the dict is on (matches
+      // when resolvedPid resolves in-RAM); dict-off keeps raw (unchanged).
       const cohortQuery = buildCohortMembershipQuery(
         cohortId,
         projectId,
         cohortMeta,
         'SELECT profile_id FROM start_events_raw',
+        true,
       );
       ctes.push(`${getCohortCteName(cohortId)} AS (${cohortQuery})`);
     });

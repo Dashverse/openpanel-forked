@@ -15,9 +15,11 @@ import type {
 import { db } from '../../index';
 import {
   TABLE_NAMES,
+  aliasResolutionNeedsCte,
   formatClickhouseDate,
   getEventsTableForRange,
   getPropertyMvTableForRange,
+  resolvedProfileIdSql,
 } from '../clickhouse/client';
 import { createSqlBuilder } from '../sql-builder';
 import {
@@ -161,14 +163,28 @@ export function buildCohortMembershipQuery(
   projectId: string,
   cohortMeta?: CohortMetadata,
   profileIdPrefilter?: string,
+  // Emit CANONICAL person ids so the cohort JOINs onto an identity-resolved
+  // funnel/chart/conversion in the same identity space. Only takes effect when
+  // the alias dict is loaded (self-contained dictGet); otherwise raw ids, which
+  // matches the un-resolved group the caller falls back to when the dict is off.
+  resolveIdentity = false,
 ): string {
-  // Pre-computed cohorts or missing metadata: read from stored membership
+  const resolve = resolveIdentity && !aliasResolutionNeedsCte();
+
+  // Pre-computed cohorts or missing metadata: read from stored membership.
+  // cohort_members has no device_id, so resolve the stored profile_id itself.
   if (!cohortMeta || !cohortMeta.computeOnDemand) {
+    // Qualify the raw column so the coalesce can't bind to the `AS profile_id`
+    // output alias (see cohort.service eventsPid).
+    const cmPid = `${TABLE_NAMES.cohort_members}.profile_id`;
     const prefilterClause = profileIdPrefilter
-      ? `AND profile_id IN (${profileIdPrefilter})`
+      ? `AND ${resolve ? cmPid : 'profile_id'} IN (${profileIdPrefilter})`
       : '';
+    const pid = resolve
+      ? `${resolvedProfileIdSql(projectId, cmPid)} AS profile_id`
+      : 'profile_id';
     return `
-      SELECT profile_id
+      SELECT ${pid}
       FROM ${TABLE_NAMES.cohort_members} FINAL
       WHERE cohort_id = ${sqlstring.escape(cohortId)}
         AND project_id = ${sqlstring.escape(projectId)}
@@ -182,7 +198,12 @@ export function buildCohortMembershipQuery(
   if (definition.type === 'event') {
     const { events, operator } = definition.criteria;
     const queries = events.map((eventCriteria) =>
-      buildEventCriteriaQuery(projectId, eventCriteria, profileIdPrefilter),
+      buildEventCriteriaQuery(
+        projectId,
+        eventCriteria,
+        profileIdPrefilter,
+        resolveIdentity,
+      ),
     );
 
     return operator === 'and'
@@ -193,6 +214,7 @@ export function buildCohortMembershipQuery(
       projectId,
       definition,
       profileIdPrefilter,
+      resolveIdentity,
     );
   }
 
