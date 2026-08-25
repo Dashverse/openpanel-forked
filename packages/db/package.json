@@ -24,6 +24,7 @@
     "@openpanel/logger": "workspace:*",
     "@openpanel/queue": "workspace:^",
     "@openpanel/redis": "workspace:*",
+    "@openpanel/telemetry": "workspace:*",
     "@openpanel/validation": "workspace:*",
     "@prisma/client": "^6.14.0",
     "@prisma/extension-read-replicas": "^0.4.1",

@@ -23,6 +23,7 @@
     "@openpanel/importer": "workspace:*",
     "@openpanel/queue": "workspace:*",
     "@openpanel/redis": "workspace:*",
+    "@openpanel/telemetry": "workspace:*",
     "bullmq": "^5.63.0",
     "express": "^4.18.2",
     "groupmq": "catalog:",

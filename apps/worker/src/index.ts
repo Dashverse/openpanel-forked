@@ -1,3 +1,9 @@
+// Telemetry bootstrap MUST be the first import — the OTel auto-instrumentations
+// patch modules like http/ioredis/undici/pg at load time, so this needs to run
+// before any other import pulls those in. Side-effect import; no-op unless
+// OTEL_ENABLED=true. Covers both worker + cron since they share the process.
+import '@openpanel/telemetry/bootstrap';
+
 import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ExpressAdapter } from '@bull-board/express';

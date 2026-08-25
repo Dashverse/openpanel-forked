@@ -1,3 +1,9 @@
+// Telemetry bootstrap MUST be the first import — the OTel auto-instrumentations
+// patch modules like http/ioredis/undici/pg at load time, so this needs to run
+// before any other import pulls those in. Side-effect import; no-op unless
+// OTEL_ENABLED=true.
+import '@openpanel/telemetry/bootstrap';
+
 import compress from '@fastify/compress';
 import cookie from '@fastify/cookie';
 import cors, { type FastifyCorsOptions } from '@fastify/cors';
