@@ -21,7 +21,7 @@ import {
   shouldUseKafka,
 } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
-import { currentTraceparent } from '@openpanel/telemetry';
+import { currentTraceparent, withQueryContext } from '@openpanel/telemetry';
 import type {
   DecrementPayload,
   IdentifyPayload,
@@ -148,6 +148,28 @@ export async function handler(
       message: 'Missing projectId',
     });
   }
+
+  // Stamp OTel query context so any CH query fired downstream (validate
+  // client, alias lookups, etc.) carries project_id + endpoint in
+  // log_comment. The worker inherits the same via __traceparent + its
+  // own withQueryContext in incomingEvent.
+  return withQueryContext(
+    {
+      project_id: projectId,
+      endpoint: '/track',
+    },
+    () => handleTrackRequest(request, reply, timestamp, ip, ua, projectId),
+  );
+}
+
+async function handleTrackRequest(
+  request: FastifyRequest<{ Body: TrackHandlerPayload }>,
+  reply: FastifyReply,
+  timestamp: ReturnType<typeof getTimestamp>,
+  ip: string,
+  ua: string | undefined,
+  projectId: string,
+) {
 
   const identity = getIdentity(request.body);
   const profileId = identity?.profileId;
