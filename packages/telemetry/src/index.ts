@@ -100,6 +100,15 @@ export async function withSpan<T>(
   });
 }
 
+// Query context helpers — attach request-scoped attributes (project_id,
+// endpoint, chart_type, user_id) to the OTel context so every CH query
+// fired downstream carries them in log_comment. See query-context.ts.
+export {
+  getQueryContext,
+  withQueryContext,
+  type QueryContextAttrs,
+} from './query-context';
+
 // Re-exports for callers that want lower-level access without adding
 // @opentelemetry/api as a direct dep.
 export { context, propagation, trace, SpanKind, SpanStatusCode };

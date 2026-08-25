@@ -7,6 +7,7 @@ import { ZodError } from 'zod';
 import { COOKIE_OPTIONS, type SessionValidationResult } from '@openpanel/auth';
 import { runWithAlsSession } from '@openpanel/db';
 import { getRedisCache } from '@openpanel/redis';
+import { withQueryContext } from '@openpanel/telemetry';
 import type { ISetCookie } from '@openpanel/validation';
 import {
   createTrpcRedisLimiter,
@@ -160,14 +161,45 @@ const sessionScopeMiddleware = t.middleware(async ({ ctx, next }) => {
   });
 });
 
+// Stamps OTel query context on every procedure call so every downstream
+// ClickHouse query's log_comment carries endpoint / project / user / org
+// / chart_type. Fed into system.query_log by CH and scraped into SigNoz,
+// where each field becomes a one-click dashboard filter. Runs LATE in
+// the middleware chain (after auth + access) so we only stamp what's
+// actually been authorized. chart_type is derived from the procedure
+// path (`chart.funnel`, `chart.linear`, ...) — the router segment before
+// the dot is 'chart', and the segment after is the chart type. Non-chart
+// procedures leave chart_type unset.
+const queryContextMiddleware = t.middleware(
+  async ({ ctx, next, path, getRawInput }) => {
+    const rawInput = await getRawInput();
+    const projectId = has('projectId', rawInput)
+      ? String(rawInput.projectId)
+      : undefined;
+    // `chart.<type>` — the type segment; skip for non-chart procedures.
+    const chartType = path.startsWith('chart.') ? path.slice(6) : undefined;
+    return withQueryContext(
+      {
+        endpoint: path,
+        chart_type: chartType,
+        project_id: projectId,
+        user_id: ctx.session?.userId ?? undefined,
+      },
+      () => next(),
+    );
+  },
+);
+
 export const publicProcedure = t.procedure
   .use(loggerMiddleware)
-  .use(sessionScopeMiddleware);
+  .use(sessionScopeMiddleware)
+  .use(queryContextMiddleware);
 export const protectedProcedure = t.procedure
   .use(enforceUserIsAuthed)
   .use(enforceAccess)
   .use(loggerMiddleware)
-  .use(sessionScopeMiddleware);
+  .use(sessionScopeMiddleware)
+  .use(queryContextMiddleware);
 
 const middlewareMarker = 'middlewareMarker' as 'middlewareMarker' & {
   __brand: 'middlewareMarker';

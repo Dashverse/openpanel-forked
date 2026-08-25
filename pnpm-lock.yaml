@@ -1634,6 +1634,9 @@ importers:
       '@openpanel/redis':
         specifier: workspace:*
         version: link:../redis
+      '@openpanel/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
       '@openpanel/validation':
         specifier: workspace:*
         version: link:../validation
