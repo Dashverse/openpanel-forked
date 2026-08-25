@@ -16,6 +16,7 @@
     "@openpanel/integrations": "workspace:^",
     "@openpanel/payments": "workspace:^",
     "@openpanel/redis": "workspace:*",
+    "@openpanel/telemetry": "workspace:*",
     "@openpanel/validation": "workspace:*",
     "@openpanel/queue": "workspace:*",
     "@trpc-limiter/redis": "^0.0.2",

@@ -17,6 +17,7 @@ import type { EventsQueuePayloadIncomingEvent } from '@openpanel/queue';
 import {
   context,
   contextFromTraceparent,
+  withQueryContext,
   withSpan,
 } from '@openpanel/telemetry';
 import * as R from 'ramda';
@@ -60,16 +61,29 @@ export async function incomingEvent(
 ) {
   const parentCtx = contextFromTraceparent(jobPayload.__traceparent);
   return context.with(parentCtx, () =>
-    withSpan(
-      'worker.incomingEvent',
+    // Stamp OTel query context so every CH write from this event (session
+    // insert / event insert / profile upsert) carries project_id +
+    // endpoint in log_comment. Endpoint here is 'worker.incomingEvent'
+    // (the logical entry point) since the /track endpoint on the producer
+    // side isn't visible here — good enough to distinguish
+    // ingestion-side CH traffic from dashboard-side in the query_log.
+    withQueryContext(
       {
-        attributes: {
-          'openpanel.project_id': jobPayload.projectId,
-          'openpanel.event_name': jobPayload.event?.name ?? 'unknown',
-          'openpanel.current_device_id': jobPayload.currentDeviceId,
-        },
+        project_id: jobPayload.projectId,
+        endpoint: 'worker.incomingEvent',
       },
-      () => handleIncomingEvent(jobPayload),
+      () =>
+        withSpan(
+          'worker.incomingEvent',
+          {
+            attributes: {
+              'openpanel.project_id': jobPayload.projectId,
+              'openpanel.event_name': jobPayload.event?.name ?? 'unknown',
+              'openpanel.current_device_id': jobPayload.currentDeviceId,
+            },
+          },
+          () => handleIncomingEvent(jobPayload),
+        ),
     ),
   );
 }

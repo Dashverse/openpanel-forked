@@ -12,7 +12,7 @@ import type { PostEventPayload } from '@openpanel/sdk';
 
 import { generateId, slug } from '@openpanel/common';
 import { getGeoLocation } from '@openpanel/geo';
-import { currentTraceparent } from '@openpanel/telemetry';
+import { currentTraceparent, withQueryContext } from '@openpanel/telemetry';
 import { getStringHeaders, getTimestamp } from './track.controller';
 
 export async function postEvent(
@@ -34,6 +34,22 @@ export async function postEvent(
     reply.status(400).send('missing origin');
     return;
   }
+
+  // Bind narrowed value so the inner closure sees `string` (not
+  // `string | null | undefined`) — TS can't propagate the `if (!projectId)`
+  // narrowing across the async closure boundary otherwise.
+  const projectIdOk: string = projectId;
+
+  // Stamp OTel query context — every CH query fired downstream carries
+  // project_id + endpoint in log_comment. See track.controller for the
+  // longer-form comment on why.
+  return withQueryContext(
+    { project_id: projectIdOk, endpoint: '/event' },
+    () => handlePostEvent(),
+  );
+
+  async function handlePostEvent() {
+  const projectId = projectIdOk;
 
   const [salts, geo] = await Promise.all([getSalts(), getGeoLocation(ip)]);
   const currentDeviceId = ua
@@ -100,4 +116,5 @@ export async function postEvent(
   }
 
   reply.status(202).send('ok');
+  }
 }
