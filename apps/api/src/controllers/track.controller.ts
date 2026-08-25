@@ -21,6 +21,7 @@ import {
   shouldUseKafka,
 } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
+import { currentTraceparent } from '@openpanel/telemetry';
 import type {
   DecrementPayload,
   IdentifyPayload,
@@ -327,7 +328,12 @@ async function track({
   ]
     .filter(Boolean)
     .join('-');
+  // Stamp the CURRENT W3C traceparent so the worker consumer (different
+  // process / pod) can bind its span as a child of THIS request's trace.
+  // Absent when OTel is off — the consumer simply starts a fresh trace.
+  const traceparent = currentTraceparent();
   const queueData: EventsQueuePayloadIncomingEvent['payload'] = {
+    ...(traceparent ? { __traceparent: traceparent } : {}),
     projectId,
     headers,
     event: {

@@ -14,6 +14,11 @@ import type { IServiceCreateEventPayload, IServiceEvent } from '@openpanel/db';
 import { createEvent, sessionBuffer } from '@openpanel/db';
 import type { ILogger } from '@openpanel/logger';
 import type { EventsQueuePayloadIncomingEvent } from '@openpanel/queue';
+import {
+  context,
+  contextFromTraceparent,
+  withSpan,
+} from '@openpanel/telemetry';
 import * as R from 'ramda';
 import { v4 as uuid } from 'uuid';
 
@@ -44,7 +49,32 @@ const parseRevenue = (revenue: unknown): number | undefined => {
   return undefined;
 };
 
+// Public entry: wraps the handler in the trace context of the ORIGINATING
+// /track request (extracted from the payload's __traceparent — see
+// controllers/track.controller.ts) and emits a business-logic span. Whatever
+// runs inside (DB writes, session lookups, etc.) becomes children of this
+// span; the CH-client Proxy in packages/db picks up the same context and
+// stamps every query's log_comment with the trace_id.
 export async function incomingEvent(
+  jobPayload: EventsQueuePayloadIncomingEvent['payload'],
+) {
+  const parentCtx = contextFromTraceparent(jobPayload.__traceparent);
+  return context.with(parentCtx, () =>
+    withSpan(
+      'worker.incomingEvent',
+      {
+        attributes: {
+          'openpanel.project_id': jobPayload.projectId,
+          'openpanel.event_name': jobPayload.event?.name ?? 'unknown',
+          'openpanel.current_device_id': jobPayload.currentDeviceId,
+        },
+      },
+      () => handleIncomingEvent(jobPayload),
+    ),
+  );
+}
+
+async function handleIncomingEvent(
   jobPayload: EventsQueuePayloadIncomingEvent['payload'],
 ) {
   const {

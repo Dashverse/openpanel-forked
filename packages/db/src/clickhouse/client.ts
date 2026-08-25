@@ -5,7 +5,7 @@ import sqlstring from 'sqlstring';
 
 import type { NodeClickHouseClientConfigOptions } from '@clickhouse/client/dist/config';
 import { createLogger } from '@openpanel/logger';
-import { withSpan } from '@openpanel/telemetry';
+import { currentSpanId, currentTraceId, withSpan } from '@openpanel/telemetry';
 import type { IInterval } from '@openpanel/validation';
 
 export { createClient };
@@ -352,7 +352,7 @@ export async function withRetry<T>(
 
 // Truncate long SQL for span attributes — the whole point is a searchable
 // snippet, not the full payload. Bodies often carry PII in WHERE clauses,
-// so we cap aggressively; the trace_id + CH log_comment (PR-9) is the
+// so we cap aggressively; the trace_id + CH log_comment (below) is the
 // canonical join key to the full query in system.query_log.
 const MAX_SPAN_STATEMENT_LEN = 500;
 
@@ -362,6 +362,28 @@ function truncateStatement(sql: unknown): string | undefined {
   return collapsed.length > MAX_SPAN_STATEMENT_LEN
     ? `${collapsed.slice(0, MAX_SPAN_STATEMENT_LEN)}…`
     : collapsed;
+}
+
+// Build a JSON log_comment stamping the current trace on the CH query, so we
+// can post-facto join a slow trace to system.query_log to see rows_read,
+// bytes_read, memory_usage, peak_memory_usage — everything the CH server
+// tracked. Example lookup once queries land:
+//
+//   SELECT query, query_duration_ms, memory_usage, rows_read, exception
+//   FROM system.query_log
+//   WHERE JSONExtractString(log_comment, 'trace_id') = '<hex>'
+//     AND type = 'QueryFinish';
+//
+// Returns undefined when there is no active trace so the caller can skip
+// the settings merge entirely (leaves CH's log_comment empty as before).
+function buildLogComment(): string | undefined {
+  const traceId = currentTraceId();
+  if (!traceId) return undefined;
+  return JSON.stringify({
+    trace_id: traceId,
+    span_id: currentSpanId(),
+    service: process.env.OTEL_SERVICE_NAME ?? 'openpanel-unknown',
+  });
 }
 
 export const ch = new Proxy(originalCh, {
@@ -382,6 +404,7 @@ export const ch = new Proxy(originalCh, {
           },
           () =>
             withRetry(() => {
+              const logComment = buildLogComment();
               args[0].clickhouse_settings = {
                 // Increase insert timeouts and buffer sizes for large batches
                 max_execution_time: 300,
@@ -400,6 +423,10 @@ export const ch = new Proxy(originalCh, {
                   process.env.CLICKHOUSE_INSERT_QUERY_LIMIT || '50',
                   10,
                 ),
+                // Stamp the active trace so system.query_log can be joined
+                // back to spans via log_comment. Caller can still override
+                // by setting their own log_comment in clickhouse_settings.
+                ...(logComment ? { log_comment: logComment } : {}),
                 ...args[0].clickhouse_settings,
               };
               return value.apply(target, args);
@@ -418,7 +445,17 @@ export const ch = new Proxy(originalCh, {
               'db.statement': truncateStatement(args[0]?.query),
             },
           },
-          () => withRetry(() => value.apply(target, args)),
+          () =>
+            withRetry(() => {
+              const logComment = buildLogComment();
+              if (logComment && args[0]) {
+                args[0].clickhouse_settings = {
+                  log_comment: logComment,
+                  ...args[0].clickhouse_settings,
+                };
+              }
+              return value.apply(target, args);
+            }),
         );
     }
 
@@ -433,7 +470,17 @@ export const ch = new Proxy(originalCh, {
               'db.statement': truncateStatement(args[0]?.query),
             },
           },
-          () => withRetry(() => value.apply(target, args)),
+          () =>
+            withRetry(() => {
+              const logComment = buildLogComment();
+              if (logComment && args[0]) {
+                args[0].clickhouse_settings = {
+                  log_comment: logComment,
+                  ...args[0].clickhouse_settings,
+                };
+              }
+              return value.apply(target, args);
+            }),
         );
     }
 
