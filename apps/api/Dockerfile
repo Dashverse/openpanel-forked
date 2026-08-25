@@ -34,6 +34,7 @@ COPY packages/auth/package.json packages/auth/
 COPY packages/json/package.json packages/json/
 COPY packages/email/package.json packages/email/
 COPY packages/queue/package.json packages/queue/
+COPY packages/telemetry/package.json packages/telemetry/
 COPY packages/redis/package.json packages/redis/
 COPY packages/logger/package.json packages/logger/
 COPY packages/common/package.json packages/common/
@@ -103,6 +104,7 @@ COPY --from=build /app/packages/trpc ./packages/trpc
 COPY --from=build /app/packages/json ./packages/json
 COPY --from=build /app/packages/email ./packages/email
 COPY --from=build /app/packages/queue ./packages/queue
+COPY --from=build /app/packages/telemetry ./packages/telemetry
 COPY --from=build /app/packages/redis ./packages/redis
 COPY --from=build /app/packages/logger ./packages/logger
 COPY --from=build /app/packages/common ./packages/common
