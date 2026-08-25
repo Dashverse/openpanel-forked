@@ -31,6 +31,18 @@ export const queueLogger = createLogger({ name: 'queue' });
 export interface EventsQueuePayloadIncomingEvent {
   type: 'incomingEvent';
   payload: {
+    // W3C traceparent from the producing HTTP request, if the OTel SDK is
+    // active. Consumers use this to attach their spans as CHILDREN of the
+    // original /track request so a trace follows the event end-to-end.
+    // Optional — absent when telemetry is off or when the message pre-dates
+    // this field (backward-compatible with in-flight messages).
+    __traceparent?: string;
+    // Kafka/Event Hubs consumer-side grouping key. Present on messages
+    // produced via the Event Hubs path (its AMQP partitionKey doesn't surface
+    // as the Kafka record key, so we duplicate the routing key inside the
+    // body so the consumer can serialize per-device — see kafka-consumer.ts
+    // and the 2026-08-14 session-dup incident).
+    __groupId?: string;
     projectId: string;
     event: TrackPayload & {
       timestamp: string | number;

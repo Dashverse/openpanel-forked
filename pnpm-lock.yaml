@@ -1376,6 +1376,9 @@ importers:
       '@openpanel/redis':
         specifier: workspace:*
         version: link:../redis
+      '@openpanel/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
       bullmq:
         specifier: ^5.63.0
         version: 5.63.0
