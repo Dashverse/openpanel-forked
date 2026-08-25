@@ -33,6 +33,7 @@ COPY packages/json/package.json ./packages/json/
 COPY packages/email/package.json ./packages/email/
 COPY packages/redis/package.json ./packages/redis/
 COPY packages/queue/package.json ./packages/queue/
+COPY packages/telemetry/package.json ./packages/telemetry/
 COPY packages/logger/package.json ./packages/logger/
 COPY packages/common/package.json ./packages/common/
 COPY packages/importer/package.json ./packages/importer/
@@ -82,6 +83,7 @@ COPY --from=build /app/packages/json ./packages/json
 COPY --from=build /app/packages/email ./packages/email
 COPY --from=build /app/packages/redis ./packages/redis
 COPY --from=build /app/packages/queue ./packages/queue
+COPY --from=build /app/packages/telemetry ./packages/telemetry
 COPY --from=build /app/packages/logger ./packages/logger
 COPY --from=build /app/packages/common ./packages/common
 COPY --from=build /app/packages/importer ./packages/importer
