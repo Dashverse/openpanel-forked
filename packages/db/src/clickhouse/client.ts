@@ -5,6 +5,7 @@ import sqlstring from 'sqlstring';
 
 import type { NodeClickHouseClientConfigOptions } from '@clickhouse/client/dist/config';
 import { createLogger } from '@openpanel/logger';
+import { withSpan } from '@openpanel/telemetry';
 import type { IInterval } from '@openpanel/validation';
 
 export { createClient };
@@ -349,49 +350,91 @@ export async function withRetry<T>(
   throw lastError;
 }
 
+// Truncate long SQL for span attributes — the whole point is a searchable
+// snippet, not the full payload. Bodies often carry PII in WHERE clauses,
+// so we cap aggressively; the trace_id + CH log_comment (PR-9) is the
+// canonical join key to the full query in system.query_log.
+const MAX_SPAN_STATEMENT_LEN = 500;
+
+function truncateStatement(sql: unknown): string | undefined {
+  if (typeof sql !== 'string') return undefined;
+  const collapsed = sql.replace(/\s+/g, ' ').trim();
+  return collapsed.length > MAX_SPAN_STATEMENT_LEN
+    ? `${collapsed.slice(0, MAX_SPAN_STATEMENT_LEN)}…`
+    : collapsed;
+}
+
 export const ch = new Proxy(originalCh, {
   get(target, property, receiver) {
     const value = Reflect.get(target, property, receiver);
 
     if (property === 'insert') {
       return (...args: any[]) =>
-        withRetry(() => {
-          args[0].clickhouse_settings = {
-            // Increase insert timeouts and buffer sizes for large batches
-            max_execution_time: 300,
-            max_insert_block_size: '500000',
-            max_http_get_redirects: '0',
-            // Ensure JSONEachRow stays efficient
-            input_format_parallel_parsing: 1,
-            // Keep long-running inserts/queries from idling out at proxies by sending progress headers
-            send_progress_in_http_headers: 1,
-            http_headers_progress_interval_ms: '50000',
-            // Ensure server holds the connection until the query is finished
-            wait_end_of_query: 1,
-            // Remove concurrent query limit for INSERT operations to prevent blocking
-            // when multiple buffers flush simultaneously
-            max_concurrent_queries_for_user: Number.parseInt(
-              process.env.CLICKHOUSE_INSERT_QUERY_LIMIT || '50',
-              10,
-            ),
-            ...args[0].clickhouse_settings,
-          };
-          return value.apply(target, args);
-        });
+        withSpan(
+          'ch.insert',
+          {
+            attributes: {
+              'db.system': 'clickhouse',
+              'db.operation': 'insert',
+              'db.clickhouse.table': args[0]?.table ?? 'unknown',
+              'db.clickhouse.format': args[0]?.format ?? 'JSONEachRow',
+            },
+          },
+          () =>
+            withRetry(() => {
+              args[0].clickhouse_settings = {
+                // Increase insert timeouts and buffer sizes for large batches
+                max_execution_time: 300,
+                max_insert_block_size: '500000',
+                max_http_get_redirects: '0',
+                // Ensure JSONEachRow stays efficient
+                input_format_parallel_parsing: 1,
+                // Keep long-running inserts/queries from idling out at proxies by sending progress headers
+                send_progress_in_http_headers: 1,
+                http_headers_progress_interval_ms: '50000',
+                // Ensure server holds the connection until the query is finished
+                wait_end_of_query: 1,
+                // Remove concurrent query limit for INSERT operations to prevent blocking
+                // when multiple buffers flush simultaneously
+                max_concurrent_queries_for_user: Number.parseInt(
+                  process.env.CLICKHOUSE_INSERT_QUERY_LIMIT || '50',
+                  10,
+                ),
+                ...args[0].clickhouse_settings,
+              };
+              return value.apply(target, args);
+            }),
+        );
     }
 
     if (property === 'query') {
       return (...args: any[]) =>
-        withRetry(() => {
-          return value.apply(target, args);
-        });
+        withSpan(
+          'ch.query',
+          {
+            attributes: {
+              'db.system': 'clickhouse',
+              'db.operation': 'query',
+              'db.statement': truncateStatement(args[0]?.query),
+            },
+          },
+          () => withRetry(() => value.apply(target, args)),
+        );
     }
 
     if (property === 'command') {
       return (...args: any[]) =>
-        withRetry(() => {
-          return value.apply(target, args);
-        });
+        withSpan(
+          'ch.command',
+          {
+            attributes: {
+              'db.system': 'clickhouse',
+              'db.operation': 'command',
+              'db.statement': truncateStatement(args[0]?.query),
+            },
+          },
+          () => withRetry(() => value.apply(target, args)),
+        );
     }
 
     return value;
