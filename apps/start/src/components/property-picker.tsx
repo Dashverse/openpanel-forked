@@ -46,6 +46,29 @@ const CATEGORIES: { id: Category; label: string; icon: LucideIcon }[] = [
   { id: 'cohort', label: 'Cohorts', icon: UsersIcon },
 ];
 
+// OpenPanel built-in ("reserved") properties — geo/device/session columns and
+// the built-in profile fields — carry no `properties.` / `profile.properties.`
+// prefix. A client-sent property can share the same name (built-in geo-IP
+// `country` vs a `properties.country` the SDK sends), which is indistinguishable
+// in the picker because both render as just "country". Mark the built-ins with a
+// leading `$` (Mixpanel/PostHog reserved-property convention). Display only — the
+// selected value (and the filter it produces) is the raw property, unchanged.
+const isReservedProperty = (property: string) =>
+  !property.startsWith('properties.') &&
+  !property.startsWith('profile.properties.');
+
+function toPropertyAction(property: string): PropertyAction {
+  const reserved = isReservedProperty(property);
+  const name = property.split('.').pop() ?? property;
+  return {
+    value: property,
+    label: reserved ? `$${name}` : name,
+    description: reserved
+      ? 'OpenPanel'
+      : property.split('.').slice(0, -1).join('.'),
+  };
+}
+
 export function PropertyPicker({
   projectId,
   event,
@@ -94,11 +117,7 @@ export function PropertyPicker({
           (property) =>
             !property.startsWith('profile') && shouldShowProperty(property),
         )
-        .map((property) => ({
-          value: property,
-          label: property.split('.').pop() ?? property,
-          description: property.split('.').slice(0, -1).join('.'),
-        })),
+        .map(toPropertyAction),
     [properties, exclude],
   );
 
@@ -109,11 +128,7 @@ export function PropertyPicker({
           (property) =>
             property.startsWith('profile') && shouldShowProperty(property),
         )
-        .map((property) => ({
-          value: property,
-          label: property.split('.').pop() ?? property,
-          description: property.split('.').slice(0, -1).join('.'),
-        })),
+        .map(toPropertyAction),
     [properties, exclude],
   );
 
