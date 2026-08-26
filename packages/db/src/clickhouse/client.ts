@@ -5,7 +5,12 @@ import sqlstring from 'sqlstring';
 
 import type { NodeClickHouseClientConfigOptions } from '@clickhouse/client/dist/config';
 import { createLogger } from '@openpanel/logger';
-import { currentSpanId, currentTraceId, withSpan } from '@openpanel/telemetry';
+import {
+  currentSpanId,
+  currentTraceId,
+  getQueryContext,
+  withSpan,
+} from '@openpanel/telemetry';
 import type { IInterval } from '@openpanel/validation';
 
 export { createClient };
@@ -364,26 +369,52 @@ function truncateStatement(sql: unknown): string | undefined {
     : collapsed;
 }
 
-// Build a JSON log_comment stamping the current trace on the CH query, so we
-// can post-facto join a slow trace to system.query_log to see rows_read,
-// bytes_read, memory_usage, peak_memory_usage — everything the CH server
-// tracked. Example lookup once queries land:
+// Build a JSON log_comment stamping the current trace + query context on
+// every CH query. Fields come from two places: OTel (trace_id, span_id)
+// and the OpenPanel request-scoped query context (project_id, endpoint,
+// chart_type, user_id, organization_id) — set by tRPC middleware and by
+// the /track controllers, and inherited automatically by any CH query
+// fired downstream. avnadmin's scrape of system.query_log lands these in
+// SigNoz where every field is a one-click filter — no join to spans
+// needed for "which project cost the most CH memory today" or "which
+// chart type has the slowest queries".
+//
+// Emits log_comment as long as EITHER there is an active trace OR the
+// request stamped something into query context; skips when both are
+// empty so log_comment stays absent for background code paths that
+// haven't been enriched (matches prior behaviour).
+//
+// Example lookup once queries land in system.query_log:
 //
 //   SELECT query, query_duration_ms, memory_usage, rows_read, exception
 //   FROM system.query_log
-//   WHERE JSONExtractString(log_comment, 'trace_id') = '<hex>'
-//     AND type = 'QueryFinish';
-//
-// Returns undefined when there is no active trace so the caller can skip
-// the settings merge entirely (leaves CH's log_comment empty as before).
+//   WHERE JSONExtractString(log_comment, 'project_id') = 'proj_xxx'
+//     AND type = 'QueryFinish'
+//   ORDER BY query_duration_ms DESC
+//   LIMIT 10;
 function buildLogComment(): string | undefined {
   const traceId = currentTraceId();
-  if (!traceId) return undefined;
-  return JSON.stringify({
-    trace_id: traceId,
-    span_id: currentSpanId(),
+  const qc = getQueryContext();
+  const hasQueryContext =
+    !!qc.project_id ||
+    !!qc.endpoint ||
+    !!qc.chart_type ||
+    !!qc.user_id;
+  if (!traceId && !hasQueryContext) return undefined;
+
+  // Assemble by hand — JSON.stringify would emit "undefined" for missing
+  // values on some fields; explicit object keeps the payload compact.
+  const payload: Record<string, string> = {
     service: process.env.OTEL_SERVICE_NAME ?? 'openpanel-unknown',
-  });
+  };
+  if (traceId) payload.trace_id = traceId;
+  const spanId = currentSpanId();
+  if (spanId) payload.span_id = spanId;
+  if (qc.project_id) payload.project_id = qc.project_id;
+  if (qc.endpoint) payload.endpoint = qc.endpoint;
+  if (qc.chart_type) payload.chart_type = qc.chart_type;
+  if (qc.user_id) payload.user_id = qc.user_id;
+  return JSON.stringify(payload);
 }
 
 export const ch = new Proxy(originalCh, {
