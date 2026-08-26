@@ -1,4 +1,5 @@
 import { createLogger } from '@openpanel/logger';
+import { currentTraceparent } from '@openpanel/telemetry';
 import {
   type Consumer,
   Kafka,
@@ -153,10 +154,25 @@ const getKafka = (): Kafka => {
 // The events CONSUMER is still kafkajs — an AMQP-produced object body round-
 // trips to it as clean JSON (verified on the prod topic). Requires
 // EVENTHUB_CONNECTION_STRING; there is no kafkajs producer path anymore.
+//
+// Callers stamp payload.__traceparent (from currentTraceparent()) when they
+// construct the payload — see track.controller / event.controller — so the
+// consumer in a different process/pod can continue the trace via
+// contextFromTraceparent(payload.__traceparent). We defensively re-stamp here
+// only when the caller didn't, so any future producer callsite gets
+// propagation without having to remember.
 export const produceIncomingEvent = (
   payload: EventsQueuePayloadIncomingEvent['payload'],
   partitionKey: string,
-): Promise<void> => produceViaEventHub(payload, partitionKey);
+): Promise<void> => {
+  if (!payload.__traceparent) {
+    const tp = currentTraceparent();
+    if (tp) {
+      payload = { ...payload, __traceparent: tp };
+    }
+  }
+  return produceViaEventHub(payload, partitionKey);
+};
 
 const consumers = new Set<Consumer>();
 

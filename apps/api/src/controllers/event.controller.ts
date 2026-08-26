@@ -12,6 +12,7 @@ import type { PostEventPayload } from '@openpanel/sdk';
 
 import { generateId, slug } from '@openpanel/common';
 import { getGeoLocation } from '@openpanel/geo';
+import { currentTraceparent } from '@openpanel/telemetry';
 import { getStringHeaders, getTimestamp } from './track.controller';
 
 export async function postEvent(
@@ -67,7 +68,11 @@ export async function postEvent(
   ]
     .filter(Boolean)
     .join('-');
+  // Stamp the CURRENT W3C traceparent so the worker consumer (different
+  // process / pod) can bind its span as a child of THIS request's trace.
+  const traceparent = currentTraceparent();
   const queueData: EventsQueuePayloadIncomingEvent['payload'] = {
+    ...(traceparent ? { __traceparent: traceparent } : {}),
     projectId,
     headers,
     event: {
