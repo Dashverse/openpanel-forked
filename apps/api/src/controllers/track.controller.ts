@@ -509,29 +509,29 @@ async function increment({
       status: 500,
     });
   }
-  if (!profile) {
-    throw new Error('Not found');
-  }
-
+  // A missing profile is not a server error: an increment can fire before the
+  // profile's first event has landed, or for an anonymous/transient id. Use
+  // Mixpanel `$add` semantics — treat the current value as 0 and upsert — rather
+  // than throwing a 500 that the SDK then retry-storms.
+  const properties = profile?.properties ?? {};
   const parsed = Number.parseInt(
-    pathOr<string>('0', property.split('.'), profile.properties),
+    pathOr<string>('0', property.split('.'), properties),
     10,
   );
 
+  // Existing value isn't numeric — can't increment it. Skip rather than 500.
   if (Number.isNaN(parsed)) {
-    throw new Error('Not number');
+    return;
   }
 
-  profile.properties = assocPath(
-    property.split('.'),
-    parsed + (value || 1),
-    profile.properties,
-  );
-
   await upsertProfile({
-    id: profile.id,
+    id: profileId,
     projectId,
-    properties: profile.properties,
+    properties: assocPath(
+      property.split('.'),
+      parsed + (value || 1),
+      properties,
+    ),
     isExternal: true,
   });
 }
@@ -552,29 +552,29 @@ async function decrement({
       status: 500,
     });
   }
-  if (!profile) {
-    throw new Error('Not found');
-  }
-
+  // A missing profile is not a server error: a decrement can fire before the
+  // profile's first event has landed, or for an anonymous/transient id. Use
+  // Mixpanel `$subtract` semantics — treat the current value as 0 and upsert —
+  // rather than throwing a 500 that the SDK then retry-storms.
+  const properties = profile?.properties ?? {};
   const parsed = Number.parseInt(
-    pathOr<string>('0', property.split('.'), profile.properties),
+    pathOr<string>('0', property.split('.'), properties),
     10,
   );
 
+  // Existing value isn't numeric — can't decrement it. Skip rather than 500.
   if (Number.isNaN(parsed)) {
-    throw new Error('Not number');
+    return;
   }
 
-  profile.properties = assocPath(
-    property.split('.'),
-    parsed - (value || 1),
-    profile.properties,
-  );
-
   await upsertProfile({
-    id: profile.id,
+    id: profileId,
     projectId,
-    properties: profile.properties,
+    properties: assocPath(
+      property.split('.'),
+      parsed - (value || 1),
+      properties,
+    ),
     isExternal: true,
   });
 }
