@@ -62,6 +62,8 @@ Run: `pnpm --filter @openpanel/auth typecheck`
 **Files:**
 - Modify: `apps/api/src/controllers/oauth-callback.controller.tsx`
 - Create: `apps/api/src/controllers/oauth-account-linking.test.ts`
+- Modify: `packages/db/prisma/schema.prisma`
+- Create: `packages/db/prisma/migrations/20260826153000_unique_oauth_provider_identity/migration.sql`
 
 **Interfaces:**
 - Consumes: Task 1 Google policy and configured OAuth client.
@@ -77,7 +79,7 @@ Run: `pnpm vitest run apps/api/src/controllers/oauth-account-linking.test.ts`
 
 - [ ] **Step 3: Extract and implement a testable account-resolution function**
 
-Resolve in this order: exact Google provider ID, legacy Google/email migration match, existing normalized user email, then new user. Validate identity before every database lookup or mutation.
+Resolve in this order: exact Google provider ID, legacy Google/email migration match, existing normalized user email, then new user. Validate identity before every database lookup or mutation. Enforce provider identity uniqueness in PostgreSQL and retry resolution after a concurrent unique conflict.
 
 - [ ] **Step 4: Run callback tests and API typecheck**
 
@@ -105,7 +107,7 @@ Run: `pnpm vitest run packages/auth/src/google-auth.test.ts`
 
 - [ ] **Step 3: Implement the minimal backend guards**
 
-Remove the pre-OAuth generic registration check, append `hd` as an account-picker hint, reject email signup/signin/reset procedures before database work, and require an eligible linked Google account during session validation.
+Remove the pre-OAuth generic registration check, append `hd` as an account-picker hint, remove email signup/signin/reset procedures, disable demo session fabrication, and require a Google account marked as Workspace-verified by the hardened callback during session validation.
 
 - [ ] **Step 4: Run focused tests and package typechecks**
 
@@ -120,7 +122,7 @@ Run: `pnpm --filter @openpanel/trpc typecheck`
 - Modify: `apps/start/src/routes/_public.onboarding.tsx`
 - Modify: `apps/start/src/routes/_login.reset-password.tsx`
 - Modify: `apps/start/src/components/auth/sign-in-google.tsx`
-- Modify: `apps/start/src/modals/request-reset-password.tsx`
+- Delete: `apps/start/src/modals/request-reset-password.tsx`
 
 **Interfaces:**
 - Consumes: the unchanged `auth.signInOAuth({ provider: 'google' })` client contract.

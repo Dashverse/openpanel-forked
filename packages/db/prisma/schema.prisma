@@ -123,6 +123,7 @@ model Account {
   updatedAt             DateTime        @default(now()) @updatedAt
   resetPasswords        ResetPassword[]
 
+  @@unique([provider, providerId])
   @@map("accounts")
 }
 

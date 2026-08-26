@@ -1,11 +1,7 @@
-import { Or } from '@/components/auth/or';
-import { SignInEmailForm } from '@/components/auth/sign-in-email-form';
-import { SignInGithub } from '@/components/auth/sign-in-github';
 import { SignInGoogle } from '@/components/auth/sign-in-google';
-import { LogoSquare } from '@/components/logo';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { PAGE_TITLES, createTitle } from '@/utils/title';
-import { createFileRoute, redirect } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
 import { AlertCircle } from 'lucide-react';
 import { z } from 'zod';
 
@@ -31,13 +27,8 @@ function LoginPage() {
       <div>
         <h1 className="text-3xl font-bold text-foreground mb-2">Sign in</h1>
         <p className="text-muted-foreground">
-          Don't have an account?{' '}
-          <a
-            href="/onboarding"
-            className="underline font-medium text-foreground"
-          >
-            Create one today
-          </a>
+          Use your @dashverse.ai Google Workspace account. Your account is
+          created automatically on first sign-in.
         </p>
       </div>
       {error && (
@@ -67,12 +58,7 @@ function LoginPage() {
         </Alert>
       )}
 
-      <div className="space-y-4">
-        <SignInGoogle type="sign-in" />
-        <SignInGithub type="sign-in" />
-      </div>
-      <Or />
-      <SignInEmailForm />
+      <SignInGoogle type="sign-in" />
     </div>
   );
 }

@@ -5,6 +5,7 @@ import {
   encodeBase32LowerCaseNoPadding,
   encodeHexLowerCase,
 } from '@oslojs/encoding';
+import { getGoogleAuthConfig, isEligibleGoogleUser } from './google-auth';
 
 export function generateSessionToken(): string {
   const bytes = new Uint8Array(20);
@@ -37,28 +38,6 @@ export const EMPTY_SESSION: SessionValidationResult = {
   userId: null,
 };
 
-export async function createDemoSession(
-  userId: string,
-): Promise<SessionValidationResult> {
-  const user = await db.user.findUniqueOrThrow({
-    where: {
-      id: userId,
-    },
-  });
-
-  return {
-    user,
-    userId: user.id,
-    session: {
-      id: '1',
-      userId: user.id,
-      expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30 * 365),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    },
-  };
-}
-
 export const decodeSessionToken = (token: string): string | null => {
   return token
     ? encodeHexLowerCase(sha256(new TextEncoder().encode(token)))
@@ -68,10 +47,6 @@ export const decodeSessionToken = (token: string): string | null => {
 export async function validateSessionToken(
   token: string | null | undefined,
 ): Promise<SessionValidationResult> {
-  if (process.env.DEMO_USER_ID) {
-    return createDemoSession(process.env.DEMO_USER_ID);
-  }
-
   if (!token) {
     return EMPTY_SESSION;
   }
@@ -84,14 +59,31 @@ export async function validateSessionToken(
       id: sessionId,
     },
     include: {
-      user: true,
+      user: {
+        include: {
+          accounts: {
+            select: {
+              provider: true,
+              providerId: true,
+              email: true,
+              scope: true,
+            },
+          },
+        },
+      },
     },
   });
   if (result === null) {
     return EMPTY_SESSION;
   }
-  const { user, ...session } = result;
+  const { accounts, ...user } = result.user;
+  const { user: _user, ...session } = result;
   if (Date.now() >= session.expiresAt.getTime()) {
+    await db.session.delete({ where: { id: sessionId } });
+    return EMPTY_SESSION;
+  }
+  const { allowedDomain } = getGoogleAuthConfig();
+  if (!isEligibleGoogleUser(user, accounts, allowedDomain)) {
     await db.session.delete({ where: { id: sessionId } });
     return EMPTY_SESSION;
   }

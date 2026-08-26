@@ -23,16 +23,22 @@ must not provide alternate access paths.
   provider, the verified Google account is linked to that user. A second user
   is never created. Linking occurs only after all Google domain and verification
   checks pass.
+- Provider identities are database-unique. If concurrent callbacks race, the
+  losing request re-resolves the account created by the winner from the primary
+  database. The migration safely collapses same-user duplicates and stops for
+  manual review if one provider identity is attached to different users.
 - Existing sessions are accepted only for users with a matching Dashverse email
-  and a linked Google account. This closes the migration window for legacy-only
-  sessions without deleting user data.
+  and a Google account marked as Workspace-verified by the hardened callback.
+  Historical and legacy-only sessions are invalidated without deleting user
+  data. Demo-user session fabrication is disabled, and a stale `DEMO_USER_ID`
+  configuration prevents API startup.
 - Share-password authentication is not an account login and remains unchanged.
 
 ## Configuration and secret handling
 
 The API consumes these runtime variables:
 
-- `GOOGLE_CLIENT_ID`: sensitive operational credential; never committed.
+- `GOOGLE_CLIENT_ID`: non-secret, environment-specific identifier.
 - `GOOGLE_CLIENT_SECRET`: secret; never committed.
 - `GOOGLE_REDIRECT_URI`: non-secret exact public callback URL.
 - `GOOGLE_ALLOWED_DOMAIN`: non-secret policy value, set to `dashverse.ai`.
@@ -42,9 +48,10 @@ The API consumes these runtime variables:
 at container runtime from the deployment secret store; they must not be Docker
 build arguments, image layers, workflow output, or committed manifests.
 
-Authentication fails closed with a clear server-side configuration error when
-any required Google variable is missing. Logs must report missing variable names
-without reporting values, tokens, authorization codes, or identity claims.
+The API validates authentication configuration at startup and fails closed with
+a clear server-side error when any required Google variable is missing. Logs
+must report missing variable names without reporting values, tokens,
+authorization codes, or identity claims.
 
 ## Components
 
@@ -58,7 +65,8 @@ without reporting values, tokens, authorization codes, or identity claims.
 4. Session validation rejects sessions whose user lacks an eligible Google
    account.
 5. Login and onboarding UI expose only Google authentication. Direct email,
-   password-reset, and GitHub account-authentication procedures reject access.
+   password-reset, and GitHub account-authentication procedures and callbacks
+   are removed, so they cannot perform work or log submitted credentials.
 
 ## Error behavior
 
