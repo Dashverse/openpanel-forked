@@ -11,6 +11,7 @@
     "@openpanel/db": "workspace:*",
     "@openpanel/logger": "workspace:*",
     "@openpanel/redis": "workspace:*",
+    "@openpanel/telemetry": "workspace:*",
     "bullmq": "^5.63.0",
     "groupmq": "catalog:",
     "kafkajs": "^2.2.4"
