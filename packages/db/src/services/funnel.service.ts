@@ -203,6 +203,12 @@ export class FunnelService {
       // emitted unconditionally by the SQL builder.
       'project_id',
       'profile_id',
+      // device_id is required by resolveFunnelGroup's identity resolution
+      // (`dictGet(..., <fromClause>.device_id)` / the `al` CTE join). For the
+      // custom-event path the funnel scans `combined_events` instead of the raw
+      // events table, so the column must be projected into that union or the
+      // group expression fails with UNKNOWN_IDENTIFIER on `combined_events.device_id`.
+      'device_id',
       'session_id',
       'created_at',
       ...filterCols,
