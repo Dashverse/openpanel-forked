@@ -18,6 +18,11 @@ import {
   resolvedProfileIdSql,
 } from '../clickhouse/client';
 import { db } from '../prisma-client';
+// getSelectPropertyKey resolves `properties.X` to its MATERIALIZED column when
+// one exists (else `properties['X']`). Imported at runtime only (called inside
+// query builders, never at module init), so the chart.service ⇄ cohort.service
+// cycle resolves via ESM live bindings.
+import { getSelectPropertyKey } from './chart.service';
 import { operatorClause } from './filter-operators';
 
 // v2 property MV (profile_event_property_summary_v2) is anon-inclusive but only
@@ -207,15 +212,19 @@ export function buildEventCriteriaQuery(
     `;
     }
 
-    // Pre-v2 window: retired v1 MV → raw events + `properties[key]` predicate.
-    // Same operatorClause, but the column is the events `properties` Map access
-    // (values are stored identically — e.g. JSON-quoted `"base"`). Uses
-    // created_at + plain count() for frequency (no event_date/countMerge).
+    // Pre-v2 window: retired v1 MV → raw events. Resolve each property to its
+    // MATERIALIZED column when one exists (indexed persisted column, ~80× faster
+    // than reading the `properties` Map over a wide range — e.g. a `source`
+    // cohort over showOpen scanned 465GB/40s via the Map vs 4.4GB/0.5s via the
+    // column); getSelectPropertyKey falls back to `properties['key']` otherwise.
+    // Values are stored identically in both forms (e.g. JSON-quoted `"base"`),
+    // so the same operatorClause value applies. Uses created_at + plain count()
+    // for frequency (no event_date/countMerge).
     const eventsPropertyConditions = propertyFilters
       .map((filter) => {
-        const propertyKey = filter.name.replace('properties.', '');
         const { value, operator } = filter;
-        return `(${operatorClause(`properties[${sqlstring.escape(propertyKey)}]`, operator, value)})`;
+        const column = getSelectPropertyKey(filter.name, projectId);
+        return `(${operatorClause(column, operator, value)})`;
       })
       .join(' OR ');
 
