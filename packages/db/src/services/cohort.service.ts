@@ -18,6 +18,11 @@ import {
   resolvedProfileIdSql,
 } from '../clickhouse/client';
 import { db } from '../prisma-client';
+// getSelectPropertyKey resolves `properties.X` to its MATERIALIZED column when
+// one exists (else `properties['X']`). Imported at runtime only (called inside
+// query builders, never at module init), so the chart.service ⇄ cohort.service
+// cycle resolves via ESM live bindings.
+import { getSelectPropertyKey } from './chart.service';
 import { operatorClause } from './filter-operators';
 
 // v2 property MV (profile_event_property_summary_v2) is anon-inclusive but only
@@ -149,41 +154,41 @@ export function buildEventCriteriaQuery(
     (f) => f.name.startsWith('properties.') && !f.name.startsWith('profile.properties.')
   );
 
-  // PROPERTY criteria ("did X where flag=Y") → property summary MV. Anon-inclusive
-  // v2 when the timeframe sits in v2's coverage window, else the v1 fallback. Both
-  // MVs share the same schema (name/property_key/property_value/event_date/
-  // countMerge(event_count)/profile_id) so this is a pure table-name swap.
+  // PROPERTY criteria ("did X where flag=Y").
+  //   - v2 window  → anon-inclusive `profile_event_property_summary_v2` MV
+  //     (exploded property_key/property_value schema, fast).
+  //   - pre-v2     → the v1 property MV is RETIRED (anon-EXCLUDING, `profile_id
+  //     != device_id`). Fall through to raw `events` with a `properties[key]`
+  //     Map predicate: anon-inclusive and correct, never the undercounting v1 MV.
   if (hasEventPropertyFilters) {
-    const propertyTable = canRouteCohortToV2(criteria)
-      ? TABLE_NAMES.profile_event_property_summary_v2
-      : TABLE_NAMES.profile_event_property_summary_mv;
-
-    // Resolve via profile_id, QUALIFIED with the concrete propertyTable so the
-    // raw column can't bind to the `AS profile_id` output alias (see eventsPid).
-    const mvPid = resolve
-      ? resolvedProfileIdSql(projectId, `${propertyTable}.profile_id`)
-      : 'profile_id';
-    const mvPrefilter = profileIdPrefilter
-      ? `AND ${mvPid} IN (${profileIdPrefilter})`
-      : '';
-
-    const propertyFilters = filters.filter(
-      (f) => f.name.startsWith('properties.')
+    const propertyFilters = filters.filter((f) =>
+      f.name.startsWith('properties.'),
     );
 
-    // One `(property_key = k AND <value predicate>)` per filter, OR'd together.
-    // operatorClause handles ALL operators (contains/doesNotContain/gt/regex/…);
-    // the old inline switch fell through to `IN` for anything but is/isNot/
-    // contains/doesNotContain — silently inverting doesNotContain etc.
-    const propertyConditions = propertyFilters.map((filter) => {
-      const propertyKey = filter.name.replace('properties.', '');
-      const { value, operator } = filter;
-      return `(property_key = ${sqlstring.escape(propertyKey)} AND ${operatorClause('property_value', operator, value)})`;
-    }).join(' OR ');
+    if (canRouteCohortToV2(criteria)) {
+      const propertyTable = TABLE_NAMES.profile_event_property_summary_v2;
+      // Resolve via profile_id, QUALIFIED with the concrete propertyTable so the
+      // raw column can't bind to the `AS profile_id` output alias (see eventsPid).
+      const mvPid = resolve
+        ? resolvedProfileIdSql(projectId, `${propertyTable}.profile_id`)
+        : 'profile_id';
+      const mvPrefilter = profileIdPrefilter
+        ? `AND ${mvPid} IN (${profileIdPrefilter})`
+        : '';
 
-    if (frequency) {
-      const frequencyOp = getFrequencyOperator(frequency);
-      return `
+      // One `(property_key = k AND <value predicate>)` per filter, OR'd together.
+      // operatorClause handles ALL operators (contains/doesNotContain/gt/regex/…).
+      const propertyConditions = propertyFilters
+        .map((filter) => {
+          const propertyKey = filter.name.replace('properties.', '');
+          const { value, operator } = filter;
+          return `(property_key = ${sqlstring.escape(propertyKey)} AND ${operatorClause('property_value', operator, value)})`;
+        })
+        .join(' OR ');
+
+      if (frequency) {
+        const frequencyOp = getFrequencyOperator(frequency);
+        return `
         SELECT ${mvPid} AS profile_id
         FROM ${propertyTable}
         WHERE project_id = ${sqlstring.escape(projectId)}
@@ -194,9 +199,9 @@ export function buildEventCriteriaQuery(
         GROUP BY ${mvPid}
         HAVING countMerge(event_count) ${frequencyOp}
       `;
-    }
+      }
 
-    return `
+      return `
       SELECT DISTINCT ${mvPid} AS profile_id
       FROM ${propertyTable}
       WHERE project_id = ${sqlstring.escape(projectId)}
@@ -204,6 +209,48 @@ export function buildEventCriteriaQuery(
         AND ${timeConstraint.replace('created_at', 'event_date')}
         AND (${propertyConditions})
         ${mvPrefilter}
+    `;
+    }
+
+    // Pre-v2 window: retired v1 MV → raw events. Resolve each property to its
+    // MATERIALIZED column when one exists (indexed persisted column, ~80× faster
+    // than reading the `properties` Map over a wide range — e.g. a `source`
+    // cohort over showOpen scanned 465GB/40s via the Map vs 4.4GB/0.5s via the
+    // column); getSelectPropertyKey falls back to `properties['key']` otherwise.
+    // Values are stored identically in both forms (e.g. JSON-quoted `"base"`),
+    // so the same operatorClause value applies. Uses created_at + plain count()
+    // for frequency (no event_date/countMerge).
+    const eventsPropertyConditions = propertyFilters
+      .map((filter) => {
+        const { value, operator } = filter;
+        const column = getSelectPropertyKey(filter.name, projectId);
+        return `(${operatorClause(column, operator, value)})`;
+      })
+      .join(' OR ');
+
+    if (frequency) {
+      const frequencyOp = getFrequencyOperator(frequency);
+      return `
+        SELECT ${eventsPid} AS profile_id
+        FROM ${TABLE_NAMES.events}
+        WHERE project_id = ${sqlstring.escape(projectId)}
+          AND name = ${sqlstring.escape(name)}
+          AND ${timeConstraint}
+          AND (${eventsPropertyConditions})
+          ${eventsPrefilter}
+        GROUP BY ${eventsPid}
+        HAVING count() ${frequencyOp}
+      `;
+    }
+
+    return `
+      SELECT DISTINCT ${eventsPid} AS profile_id
+      FROM ${TABLE_NAMES.events}
+      WHERE project_id = ${sqlstring.escape(projectId)}
+        AND name = ${sqlstring.escape(name)}
+        AND ${timeConstraint}
+        AND (${eventsPropertyConditions})
+        ${eventsPrefilter}
     `;
   }
 

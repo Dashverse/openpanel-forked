@@ -543,6 +543,15 @@ function canUsePropertyMV(
 ): boolean {
   if (!MV_ROUTING_ALLOWED_PROJECTS.has(projectId)) return false;
 
+  // The property-MV fast-path reads the v2 MV (property_key/property_value
+  // schema), which only covers PROPERTY_MV_V2_MIN_DATE (Jul 1) forward. The v1
+  // property MV is RETIRED (anon-excluding). So for ranges before the v2 window
+  // — or when the env is unset — skip this fast-path and let the regular
+  // events-table path serve the property filter/breakdown (anon-inclusive,
+  // correct). Never route to the retired v1 MV.
+  const v2MinDate = process.env.PROPERTY_MV_V2_MIN_DATE?.trim();
+  if (!v2MinDate || String(startDate) < v2MinDate) return false;
+
   const validIntervals = ['day', 'week', 'month'];
   if (!validIntervals.includes(interval)) return false;
 
