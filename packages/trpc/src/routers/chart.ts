@@ -23,7 +23,9 @@ import {
   getSelectPropertyKey,
   getSettingsForProject,
   onlyReportEvents,
+  operatorClause,
   resolvedPersonIdSql,
+  resolvedProfileIdSql,
 } from '@openpanel/db';
 import {
   type IChartEvent,
@@ -487,6 +489,12 @@ export const chartRouter = createTRPCRouter({
         endDate: z.string().nullish(),
         interval: zTimeInterval.default('day'),
         range: zRange,
+        // Property filters on the cohort (first) event. Empty = name-only
+        // retention (the #444 events + device_id path). Present = the cohort
+        // event is restricted to that property, sourced from the anon-inclusive
+        // v2 property MV within its window (else raw events). cohortId filters
+        // are accepted but ignored here (cohort-filter support is a follow-up).
+        filters: z.array(zChartEventFilter).default([]),
       }),
     )
     .query(async ({ input }) => {
@@ -542,40 +550,93 @@ export const chartRouter = createTRPCRouter({
       // Retention reads raw `events` (anon-inclusive) instead of the
       // anon-excluding `cohort_events_mv` (WHERE profile_id != device_id), and
       // resolves each event to its canonical person so a user's anon +
-      // identified events — and logins across devices — collapse to one. `events`
-      // carries `device_id` (the profile_aliases key); the retired MV did not,
-      // which is exactly why resolution was impossible before. Dict off
-      // (self-hosted) -> raw profile_id: unchanged identity behaviour, but still
+      // identified events — and logins across devices — collapse to one.
+      //
+      // Identity + source depend on whether there's a property filter:
+      //  - name-only  -> both CTEs read `events`, resolve on `device_id`
+      //    (resolvedPersonIdSql) — the #444 path.
+      //  - property   -> resolve on `profile_id` (resolvedProfileIdSql) on BOTH
+      //    sides (the v2 property MV has no `device_id`, so both sides must share
+      //    ONE identity space — mixing device_id + profile_id would miscount).
+      //    The COHORT event is sourced from the anon-inclusive v2 property MV
+      //    (property_key/property_value, pre-aggregated) when the range starts
+      //    in its window (PROPERTY_MV_V2_MIN_DATE, Jul 1), else from raw `events`
+      //    with the property matched on its MATERIALIZED column
+      //    (getSelectPropertyKey). The RETURN event stays name-only on `events`.
+      // Dict off (self-hosted) -> raw `profile_id`: unchanged identity, still
       // anon-inclusive. Columns are table-qualified so the resolved expression's
       // inner `profile_id` binds to the column, not the `AS profile_id` output
-      // alias (avoids NOT_AN_AGGREGATE / ambiguous identifier — the #432 trap).
-      const personSql = aliasResolutionNeedsCte()
-        ? `${TABLE_NAMES.events}.profile_id`
-        : resolvedPersonIdSql(
-            projectId,
-            `${TABLE_NAMES.events}.device_id`,
-            `${TABLE_NAMES.events}.profile_id`,
-          );
+      // alias (the #432 NOT_AN_AGGREGATE / ambiguous-identifier trap).
+      const E = TABLE_NAMES.events;
+      const V2 = TABLE_NAMES.profile_event_property_summary_v2;
+      const dictOff = aliasResolutionNeedsCte();
 
-      const cohortQuery = `
-        WITH
+      const propertyFilters = input.filters.filter(
+        (f) => !f.cohortId && f.name.startsWith('properties.'),
+      );
+      const hasPropertyFilter = propertyFilters.length > 0;
+      const v2MinDate = process.env.PROPERTY_MV_V2_MIN_DATE?.trim();
+      const cohortUsesV2 =
+        hasPropertyFilter &&
+        !!v2MinDate &&
+        utc(dates.startDate).slice(0, 10) >= v2MinDate.slice(0, 10);
+
+      // Person expr for raw `events`: profile_id-keyed when property-filtered,
+      // else device_id-keyed (#444).
+      const eventsPerson = dictOff
+        ? `${E}.profile_id`
+        : hasPropertyFilter
+          ? resolvedProfileIdSql(projectId, `${E}.profile_id`)
+          : resolvedPersonIdSql(projectId, `${E}.device_id`, `${E}.profile_id`);
+
+      const cohortUsersCte = cohortUsesV2
+        ? `
         cohort_users AS (
           SELECT
-            ${personSql} AS userID,
-            project_id,
+            ${dictOff ? 'profile_id' : resolvedProfileIdSql(projectId, `${V2}.profile_id`)} AS userID,
+            ${sqlToStartOf}(event_date) AS cohort_interval
+          FROM ${V2}
+          WHERE ${whereEventNameIs(firstEvent)}
+            AND project_id = ${sqlstring.escape(projectId)}
+            AND event_date BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}')
+            AND (${propertyFilters
+              .map(
+                (f) =>
+                  `(property_key = ${sqlstring.escape(f.name.replace('properties.', ''))} AND ${operatorClause('property_value', f.operator, f.value)})`,
+              )
+              .join(' OR ')})
+          GROUP BY userID, cohort_interval
+        )`
+        : `
+        cohort_users AS (
+          SELECT
+            ${eventsPerson} AS userID,
             ${sqlToStartOf}(created_at) AS cohort_interval
-          FROM ${TABLE_NAMES.events}
+          FROM ${E}
           WHERE ${whereEventNameIs(firstEvent)}
             AND project_id = ${sqlstring.escape(projectId)}
             AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}')
-        ),
+            ${
+              hasPropertyFilter
+                ? `AND (${propertyFilters
+                    .map(
+                      (f) =>
+                        `(${operatorClause(getSelectPropertyKey(f.name, projectId), f.operator, f.value)})`,
+                    )
+                    .join(' OR ')})`
+                : ''
+            }
+        )`;
+
+      const cohortQuery = `
+        WITH
+        ${cohortUsersCte},
         last_event AS
         (
             SELECT
-                ${personSql} AS profile_id,
-                project_id,
+                ${eventsPerson} AS profile_id,
                 toDate(created_at) AS event_date
-            FROM ${TABLE_NAMES.events}
+            FROM ${E}
             WHERE ${whereEventNameIs(secondEvent)}
             AND project_id = ${sqlstring.escape(projectId)}
             AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}
