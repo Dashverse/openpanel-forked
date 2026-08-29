@@ -35,7 +35,9 @@ export async function requestLoggingHook(
     });
   } else {
     request.log.info('request done', {
-      url: request.url,
+      url: request.url.startsWith('/oauth/')
+        ? request.url.split('?')[0]
+        : request.url,
       method: request.method,
       elapsed: reply.elapsedTime,
       headers: pick(
