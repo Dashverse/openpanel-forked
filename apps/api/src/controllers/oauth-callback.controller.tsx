@@ -25,13 +25,26 @@ import {
   resolveGoogleUserWithConflictRetry,
 } from './oauth-account-linking';
 
+// Arctic throws instead of returning null when the response carries no
+// refresh token, which happens whenever Google declines to re-issue one.
+function readRefreshToken(tokens: OAuth2Tokens): string | null {
+  try {
+    return tokens.refreshToken();
+  } catch {
+    return null;
+  }
+}
+
 async function fetchGoogleUser(
   tokens: OAuth2Tokens,
   allowedDomain: string,
 ): Promise<GoogleIdentity> {
   const claims = Arctic.decodeIdToken(tokens.idToken());
   try {
-    return parseGoogleIdentity(claims, allowedDomain);
+    return {
+      ...parseGoogleIdentity(claims, allowedDomain),
+      refreshToken: readRefreshToken(tokens),
+    };
   } catch (error) {
     if (error instanceof GoogleAuthPolicyError) {
       throw new LogError(error.message);
@@ -82,6 +95,9 @@ const googleAccountRepository: GoogleAccountRepository<User> = {
         providerId: identity.id,
         email: identity.email,
         scope: getGoogleWorkspaceVerificationMarker(identity.hostedDomain),
+        ...(identity.refreshToken
+          ? { refreshToken: identity.refreshToken }
+          : {}),
       },
     });
   },
@@ -93,6 +109,9 @@ const googleAccountRepository: GoogleAccountRepository<User> = {
         providerId: identity.id,
         email: identity.email,
         scope: getGoogleWorkspaceVerificationMarker(identity.hostedDomain),
+        ...(identity.refreshToken
+          ? { refreshToken: identity.refreshToken }
+          : {}),
       },
     });
   },
@@ -108,6 +127,7 @@ const googleAccountRepository: GoogleAccountRepository<User> = {
             providerId: identity.id,
             email: identity.email,
             scope: getGoogleWorkspaceVerificationMarker(identity.hostedDomain),
+            refreshToken: identity.refreshToken ?? null,
           },
         },
       },
