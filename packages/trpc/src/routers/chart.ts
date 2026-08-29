@@ -6,6 +6,7 @@ import {
   type IClickhouseProfile,
   type IServiceProfile,
   TABLE_NAMES,
+  aliasResolutionNeedsCte,
   ch,
   chQuery,
   clix,
@@ -22,6 +23,7 @@ import {
   getSelectPropertyKey,
   getSettingsForProject,
   onlyReportEvents,
+  resolvedPersonIdSql,
 } from '@openpanel/db';
 import {
   type IChartEvent,
@@ -537,14 +539,32 @@ export const chartRouter = createTRPCRouter({
         return `name IN (${event.map((e) => sqlstring.escape(e)).join(',')})`;
       };
 
+      // Retention reads raw `events` (anon-inclusive) instead of the
+      // anon-excluding `cohort_events_mv` (WHERE profile_id != device_id), and
+      // resolves each event to its canonical person so a user's anon +
+      // identified events — and logins across devices — collapse to one. `events`
+      // carries `device_id` (the profile_aliases key); the retired MV did not,
+      // which is exactly why resolution was impossible before. Dict off
+      // (self-hosted) -> raw profile_id: unchanged identity behaviour, but still
+      // anon-inclusive. Columns are table-qualified so the resolved expression's
+      // inner `profile_id` binds to the column, not the `AS profile_id` output
+      // alias (avoids NOT_AN_AGGREGATE / ambiguous identifier — the #432 trap).
+      const personSql = aliasResolutionNeedsCte()
+        ? `${TABLE_NAMES.events}.profile_id`
+        : resolvedPersonIdSql(
+            projectId,
+            `${TABLE_NAMES.events}.device_id`,
+            `${TABLE_NAMES.events}.profile_id`,
+          );
+
       const cohortQuery = `
-        WITH 
+        WITH
         cohort_users AS (
           SELECT
-            profile_id AS userID,
+            ${personSql} AS userID,
             project_id,
             ${sqlToStartOf}(created_at) AS cohort_interval
-          FROM ${TABLE_NAMES.cohort_events_mv}
+          FROM ${TABLE_NAMES.events}
           WHERE ${whereEventNameIs(firstEvent)}
             AND project_id = ${sqlstring.escape(projectId)}
             AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}')
@@ -552,10 +572,10 @@ export const chartRouter = createTRPCRouter({
         last_event AS
         (
             SELECT
-                profile_id,
+                ${personSql} AS profile_id,
                 project_id,
                 toDate(created_at) AS event_date
-            FROM cohort_events_mv
+            FROM ${TABLE_NAMES.events}
             WHERE ${whereEventNameIs(secondEvent)}
             AND project_id = ${sqlstring.escape(projectId)}
             AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}
