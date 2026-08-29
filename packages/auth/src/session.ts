@@ -82,8 +82,8 @@ export async function validateSessionToken(
     await db.session.delete({ where: { id: sessionId } });
     return EMPTY_SESSION;
   }
-  const { allowedDomain } = getGoogleAuthConfig();
-  if (!isEligibleGoogleUser(user, accounts, allowedDomain)) {
+  const { allowedDomains } = getGoogleAuthConfig();
+  if (!isEligibleGoogleUser(user, accounts, allowedDomains)) {
     await db.session.delete({ where: { id: sessionId } });
     return EMPTY_SESSION;
   }

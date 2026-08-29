@@ -46,7 +46,12 @@ export const authRouter = createTRPCRouter({
         'profile',
         'email',
       ]);
-      url.searchParams.set('hd', config.allowedDomain);
+      // `hd` is only a Google account-chooser hint; it takes a single domain.
+      // With several allowed domains, send none and let the server-side check
+      // in parseGoogleIdentity be the authority.
+      if (config.allowedDomains.length === 1) {
+        url.searchParams.set('hd', config.allowedDomains[0]!);
+      }
 
       ctx.setCookie('google_oauth_state', state, {
         maxAge: 60 * 10,
