@@ -128,10 +128,12 @@ model Account {
 }
 
 model Session {
-  id        String   @id
-  userId    String
-  expiresAt DateTime
-  createdAt DateTime @default(now())
+  id             String    @id
+  userId         String
+  expiresAt      DateTime
+  // Last time Google confirmed this session's account is still active.
+  lastVerifiedAt DateTime?
+  createdAt      DateTime  @default(now())
   updatedAt DateTime @default(now()) @updatedAt
   user      User     @relation(references: [id], fields: [userId], onDelete: Cascade)
 

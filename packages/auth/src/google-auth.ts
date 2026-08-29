@@ -18,6 +18,8 @@ export interface GoogleIdentity {
   hostedDomain: string;
   firstName: string;
   lastName: string;
+  // Present only when Google issued one (access_type=offline + consent).
+  refreshToken?: string | null;
 }
 
 interface GoogleAccountIdentity {

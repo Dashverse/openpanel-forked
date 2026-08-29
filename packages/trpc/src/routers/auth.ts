@@ -47,6 +47,12 @@ export const authRouter = createTRPCRouter({
         'email',
       ]);
       url.searchParams.set('hd', config.allowedDomain);
+      // Needed for the periodic silent revalidation in validateSessionToken.
+      // Google only mints a refresh token alongside a consent grant, so ask
+      // for consent explicitly; without it, anyone who consented previously
+      // would never get one and could never be re-checked.
+      url.searchParams.set('access_type', 'offline');
+      url.searchParams.set('prompt', 'consent');
 
       ctx.setCookie('google_oauth_state', state, {
         maxAge: 60 * 10,
