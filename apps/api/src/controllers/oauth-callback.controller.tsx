@@ -27,11 +27,11 @@ import {
 
 async function fetchGoogleUser(
   tokens: OAuth2Tokens,
-  allowedDomain: string,
+  allowedDomains: string[],
 ): Promise<GoogleIdentity> {
   const claims = Arctic.decodeIdToken(tokens.idToken());
   try {
-    return parseGoogleIdentity(claims, allowedDomain);
+    return parseGoogleIdentity(claims, allowedDomains);
   } catch (error) {
     if (error instanceof GoogleAuthPolicyError) {
       throw new LogError(error.message);
@@ -172,7 +172,7 @@ export async function googleCallback(req: FastifyRequest, reply: FastifyReply) {
     const inviteId = req.cookies.inviteId;
     const codeVerifier = req.cookies.google_code_verifier!;
     const tokens = await google.validateAuthorizationCode(code, codeVerifier);
-    const googleUser = await fetchGoogleUser(tokens, config.allowedDomain);
+    const googleUser = await fetchGoogleUser(tokens, config.allowedDomains);
     const user = await resolveGoogleUserWithConflictRetry(
       googleUser,
       googleAccountRepository,
