@@ -572,7 +572,11 @@ export const chartRouter = createTRPCRouter({
       const dictOff = aliasResolutionNeedsCte();
 
       const propertyFilters = input.filters.filter(
-        (f) => !f.cohortId && f.name.startsWith('properties.'),
+        (f) =>
+          !f.cohortId &&
+          f.name.startsWith('properties.') &&
+          Array.isArray(f.value) &&
+          f.value.length > 0,
       );
       const hasPropertyFilter = propertyFilters.length > 0;
       const v2MinDate = process.env.PROPERTY_MV_V2_MIN_DATE?.trim();

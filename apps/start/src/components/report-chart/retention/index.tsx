@@ -31,8 +31,12 @@ export function ReportRetentionChart() {
   // The retention "Filter" section writes to report.globalFilters. Pass those to
   // the cohort procedure so property-filtered retention fires (the server keeps
   // only property filters and routes them to the v2 property MV / events; cohort
-  // filters are ignored server-side for now).
-  const filters = globalFilters ?? [];
+  // filters are ignored server-side for now). Skip filters that don't have a
+  // value yet — a half-configured filter (property picked, value still empty)
+  // would otherwise send `IN ()` and blank the chart before you choose a value.
+  const filters = (globalFilters ?? []).filter(
+    (f) => Array.isArray(f.value) && f.value.length > 0,
+  );
   const isEnabled =
     firstEvent.length > 0 && secondEvent.length > 0 && !isLazyLoading;
   const trpc = useTRPC();
