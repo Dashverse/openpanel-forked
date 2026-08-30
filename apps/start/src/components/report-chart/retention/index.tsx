@@ -21,12 +21,22 @@ export function ReportRetentionChart() {
       endDate,
       criteria,
       interval,
+      globalFilters,
     },
     isLazyLoading,
   } = useReportChartContext();
   const eventSeries = series.filter((item) => item.type === 'event');
   const firstEvent = (eventSeries[0]?.filters?.[0]?.value ?? []).map(String);
   const secondEvent = (eventSeries[1]?.filters?.[0]?.value ?? []).map(String);
+  // The retention "Filter" section writes to report.globalFilters. Pass those to
+  // the cohort procedure so property-filtered retention fires (the server keeps
+  // only property filters and routes them to the v2 property MV / events; cohort
+  // filters are ignored server-side for now). Skip filters that don't have a
+  // value yet — a half-configured filter (property picked, value still empty)
+  // would otherwise send `IN ()` and blank the chart before you choose a value.
+  const filters = (globalFilters ?? []).filter(
+    (f) => Array.isArray(f.value) && f.value.length > 0,
+  );
   const isEnabled =
     firstEvent.length > 0 && secondEvent.length > 0 && !isLazyLoading;
   const trpc = useTRPC();
@@ -41,6 +51,7 @@ export function ReportRetentionChart() {
         endDate,
         criteria,
         interval,
+        filters,
       },
       {
         placeholderData: keepPreviousData,
