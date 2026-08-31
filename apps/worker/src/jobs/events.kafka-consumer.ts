@@ -6,10 +6,12 @@ import {
   kafkaLogger,
   type KafkaMessage,
 } from '@openpanel/queue';
+import { getRedisCache } from '@openpanel/redis';
 import {
   kafkaCommittedOffset,
   kafkaConsumeErrorsTotal,
   kafkaConsumerLag,
+  kafkaDedupSkippedTotal,
   kafkaEventsConsumedTotal,
   kafkaHighWatermark,
   kafkaPartitionOwner,
@@ -17,6 +19,15 @@ import {
 } from '../metrics';
 import { logger } from '../utils/logger';
 import { incomingEvent } from './events.incoming-event';
+
+// How long we remember a processed event's dedup key. A producer/SDK retry
+// lands within seconds, so this only needs to outlast the retry window; 24h
+// matches Segment's dedup window and keeps Redis memory bounded (keys auto-
+// expire). Tunable via KAFKA_DEDUP_TTL_SECONDS.
+const DEDUP_TTL_SECONDS = Number.parseInt(
+  process.env.KAFKA_DEDUP_TTL_SECONDS || '86400',
+  10,
+);
 
 export interface KafkaConsumerHandle {
   stop: () => Promise<void>;
@@ -258,24 +269,67 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                 });
               }
               if (payload) {
-                try {
-                  await incomingEvent(payload);
-                  kafkaEventsConsumedTotal.inc({
+                // Idempotency: a producer retry (after an Event Hubs ack
+                // timeout) or an SDK retry (after a 5xx) re-sends the same event.
+                // Skip it if we've already processed its dedup key within the
+                // window — the client `$insert_id` when present, else the server
+                // jobId carried as `__jobId` — so a retry never becomes a
+                // duplicate row.
+                const insertId = (
+                  payload.event?.properties as
+                    | Record<string, unknown>
+                    | undefined
+                )?.['$insert_id'];
+                const dedupKey =
+                  (typeof insertId === 'string' && insertId
+                    ? insertId
+                    : undefined) ?? (payload as { __jobId?: string }).__jobId;
+                let duplicate = false;
+                if (dedupKey) {
+                  try {
+                    const fresh = await getRedisCache().set(
+                      `op:dedup:${dedupKey}`,
+                      '1',
+                      'EX',
+                      DEDUP_TTL_SECONDS,
+                      'NX',
+                    );
+                    duplicate = fresh === null;
+                  } catch (err) {
+                    // Fail OPEN on a dedup-store blip: process the event. At
+                    // worst a retry duplicates; we never DROP an event because
+                    // Redis hiccuped.
+                    logger.warn('kafka dedup check failed; processing anyway', {
+                      error: err,
+                      partition: batch.partition,
+                      offset: m.offset,
+                    });
+                  }
+                }
+                if (duplicate) {
+                  kafkaDedupSkippedTotal.inc({
                     partition: String(batch.partition),
                   });
-                } catch (err) {
-                  // Match the GroupMQ behaviour: log and ack. At-most-once on
-                  // handler exceptions; failures here would otherwise block the
-                  // partition.
-                  kafkaConsumeErrorsTotal.inc({
-                    partition: String(batch.partition),
-                  });
-                  logger.error('kafka incomingEvent handler failed', {
-                    error: err,
-                    partition: batch.partition,
-                    offset: m.offset,
-                    projectId: payload.projectId,
-                  });
+                } else {
+                  try {
+                    await incomingEvent(payload);
+                    kafkaEventsConsumedTotal.inc({
+                      partition: String(batch.partition),
+                    });
+                  } catch (err) {
+                    // Match the GroupMQ behaviour: log and ack. At-most-once on
+                    // handler exceptions; failures here would otherwise block the
+                    // partition.
+                    kafkaConsumeErrorsTotal.inc({
+                      partition: String(batch.partition),
+                    });
+                    logger.error('kafka incomingEvent handler failed', {
+                      error: err,
+                      partition: batch.partition,
+                      offset: m.offset,
+                      projectId: payload.projectId,
+                    });
+                  }
                 }
               }
             }

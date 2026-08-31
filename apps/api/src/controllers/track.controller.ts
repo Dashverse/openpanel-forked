@@ -373,7 +373,7 @@ async function track({
   const partitionKey = groupId || generateId();
 
   if (shouldUseKafka(projectId)) {
-    await produceIncomingEvent(queueData, partitionKey);
+    await produceIncomingEvent(queueData, partitionKey, jobId);
   } else {
     await getEventsGroupQueueShard(partitionKey).add({
       orderMs: timestamp,

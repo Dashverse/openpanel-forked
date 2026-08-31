@@ -357,8 +357,22 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
     payload.profileId = payload.deviceId;
   }
 
+  // Prefer the client-stable Mixpanel `$insert_id` as the event id when present:
+  // a retry re-sends the same value, so the id is a deterministic idempotency
+  // key (enables a ClickHouse dedup-by-id backstop). Only web events carry it
+  // today (~1%); everything else falls back to a random uuid and is deduped
+  // upstream at the Kafka consumer on the jobId. Bounded length so a malformed
+  // value can't blow up the id column.
+  const insertId = (
+    payload.properties as Record<string, unknown> | undefined
+  )?.['$insert_id'];
   const event: IClickhouseEvent = {
-    id: uuid(),
+    id:
+      typeof insertId === 'string' &&
+      insertId.length > 0 &&
+      insertId.length <= 64
+        ? insertId
+        : uuid(),
     name: payload.name,
     device_id: payload.deviceId,
     profile_id: payload.profileId ? String(payload.profileId) : '',

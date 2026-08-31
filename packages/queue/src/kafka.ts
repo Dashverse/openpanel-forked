@@ -164,6 +164,7 @@ const getKafka = (): Kafka => {
 export const produceIncomingEvent = (
   payload: EventsQueuePayloadIncomingEvent['payload'],
   partitionKey: string,
+  jobId?: string,
 ): Promise<void> => {
   if (!payload.__traceparent) {
     const tp = currentTraceparent();
@@ -171,7 +172,7 @@ export const produceIncomingEvent = (
       payload = { ...payload, __traceparent: tp };
     }
   }
-  return produceViaEventHub(payload, partitionKey);
+  return produceViaEventHub(payload, partitionKey, jobId);
 };
 
 const consumers = new Set<Consumer>();

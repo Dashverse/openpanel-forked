@@ -104,7 +104,7 @@ export async function postEvent(
   const partitionKey = groupId || generateId();
 
   if (shouldUseKafka(projectId)) {
-    await produceIncomingEvent(queueData, partitionKey);
+    await produceIncomingEvent(queueData, partitionKey, jobId);
   } else {
     await getEventsGroupQueueShard(partitionKey).add({
       orderMs: new Date(timestamp).getTime(),
