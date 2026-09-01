@@ -15,6 +15,7 @@ import {
 import {
   Prisma,
   type User,
+  connectUserToDefaultOrganization,
   connectUserToOrganization,
   db,
 } from '@openpanel/db';
@@ -194,6 +195,19 @@ export async function googleCallback(req: FastifyRequest, reply: FastifyReply) {
           userId: user.id,
         });
       }
+    }
+
+    // No invite, or the invite failed: fall back to the default organization so
+    // a verified colleague is not left staring at an empty dashboard. No-op
+    // unless DEFAULT_ORGANIZATION_ID is set, and never touches existing members.
+    try {
+      await connectUserToDefaultOrganization({ user });
+    } catch (error) {
+      // Never block a valid sign-in on this.
+      req.log.error('default organization join failed', {
+        error,
+        userId: user.id,
+      });
     }
 
     const sessionToken = generateSessionToken();
