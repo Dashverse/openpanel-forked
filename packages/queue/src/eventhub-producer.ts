@@ -56,6 +56,21 @@ const SEND_TIMEOUT_MS = Number.parseInt(
   process.env.EVENTHUB_SEND_TIMEOUT_MS || '15000',
   10,
 );
+// Extra send attempts on a transient failure. Retries run WITHIN the
+// SEND_TIMEOUT_MS budget (see produceViaEventHub) so they never extend how long
+// /track holds a request. Safe because the consumer dedups a re-sent event on
+// its __jobId / $insert_id. Keep low — retries amplify produce load under a
+// stall.
+const parsedSendRetries = Number.parseInt(
+  process.env.EVENTHUB_SEND_RETRIES || '1',
+  10,
+);
+// Guard a malformed env: a NaN here must NOT collapse the attempt count to zero
+// and silently stop publishing. Fall back to 1 extra attempt.
+const SEND_RETRIES =
+  Number.isFinite(parsedSendRetries) && parsedSendRetries >= 0
+    ? parsedSendRetries
+    : 1;
 
 export const isEventHubProducerEnabled = (): boolean =>
   Boolean(CONNECTION_STRING);
@@ -139,11 +154,15 @@ const getClient = (): EventHubBufferedProducerClient => {
   return client;
 };
 
-export const produceViaEventHub = async (
+// One send attempt: enqueue the event and resolve when the broker acks it (or
+// reject on the given per-attempt timeout).
+const attemptProduce = (
+  producer: EventHubBufferedProducerClient,
   payload: EventsQueuePayloadIncomingEvent['payload'],
   partitionKey: string,
+  jobId: string | undefined,
+  timeoutMs: number,
 ): Promise<void> => {
-  const producer = getClient();
   const cid = `${Date.now().toString(36)}-${(seq++).toString(36)}`;
 
   // Register the pending ack BEFORE enqueue so the send callback — which can
@@ -152,10 +171,8 @@ export const produceViaEventHub = async (
   const ack = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(cid);
-      reject(
-        new Error(`eventhub send ack timed out after ${SEND_TIMEOUT_MS}ms`),
-      );
-    }, SEND_TIMEOUT_MS);
+      reject(new Error(`eventhub send ack timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
     pending.set(cid, { resolve, reject, timer });
   });
 
@@ -166,46 +183,105 @@ export const produceViaEventHub = async (
     () =>
       ac.abort(
         new Error(
-          `eventhub enqueue backpressure timed out after ${SEND_TIMEOUT_MS}ms`,
+          `eventhub enqueue backpressure timed out after ${timeoutMs}ms`,
         ),
       ),
-    SEND_TIMEOUT_MS,
+    timeoutMs,
   );
-  try {
-    await producer.enqueueEvent(
-      {
-        // Body MUST be the raw object. The kafkajs consumer reads message.value
-        // and JSON.parses it once; a pre-stringified string double-encodes and
-        // the consumer gets a string instead of the payload (round-trip verified
-        // on the prod topic). Never JSON.stringify here.
-        //
-        // __groupId carries the routing key INSIDE the body on purpose: Event
-        // Hubs uses the AMQP partitionKey (below) only for partition routing —
-        // it does NOT surface as the Kafka record key on the consumer, so the
-        // consumer can't group by m.key to serialize a device's events. The
-        // body round-trips reliably, so the consumer groups by __groupId instead
-        // (incident 2026-08-14: keyless messages raced the session buffer).
-        body: { ...payload, __groupId: partitionKey },
-        properties: { __cid: cid },
-      },
-      // partitionKey keeps a device's events on one partition (ordering);
-      // abortSignal bounds the buffer-full backpressure wait.
-      { partitionKey, abortSignal: ac.signal },
-    );
-  } catch (err) {
-    const p = pending.get(cid);
-    if (p) {
-      pending.delete(cid);
-      clearTimeout(p.timer);
+  return (async () => {
+    try {
+      await producer.enqueueEvent(
+        {
+          // Body MUST be the raw object. The kafkajs consumer reads message.value
+          // and JSON.parses it once; a pre-stringified string double-encodes and
+          // the consumer gets a string instead of the payload (round-trip verified
+          // on the prod topic). Never JSON.stringify here.
+          //
+          // __groupId carries the routing key INSIDE the body on purpose: Event
+          // Hubs uses the AMQP partitionKey (below) only for partition routing —
+          // it does NOT surface as the Kafka record key on the consumer, so the
+          // consumer can't group by m.key to serialize a device's events. The
+          // body round-trips reliably, so the consumer groups by __groupId instead
+          // (incident 2026-08-14: keyless messages raced the session buffer).
+          //
+          // __jobId is the server-side dedup key. A retried produce (below, or an
+          // SDK retry after a 5xx) re-sends the SAME __jobId, so the consumer
+          // skips the duplicate instead of writing a second row.
+          body: {
+            ...payload,
+            __groupId: partitionKey,
+            ...(jobId ? { __jobId: jobId } : {}),
+          },
+          properties: { __cid: cid },
+        },
+        // partitionKey keeps a device's events on one partition (ordering);
+        // abortSignal bounds the buffer-full backpressure wait.
+        { partitionKey, abortSignal: ac.signal },
+      );
+    } catch (err) {
+      const p = pending.get(cid);
+      if (p) {
+        pending.delete(cid);
+        clearTimeout(p.timer);
+      }
+      clearTimeout(enqueueTimer);
+      throw err;
     }
-    throw err;
-  } finally {
-    clearTimeout(enqueueTimer);
-  }
+    // Resolve only once the batch containing this event is acked by the broker —
+    // that's the durability guarantee that lets /track return 200 safely.
+    try {
+      return await ack;
+    } finally {
+      clearTimeout(enqueueTimer);
+    }
+  })();
+};
 
-  // Resolve only once the batch containing this event is acked by the broker —
-  // that's the durability guarantee that lets /track return 200 safely.
-  return ack;
+export const produceViaEventHub = async (
+  payload: EventsQueuePayloadIncomingEvent['payload'],
+  partitionKey: string,
+  jobId?: string,
+): Promise<void> => {
+  const producer = getClient();
+
+  // Retry a transient send failure within a FIXED total budget capped at
+  // SEND_TIMEOUT_MS, so retries never extend how long /track holds the request
+  // (avoids piling up in-flight requests under a stall). Retries are safe
+  // because the consumer dedups a re-sent event on its __jobId / $insert_id.
+  //
+  // Attempt 0 gets the FULL budget so a send that would have acked at 8-14s
+  // isn't cut short into a needless retry (which would double Event Hubs writes
+  // during the very stall we are trying to survive). A retry therefore only
+  // runs when attempt 0 failed FAST and left budget on the clock — i.e. a quick
+  // transient error, not a timeout.
+  const deadline = Date.now() + SEND_TIMEOUT_MS;
+  const attempts = Math.max(1, SEND_RETRIES + 1);
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      break;
+    }
+    const perAttempt = i === 0 ? SEND_TIMEOUT_MS : remaining;
+    try {
+      return await attemptProduce(
+        producer,
+        payload,
+        partitionKey,
+        jobId,
+        perAttempt,
+      );
+    } catch (err) {
+      lastErr = err;
+      // Only retry our transient timeouts. A non-transient error (auth,
+      // message-too-large, …) will fail again — fail fast instead of burning
+      // the remaining budget on hopeless attempts.
+      if (!(err instanceof Error && /timed out/i.test(err.message))) {
+        throw err;
+      }
+    }
+  }
+  throw lastErr ?? new Error('eventhub produce failed');
 };
 
 export const disconnectEventHubProducer = async (): Promise<void> => {

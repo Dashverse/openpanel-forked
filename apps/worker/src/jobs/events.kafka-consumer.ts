@@ -1,22 +1,38 @@
 import {
-  createKafkaEventsConsumer,
   type EventsQueuePayloadIncomingEvent,
   KAFKA_EVENTS_TOPIC,
   KAFKA_PARTITIONS_CONCURRENT,
-  kafkaLogger,
   type KafkaMessage,
+  createKafkaEventsConsumer,
+  kafkaLogger,
 } from '@openpanel/queue';
+import { getRedisEvent } from '@openpanel/redis';
 import {
   kafkaCommittedOffset,
   kafkaConsumeErrorsTotal,
   kafkaConsumerLag,
+  kafkaDedupSkippedTotal,
   kafkaEventsConsumedTotal,
   kafkaHighWatermark,
   kafkaPartitionOwner,
   kafkaReprocessedTotal,
 } from '../metrics';
+import { parseDedupTtlSeconds, resolveDedupId } from '../utils/kafka-dedup';
 import { logger } from '../utils/logger';
 import { incomingEvent } from './events.incoming-event';
+
+// How long we remember a processed event's dedup key. A producer/SDK retry
+// lands within seconds, so this only needs to outlast the retry window; 6h is
+// generous headroom. Keys auto-expire and live on the dedicated EVENT Redis
+// (getRedisEvent, not the shared cache), so they can never evict the
+// event/session buffers. Tunable via KAFKA_DEDUP_TTL_SECONDS (parse rules in
+// parseDedupTtlSeconds).
+const DEDUP_TTL_SECONDS = parseDedupTtlSeconds(
+  process.env.KAFKA_DEDUP_TTL_SECONDS,
+);
+
+// Kill-switch: set KAFKA_DEDUP_ENABLED=false to turn dedup off without a deploy.
+const DEDUP_ENABLED = process.env.KAFKA_DEDUP_ENABLED !== 'false';
 
 export interface KafkaConsumerHandle {
   stop: () => Promise<void>;
@@ -258,24 +274,95 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                 });
               }
               if (payload) {
-                try {
-                  await incomingEvent(payload);
-                  kafkaEventsConsumedTotal.inc({
+                // Idempotency: a producer retry (after an Event Hubs ack
+                // timeout) or an SDK retry (after a 5xx) re-sends the same event.
+                // Dedup key = the client `$insert_id` when present, else the
+                // server jobId carried as `__jobId`. Namespaced by projectId so a
+                // key can never collide across projects.
+                const insertId = (
+                  payload.event?.properties as
+                    | Record<string, unknown>
+                    | undefined
+                )?.$insert_id;
+                // Prefer a real UUID-form $insert_id; a weak / nil / max value
+                // falls back to the server jobId (see resolveDedupId — deduping
+                // on an untrustworthy id would drop DISTINCT events).
+                const dedupId = resolveDedupId(
+                  insertId,
+                  (payload as { __jobId?: string }).__jobId,
+                );
+                const dedupKey =
+                  DEDUP_ENABLED && dedupId
+                    ? `op:dedup:${payload.projectId}:${dedupId}`
+                    : undefined;
+
+                // CHECK only (not reserve): skip an event we've ALREADY
+                // processed AND marked. We record the key AFTER a successful
+                // incomingEvent (below), never before — so a crash between the
+                // check and the mark re-processes the event (a duplicate) rather
+                // than DROPPING it. That in-flight duplicate is the accepted
+                // price of being loss-averse; dedup only collapses retries of
+                // events that already completed and were marked. Same-key
+                // retries land on the same partition and are serialized in this
+                // per-group loop, so there is no check→mark race between them.
+                let duplicate = false;
+                if (dedupKey) {
+                  try {
+                    duplicate = (await getRedisEvent().exists(dedupKey)) === 1;
+                  } catch (err) {
+                    // Fail OPEN on a dedup-store blip: process the event. At
+                    // worst a retry duplicates; we never DROP an event because
+                    // Redis hiccuped.
+                    logger.warn('kafka dedup check failed; processing anyway', {
+                      error: err,
+                      partition: batch.partition,
+                      offset: m.offset,
+                    });
+                  }
+                }
+                if (duplicate) {
+                  kafkaDedupSkippedTotal.inc({
                     partition: String(batch.partition),
                   });
-                } catch (err) {
-                  // Match the GroupMQ behaviour: log and ack. At-most-once on
-                  // handler exceptions; failures here would otherwise block the
-                  // partition.
-                  kafkaConsumeErrorsTotal.inc({
-                    partition: String(batch.partition),
-                  });
-                  logger.error('kafka incomingEvent handler failed', {
-                    error: err,
-                    partition: batch.partition,
-                    offset: m.offset,
-                    projectId: payload.projectId,
-                  });
+                } else {
+                  try {
+                    await incomingEvent(payload);
+                    kafkaEventsConsumedTotal.inc({
+                      partition: String(batch.partition),
+                    });
+                    // Mark processed ONLY after success. Best-effort: a failed
+                    // mark risks a future duplicate, never a loss. Not marked on
+                    // a handler throw either, so a retry can re-attempt.
+                    if (dedupKey) {
+                      try {
+                        await getRedisEvent().set(
+                          dedupKey,
+                          '1',
+                          'EX',
+                          DEDUP_TTL_SECONDS,
+                        );
+                      } catch (err) {
+                        logger.warn('kafka dedup mark failed', {
+                          error: err,
+                          partition: batch.partition,
+                          offset: m.offset,
+                        });
+                      }
+                    }
+                  } catch (err) {
+                    // Match the GroupMQ behaviour: log and ack. At-most-once on
+                    // handler exceptions; failures here would otherwise block the
+                    // partition.
+                    kafkaConsumeErrorsTotal.inc({
+                      partition: String(batch.partition),
+                    });
+                    logger.error('kafka incomingEvent handler failed', {
+                      error: err,
+                      partition: batch.partition,
+                      offset: m.offset,
+                      projectId: payload.projectId,
+                    });
+                  }
                 }
               }
             }

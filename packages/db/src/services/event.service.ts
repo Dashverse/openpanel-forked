@@ -357,6 +357,14 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
     payload.profileId = payload.deviceId;
   }
 
+  // The event id is always a fresh random uuid. We do NOT reuse the Mixpanel
+  // `$insert_id` here: createSessionStart (session-handler.ts) derives a
+  // session_start row from `{ ...payload }`, which still carries the SAME
+  // `$insert_id` in its properties — so keying the id off it would give the
+  // original event and its session_start row an identical id and let a
+  // ClickHouse dedup-by-id backstop collapse two genuinely different rows.
+  // Retry idempotency is handled upstream at the Kafka consumer on the
+  // $insert_id / jobId instead.
   const event: IClickhouseEvent = {
     id: uuid(),
     name: payload.name,
