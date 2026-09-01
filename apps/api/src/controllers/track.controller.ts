@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
 import { HttpError } from '@/utils/errors';
+import { logger } from '@/utils/logger';
 import { generateId, slug } from '@openpanel/common';
 import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
 import {
@@ -41,6 +42,10 @@ const replayProjectIdAllowList = new Set<string>(
         .filter(Boolean)
     : [],
 );
+
+// Projects already warned about. A site with replay turned on sends a chunk
+// every few seconds, so without this the drop would be a log firehose.
+const warnedReplayDisabledProjects = new Set<string>();
 
 function isReplayEnabledForProject(projectId: string): boolean {
   if (replayAllowAllProjects) return true;
@@ -397,6 +402,16 @@ async function handleReplay({
   ua: string | undefined;
 }) {
   if (!isReplayEnabledForProject(projectId)) {
+    // Dropped silently on purpose: old clients keep their 200 and keep
+    // recording. Log it once so the drop is at least visible when someone
+    // wonders why a project has no recordings.
+    if (!warnedReplayDisabledProjects.has(projectId)) {
+      warnedReplayDisabledProjects.add(projectId);
+      logger.warn(
+        'Dropping replay chunks: project is not in REPLAY_ENABLED_PROJECT_IDS',
+        { projectId },
+      );
+    }
     return;
   }
 
