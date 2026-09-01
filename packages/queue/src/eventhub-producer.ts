@@ -61,10 +61,16 @@ const SEND_TIMEOUT_MS = Number.parseInt(
 // /track holds a request. Safe because the consumer dedups a re-sent event on
 // its __jobId / $insert_id. Keep low — retries amplify produce load under a
 // stall.
-const SEND_RETRIES = Number.parseInt(
+const parsedSendRetries = Number.parseInt(
   process.env.EVENTHUB_SEND_RETRIES || '1',
   10,
 );
+// Guard a malformed env: a NaN here must NOT collapse the attempt count to zero
+// and silently stop publishing. Fall back to 1 extra attempt.
+const SEND_RETRIES =
+  Number.isFinite(parsedSendRetries) && parsedSendRetries >= 0
+    ? parsedSendRetries
+    : 1;
 
 export const isEventHubProducerEnabled = (): boolean =>
   Boolean(CONNECTION_STRING);

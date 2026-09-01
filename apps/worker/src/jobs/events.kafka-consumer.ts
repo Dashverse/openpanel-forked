@@ -273,30 +273,33 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
               if (payload) {
                 // Idempotency: a producer retry (after an Event Hubs ack
                 // timeout) or an SDK retry (after a 5xx) re-sends the same event.
-                // Skip it if we've already processed its dedup key within the
-                // window — the client `$insert_id` when present, else the server
-                // jobId carried as `__jobId` — so a retry never becomes a
-                // duplicate row.
+                // Dedup key = the client `$insert_id` when present, else the
+                // server jobId carried as `__jobId`. Namespaced by projectId so a
+                // key can never collide across projects.
                 const insertId = (
                   payload.event?.properties as
                     | Record<string, unknown>
                     | undefined
                 )?.['$insert_id'];
-                const dedupKey =
+                const dedupId =
                   (typeof insertId === 'string' && insertId
                     ? insertId
                     : undefined) ?? (payload as { __jobId?: string }).__jobId;
+                const dedupKey = dedupId
+                  ? `op:dedup:${payload.projectId}:${dedupId}`
+                  : undefined;
+
+                // CHECK only (not reserve): skip an event we've ALREADY
+                // processed. We record the key AFTER a successful incomingEvent
+                // (below), never before — so a crash between here and a
+                // successful write causes a re-process (a duplicate the dedup
+                // then catches) instead of silently DROPPING the event. Same-key
+                // retries land on the same partition and are serialized in this
+                // per-group loop, so there is no check→mark race for them.
                 let duplicate = false;
                 if (dedupKey) {
                   try {
-                    const fresh = await getRedisCache().set(
-                      `op:dedup:${dedupKey}`,
-                      '1',
-                      'EX',
-                      DEDUP_TTL_SECONDS,
-                      'NX',
-                    );
-                    duplicate = fresh === null;
+                    duplicate = (await getRedisCache().exists(dedupKey)) === 1;
                   } catch (err) {
                     // Fail OPEN on a dedup-store blip: process the event. At
                     // worst a retry duplicates; we never DROP an event because
@@ -318,6 +321,25 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                     kafkaEventsConsumedTotal.inc({
                       partition: String(batch.partition),
                     });
+                    // Mark processed ONLY after success. Best-effort: a failed
+                    // mark risks a future duplicate, never a loss. Not marked on
+                    // a handler throw either, so a retry can re-attempt.
+                    if (dedupKey) {
+                      try {
+                        await getRedisCache().set(
+                          dedupKey,
+                          '1',
+                          'EX',
+                          DEDUP_TTL_SECONDS,
+                        );
+                      } catch (err) {
+                        logger.warn('kafka dedup mark failed', {
+                          error: err,
+                          partition: batch.partition,
+                          offset: m.offset,
+                        });
+                      }
+                    }
                   } catch (err) {
                     // Match the GroupMQ behaviour: log and ack. At-most-once on
                     // handler exceptions; failures here would otherwise block the
