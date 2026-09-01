@@ -21,11 +21,13 @@ import { logger } from '../utils/logger';
 import { incomingEvent } from './events.incoming-event';
 
 // How long we remember a processed event's dedup key. A producer/SDK retry
-// lands within seconds, so this only needs to outlast the retry window; 24h
-// matches Segment's dedup window and keeps Redis memory bounded (keys auto-
-// expire). Tunable via KAFKA_DEDUP_TTL_SECONDS.
+// lands within seconds, so this only needs to outlast the retry window. 6h
+// gives generous headroom for the common case while keeping Redis memory
+// bounded — at ~3k/s that's ~65M keys (~6GB), vs ~24× that for a 24h window,
+// which would risk evicting the event/session buffers on the shared Redis.
+// Keys auto-expire. Tunable via KAFKA_DEDUP_TTL_SECONDS.
 const DEDUP_TTL_SECONDS = Number.parseInt(
-  process.env.KAFKA_DEDUP_TTL_SECONDS || '86400',
+  process.env.KAFKA_DEDUP_TTL_SECONDS || '21600',
   10,
 );
 
