@@ -1,6 +1,6 @@
 import { path, assocPath, last, mergeDeepRight, uniq } from 'ramda';
 import sqlstring from 'sqlstring';
-import { v4 as uuid } from 'uuid';
+import { validate as isUuid, v4 as uuid } from 'uuid';
 
 import { DateTime, toDots } from '@openpanel/common';
 import { cacheable } from '@openpanel/redis';
@@ -363,16 +363,18 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
   // today (~1%); everything else falls back to a random uuid and is deduped
   // upstream at the Kafka consumer on the jobId. Bounded length so a malformed
   // value can't blow up the id column.
-  const insertId = (
+  // Only trust a real UUID-form $insert_id as the event id — a weak value like
+  // "1" or a reused string would collide across events/projects. Anything else
+  // falls back to a random uuid (and the consumer dedups on the jobId instead).
+  const rawInsertId = (
     payload.properties as Record<string, unknown> | undefined
   )?.['$insert_id'];
+  const insertId =
+    typeof rawInsertId === 'string' && isUuid(rawInsertId)
+      ? rawInsertId
+      : undefined;
   const event: IClickhouseEvent = {
-    id:
-      typeof insertId === 'string' &&
-      insertId.length > 0 &&
-      insertId.length <= 64
-        ? insertId
-        : uuid(),
+    id: insertId ?? uuid(),
     name: payload.name,
     device_id: payload.deviceId,
     profile_id: payload.profileId ? String(payload.profileId) : '',

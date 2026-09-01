@@ -31,6 +31,12 @@ const DEDUP_TTL_SECONDS = Number.parseInt(
   10,
 );
 
+// A dedup key is only trustworthy if the $insert_id is a real UUID — a weak or
+// reused value would deduplicate genuinely-distinct events. Non-UUID values
+// fall back to the server jobId.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export interface KafkaConsumerHandle {
   stop: () => Promise<void>;
 }
@@ -281,8 +287,11 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                     | Record<string, unknown>
                     | undefined
                 )?.['$insert_id'];
+                // Only trust a real UUID-form $insert_id — a weak or reused
+                // value ("1") would dedup DISTINCT events (data loss). Anything
+                // else falls back to the server jobId.
                 const dedupId =
-                  (typeof insertId === 'string' && insertId
+                  (typeof insertId === 'string' && UUID_RE.test(insertId)
                     ? insertId
                     : undefined) ?? (payload as { __jobId?: string }).__jobId;
                 const dedupKey = dedupId
