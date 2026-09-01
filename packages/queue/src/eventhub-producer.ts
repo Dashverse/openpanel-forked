@@ -182,7 +182,9 @@ const attemptProduce = (
   const enqueueTimer = setTimeout(
     () =>
       ac.abort(
-        new Error(`eventhub enqueue backpressure timed out after ${timeoutMs}ms`),
+        new Error(
+          `eventhub enqueue backpressure timed out after ${timeoutMs}ms`,
+        ),
       ),
     timeoutMs,
   );
@@ -242,11 +244,16 @@ export const produceViaEventHub = async (
 ): Promise<void> => {
   const producer = getClient();
 
-  // Retry a transient send failure within a FIXED total budget: the sum of all
-  // attempts is capped at SEND_TIMEOUT_MS, so retries never extend how long
-  // /track holds the request (avoids piling up in-flight requests under a
-  // stall). Retries are safe because the consumer dedups a re-sent event on its
-  // __jobId / $insert_id.
+  // Retry a transient send failure within a FIXED total budget capped at
+  // SEND_TIMEOUT_MS, so retries never extend how long /track holds the request
+  // (avoids piling up in-flight requests under a stall). Retries are safe
+  // because the consumer dedups a re-sent event on its __jobId / $insert_id.
+  //
+  // Attempt 0 gets the FULL budget so a send that would have acked at 8-14s
+  // isn't cut short into a needless retry (which would double Event Hubs writes
+  // during the very stall we are trying to survive). A retry therefore only
+  // runs when attempt 0 failed FAST and left budget on the clock — i.e. a quick
+  // transient error, not a timeout.
   const deadline = Date.now() + SEND_TIMEOUT_MS;
   const attempts = Math.max(1, SEND_RETRIES + 1);
   let lastErr: unknown;
@@ -255,7 +262,7 @@ export const produceViaEventHub = async (
     if (remaining <= 0) {
       break;
     }
-    const perAttempt = Math.max(1000, Math.floor(remaining / (attempts - i)));
+    const perAttempt = i === 0 ? SEND_TIMEOUT_MS : remaining;
     try {
       return await attemptProduce(
         producer,
@@ -266,6 +273,12 @@ export const produceViaEventHub = async (
       );
     } catch (err) {
       lastErr = err;
+      // Only retry our transient timeouts. A non-transient error (auth,
+      // message-too-large, …) will fail again — fail fast instead of burning
+      // the remaining budget on hopeless attempts.
+      if (!(err instanceof Error && /timed out/i.test(err.message))) {
+        throw err;
+      }
     }
   }
   throw lastErr ?? new Error('eventhub produce failed');

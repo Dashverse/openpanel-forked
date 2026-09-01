@@ -1,3 +1,4 @@
+import fastJsonStableHash from 'fast-json-stable-hash';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
@@ -342,12 +343,18 @@ async function track({
       ? `${projectId}:${payload.profileId}`
       : `${projectId}:${generateId()}`
     : currentDeviceId;
+  // Include a content hash of the event properties in the jobId. Without it,
+  // two GENUINELY-DISTINCT events from the same device with the same name in the
+  // same timestamp bucket collapse to one jobId and the consumer would drop the
+  // second as a false duplicate. A retry re-sends identical properties → same
+  // hash → same jobId, so real retries still dedup. Strictly more unique.
   const jobId = buildEventJobId([
     slug(payload.name),
     timestamp,
     projectId,
     currentDeviceId,
     groupId,
+    fastJsonStableHash.hash(payload.properties ?? {}, 'md5'),
   ]);
   // Stamp the CURRENT W3C traceparent so the worker consumer (different
   // process / pod) can bind its span as a child of THIS request's trace.

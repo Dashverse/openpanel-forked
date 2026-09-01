@@ -1,6 +1,6 @@
 import { path, assocPath, last, mergeDeepRight, uniq } from 'ramda';
 import sqlstring from 'sqlstring';
-import { validate as isUuid, v4 as uuid } from 'uuid';
+import { v4 as uuid } from 'uuid';
 
 import { DateTime, toDots } from '@openpanel/common';
 import { cacheable } from '@openpanel/redis';
@@ -357,24 +357,16 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
     payload.profileId = payload.deviceId;
   }
 
-  // Prefer the client-stable Mixpanel `$insert_id` as the event id when present:
-  // a retry re-sends the same value, so the id is a deterministic idempotency
-  // key (enables a ClickHouse dedup-by-id backstop). Only web events carry it
-  // today (~1%); everything else falls back to a random uuid and is deduped
-  // upstream at the Kafka consumer on the jobId. Bounded length so a malformed
-  // value can't blow up the id column.
-  // Only trust a real UUID-form $insert_id as the event id — a weak value like
-  // "1" or a reused string would collide across events/projects. Anything else
-  // falls back to a random uuid (and the consumer dedups on the jobId instead).
-  const rawInsertId = (
-    payload.properties as Record<string, unknown> | undefined
-  )?.['$insert_id'];
-  const insertId =
-    typeof rawInsertId === 'string' && isUuid(rawInsertId)
-      ? rawInsertId
-      : undefined;
+  // The event id is always a fresh random uuid. We do NOT reuse the Mixpanel
+  // `$insert_id` here: createSessionStart (session-handler.ts) derives a
+  // session_start row from `{ ...payload }`, which still carries the SAME
+  // `$insert_id` in its properties — so keying the id off it would give the
+  // original event and its session_start row an identical id and let a
+  // ClickHouse dedup-by-id backstop collapse two genuinely different rows.
+  // Retry idempotency is handled upstream at the Kafka consumer on the
+  // $insert_id / jobId instead.
   const event: IClickhouseEvent = {
-    id: insertId ?? uuid(),
+    id: uuid(),
     name: payload.name,
     device_id: payload.deviceId,
     profile_id: payload.profileId ? String(payload.profileId) : '',

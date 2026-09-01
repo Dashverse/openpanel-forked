@@ -1,12 +1,12 @@
 import {
-  createKafkaEventsConsumer,
   type EventsQueuePayloadIncomingEvent,
   KAFKA_EVENTS_TOPIC,
   KAFKA_PARTITIONS_CONCURRENT,
-  kafkaLogger,
   type KafkaMessage,
+  createKafkaEventsConsumer,
+  kafkaLogger,
 } from '@openpanel/queue';
-import { getRedisCache } from '@openpanel/redis';
+import { getRedisEvent } from '@openpanel/redis';
 import {
   kafkaCommittedOffset,
   kafkaConsumeErrorsTotal,
@@ -17,25 +17,22 @@ import {
   kafkaPartitionOwner,
   kafkaReprocessedTotal,
 } from '../metrics';
+import { parseDedupTtlSeconds, resolveDedupId } from '../utils/kafka-dedup';
 import { logger } from '../utils/logger';
 import { incomingEvent } from './events.incoming-event';
 
 // How long we remember a processed event's dedup key. A producer/SDK retry
-// lands within seconds, so this only needs to outlast the retry window. 6h
-// gives generous headroom for the common case while keeping Redis memory
-// bounded — at ~3k/s that's ~65M keys (~6GB), vs ~24× that for a 24h window,
-// which would risk evicting the event/session buffers on the shared Redis.
-// Keys auto-expire. Tunable via KAFKA_DEDUP_TTL_SECONDS.
-const DEDUP_TTL_SECONDS = Number.parseInt(
-  process.env.KAFKA_DEDUP_TTL_SECONDS || '21600',
-  10,
+// lands within seconds, so this only needs to outlast the retry window; 6h is
+// generous headroom. Keys auto-expire and live on the dedicated EVENT Redis
+// (getRedisEvent, not the shared cache), so they can never evict the
+// event/session buffers. Tunable via KAFKA_DEDUP_TTL_SECONDS (parse rules in
+// parseDedupTtlSeconds).
+const DEDUP_TTL_SECONDS = parseDedupTtlSeconds(
+  process.env.KAFKA_DEDUP_TTL_SECONDS,
 );
 
-// A dedup key is only trustworthy if the $insert_id is a real UUID — a weak or
-// reused value would deduplicate genuinely-distinct events. Non-UUID values
-// fall back to the server jobId.
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Kill-switch: set KAFKA_DEDUP_ENABLED=false to turn dedup off without a deploy.
+const DEDUP_ENABLED = process.env.KAFKA_DEDUP_ENABLED !== 'false';
 
 export interface KafkaConsumerHandle {
   stop: () => Promise<void>;
@@ -286,29 +283,32 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                   payload.event?.properties as
                     | Record<string, unknown>
                     | undefined
-                )?.['$insert_id'];
-                // Only trust a real UUID-form $insert_id — a weak or reused
-                // value ("1") would dedup DISTINCT events (data loss). Anything
-                // else falls back to the server jobId.
-                const dedupId =
-                  (typeof insertId === 'string' && UUID_RE.test(insertId)
-                    ? insertId
-                    : undefined) ?? (payload as { __jobId?: string }).__jobId;
-                const dedupKey = dedupId
-                  ? `op:dedup:${payload.projectId}:${dedupId}`
-                  : undefined;
+                )?.$insert_id;
+                // Prefer a real UUID-form $insert_id; a weak / nil / max value
+                // falls back to the server jobId (see resolveDedupId — deduping
+                // on an untrustworthy id would drop DISTINCT events).
+                const dedupId = resolveDedupId(
+                  insertId,
+                  (payload as { __jobId?: string }).__jobId,
+                );
+                const dedupKey =
+                  DEDUP_ENABLED && dedupId
+                    ? `op:dedup:${payload.projectId}:${dedupId}`
+                    : undefined;
 
                 // CHECK only (not reserve): skip an event we've ALREADY
-                // processed. We record the key AFTER a successful incomingEvent
-                // (below), never before — so a crash between here and a
-                // successful write causes a re-process (a duplicate the dedup
-                // then catches) instead of silently DROPPING the event. Same-key
+                // processed AND marked. We record the key AFTER a successful
+                // incomingEvent (below), never before — so a crash between the
+                // check and the mark re-processes the event (a duplicate) rather
+                // than DROPPING it. That in-flight duplicate is the accepted
+                // price of being loss-averse; dedup only collapses retries of
+                // events that already completed and were marked. Same-key
                 // retries land on the same partition and are serialized in this
-                // per-group loop, so there is no check→mark race for them.
+                // per-group loop, so there is no check→mark race between them.
                 let duplicate = false;
                 if (dedupKey) {
                   try {
-                    duplicate = (await getRedisCache().exists(dedupKey)) === 1;
+                    duplicate = (await getRedisEvent().exists(dedupKey)) === 1;
                   } catch (err) {
                     // Fail OPEN on a dedup-store blip: process the event. At
                     // worst a retry duplicates; we never DROP an event because
@@ -335,7 +335,7 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                     // a handler throw either, so a retry can re-attempt.
                     if (dedupKey) {
                       try {
-                        await getRedisCache().set(
+                        await getRedisEvent().set(
                           dedupKey,
                           '1',
                           'EX',
