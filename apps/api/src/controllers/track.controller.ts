@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
 import { HttpError } from '@/utils/errors';
+import { buildEventJobId } from '@/utils/event-job-id';
 import { generateId, slug } from '@openpanel/common';
 import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
 import {
@@ -341,15 +342,13 @@ async function track({
       ? `${projectId}:${payload.profileId}`
       : `${projectId}:${generateId()}`
     : currentDeviceId;
-  const jobId = [
+  const jobId = buildEventJobId([
     slug(payload.name),
     timestamp,
     projectId,
     currentDeviceId,
     groupId,
-  ]
-    .filter(Boolean)
-    .join('-');
+  ]);
   // Stamp the CURRENT W3C traceparent so the worker consumer (different
   // process / pod) can bind its span as a child of THIS request's trace.
   // Absent when OTel is off — the consumer simply starts a fresh trace.
