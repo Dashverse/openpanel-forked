@@ -65,6 +65,38 @@ const CHART_CACHE_TTL = Number.parseInt(
   process.env.CHART_CACHE_TTL_SECONDS || '3600',
   10,
 );
+// `chart.values` for a TOP-LEVEL column (country, os, city, device…) has no MV,
+// so it did `SELECT DISTINCT <col> FROM events WHERE created_at > now()-6 MONTH`
+// — a full 6-month scan that hit max_execution_time every time and returned
+// nothing (a single dashreels `country` dropdown on a refetch loop burned
+// ~320s / 768 GB of CH time per hour, 100% timeouts). A filter-value dropdown
+// only needs recently-seen values, so clamp the lookback (~6x less scan).
+// Env-tunable; the property-MV fast path (properties.*) is unaffected.
+const VALUES_LOOKBACK_DAYS = Number.parseInt(
+  process.env.CHART_VALUES_LOOKBACK_DAYS || '30',
+  10,
+);
+// Top-level columns whose distinct values also live on the far smaller
+// `sessions` table (one row per session, geo/device/referrer denormalised onto
+// every event). For an all-events (`*`) value dropdown we read these from
+// `sessions` instead of scanning billions of `events` rows — same value set,
+// ~170x faster (dashreels country: 0.12s / 15M rows vs 20.7s / 3.2B rows).
+// `path`/`origin` are per-pageview (not on sessions) and fall back to events.
+const SESSION_LEVEL_VALUE_COLUMNS = new Set([
+  'country',
+  'region',
+  'city',
+  'os',
+  'os_version',
+  'browser',
+  'browser_version',
+  'device',
+  'brand',
+  'model',
+  'referrer',
+  'referrer_name',
+  'referrer_type',
+]);
 // Fields that DON'T affect the query result but DO bloat / churn the cache key:
 // - layout: changes on every widget drag/resize (createdAt/updatedAt) -> would
 //   rewrite every report's key whenever the dashboard is rearranged.
@@ -347,17 +379,30 @@ export const chartRouter = createTRPCRouter({
 
         values.push(...res.map((e) => e.property_value));
       } else {
+        // Read session-level columns (geo/device/referrer) from the tiny
+        // `sessions` table instead of scanning billions of `events` rows. Only
+        // when querying all events (`*`) and not a profile.* column — sessions
+        // has no `name` column and no profile join.
+        const useSessions =
+          event === '*' &&
+          !property.startsWith('profile.') &&
+          SESSION_LEVEL_VALUE_COLUMNS.has(property);
+
         const query = clix(ch)
           .select<{ values: string[] }>([
             `distinct ${getSelectPropertyKey(property, projectId)} as values`,
           ])
-          .from(TABLE_NAMES.events)
+          .from(useSessions ? TABLE_NAMES.sessions : TABLE_NAMES.events)
           .where('project_id', '=', projectId)
-          .where('created_at', '>', clix.exp('now() - INTERVAL 6 MONTH'))
+          .where(
+            'created_at',
+            '>',
+            clix.exp(`now() - INTERVAL ${VALUES_LOOKBACK_DAYS} DAY`),
+          )
           .orderBy('created_at', 'DESC')
           .limit(100_000);
 
-        if (event !== '*') {
+        if (!useSessions && event !== '*') {
           query.where('name', '=', event);
         }
 
