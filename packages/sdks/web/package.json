@@ -4,6 +4,7 @@
   "module": "index.ts",
   "scripts": {
     "build": "rm -rf dist && tsup",
+    "publish:github": "node scripts/publish-github.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
