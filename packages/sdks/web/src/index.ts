@@ -9,6 +9,7 @@ import {
   stopReplayRecorder,
 } from './replay';
 import { SessionIdManager } from './session-id-manager';
+import { sessionStore } from './storage';
 
 export type * from '@openpanel/sdk';
 export { OpenPanel as OpenPanelBase } from '@openpanel/sdk';
@@ -40,6 +41,12 @@ function toCamelCase(str: string) {
   );
 }
 
+function parseChunkIndex(raw: string | null): number {
+  if (raw === null) return 0;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 type PendingRevenue = {
   amount: number;
   properties?: Record<string, unknown>;
@@ -57,17 +64,25 @@ export class OpenPanel extends OpenPanelBase {
   private sessionManager?: SessionIdManager;
 
   /**
-   * Client-generated window_id — unique per tab / per page-load. Generated
-   * once in the constructor and never persisted, so:
-   *   - Refresh in same tab → new window_id (new recording)
-   *   - New tab → new window_id (independent recording)
-   *   - Long-lived same tab → same window_id (contiguous recording)
+   * Client-generated window_id, one per tab and per session. Persisted in
+   * sessionStorage so a full page load in the same tab keeps recording into
+   * the same window:
+   *   - Navigation / refresh in same tab → same window_id (one recording)
+   *   - New tab → own sessionStorage → new window_id (independent recording)
+   *   - Session rotation → new window_id (see maybeStartReplay)
    *
    * Included in every track event and every replay chunk. Chunk uniqueness
-   * on the server is (project_id, session_id, window_id, chunk_index), so
-   * multiple tabs / refreshes never collide on chunk_index.
+   * on the server is (project_id, session_id, window_id, chunk_index).
    */
   private windowId?: string;
+
+  /**
+   * chunk_index the next replay chunk of this window must use. Carried across
+   * page loads alongside the window_id, because the dashboard read path
+   * dedupes with `LIMIT 1 BY chunk_index`, so a second page load restarting
+   * at 0 under the same window would have its chunks silently discarded.
+   */
+  private nextChunkIndex = 0;
 
   /**
    * Unsubscribe for the session-rotation listener registered in
@@ -91,8 +106,7 @@ export class OpenPanel extends OpenPanelBase {
       //   - Bug 3 (late start): session_id is available synchronously
       this.sessionManager = new SessionIdManager();
       this.sessionId = this.sessionManager.getSessionId();
-      // Fresh window_id per SDK init — dies with the tab / page-load.
-      this.windowId = this.newUuid();
+      this.initWindowId(this.sessionId);
       try {
         const pending = sessionStorage.getItem('openpanel-pending-revenues');
         if (pending) {
@@ -151,6 +165,11 @@ export class OpenPanel extends OpenPanelBase {
    */
   private static readonly LOCAL_DEVICE_ID_KEY = '_op_device_id';
 
+  /** Per-tab window scope. sessionStorage dies with the tab, survives loads. */
+  private static readonly WINDOW_ID_KEY = '_op_window_id';
+  private static readonly WINDOW_SESSION_ID_KEY = '_op_window_session_id';
+  private static readonly WINDOW_CHUNK_INDEX_KEY = '_op_window_chunk_index';
+
   /**
    * Generate a v4 UUID. Uses `crypto.randomUUID()` where available
    * (modern browsers + secure contexts including http://localhost);
@@ -203,6 +222,52 @@ export class OpenPanel extends OpenPanelBase {
     }
   }
 
+  /**
+   * Resolve this page load's window_id.
+   *
+   * sessionStorage is per-tab and survives a full page load, so a
+   * server-rendered site keeps ONE recording per tab instead of one per page.
+   * The stored id is scoped to the session_id: when the session has rotated
+   * since the last load we start a fresh window, matching what an in-page
+   * rotation does.
+   *
+   * Caveat: browsers copy sessionStorage into a tab duplicated from this one
+   * ("Duplicate tab", window.open). Both tabs then share a window_id and can
+   * collide on chunk_index. The new tab has no reliable way to detect that,
+   * and same-tab navigation is by far the common case, so we take the trade.
+   *
+   * When sessionStorage is unavailable the ids stay in memory and every init
+   * mints a fresh window, matching the pre-existing per-page-load behaviour.
+   */
+  private initWindowId(sessionId: string): void {
+    const storedWindowId = sessionStore.get(OpenPanel.WINDOW_ID_KEY);
+    const storedSessionId = sessionStore.get(OpenPanel.WINDOW_SESSION_ID_KEY);
+
+    if (storedWindowId && storedSessionId === sessionId) {
+      this.windowId = storedWindowId;
+      this.nextChunkIndex = parseChunkIndex(
+        sessionStore.get(OpenPanel.WINDOW_CHUNK_INDEX_KEY),
+      );
+      return;
+    }
+
+    this.resetWindow(sessionId);
+  }
+
+  /** Start a new window: fresh id, chunk sequence back to 0. */
+  private resetWindow(sessionId: string): void {
+    this.windowId = this.newUuid();
+    this.nextChunkIndex = 0;
+    sessionStore.set(OpenPanel.WINDOW_ID_KEY, this.windowId);
+    sessionStore.set(OpenPanel.WINDOW_SESSION_ID_KEY, sessionId);
+    sessionStore.set(OpenPanel.WINDOW_CHUNK_INDEX_KEY, '0');
+  }
+
+  private persistNextChunkIndex(next: number): void {
+    this.nextChunkIndex = next;
+    sessionStore.set(OpenPanel.WINDOW_CHUNK_INDEX_KEY, String(next));
+  }
+
   private maybeStartReplay() {
     const opts = this.options.sessionReplay;
     if (!opts?.enabled) return;
@@ -232,6 +297,7 @@ export class OpenPanel extends OpenPanelBase {
       startReplayRecorder(
         opts,
         (chunk) => {
+          this.persistNextChunkIndex(chunk.chunk_index + 1);
           this.send({
             type: 'replay',
             payload: {
@@ -241,27 +307,32 @@ export class OpenPanel extends OpenPanelBase {
           });
         },
         bumpActivity,
+        this.nextChunkIndex,
       );
     };
 
     startForSession(this.sessionId);
 
-    this.replaySessionUnsub = this.sessionManager.onSessionIdChanged((newId) => {
-      // Match PostHog: a session rotation also mints a fresh window_id. The
-      // recorder restarts with a new FullSnapshot at chunk_index=0, so the
-      // post-rotation recording is fully self-describing — the dashboard
-      // groups by window_id and never stitches pre- and post-idle chunks
-      // into one continuous timeline.
-      this.windowId = this.newUuid();
-      this.log('replay: session rotated, restarting recorder', {
-        from: activeSessionId,
-        to: newId,
-        windowId: this.windowId,
-      });
-      this.sessionId = newId;
-      stopReplayRecorder();
-      startForSession(newId);
-    });
+    this.replaySessionUnsub = this.sessionManager.onSessionIdChanged(
+      (newId) => {
+        // Match PostHog: a session rotation also mints a fresh window_id. The
+        // recorder restarts with a new FullSnapshot at chunk_index=0, so the
+        // post-rotation recording is fully self-describing — the dashboard
+        // groups by window_id and never stitches pre- and post-idle chunks
+        // into one continuous timeline.
+        // Stop first: the old recorder's final flush must still be stamped with
+        // the pre-rotation window_id and continue its chunk sequence.
+        stopReplayRecorder();
+        this.resetWindow(newId);
+        this.log('replay: session rotated, restarting recorder', {
+          from: activeSessionId,
+          to: newId,
+          windowId: this.windowId,
+        });
+        this.sessionId = newId;
+        startForSession(newId);
+      },
+    );
   }
 
   public stopReplay() {

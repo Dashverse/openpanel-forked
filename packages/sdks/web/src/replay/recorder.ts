@@ -69,6 +69,13 @@ export function startReplayRecorder(
    * extend the session, never background DOM churn.
    */
   onUserActivity?: () => void,
+  /**
+   * First chunk_index this recorder should emit. Non-zero when a tab reuses a
+   * window_id persisted across a full page load: the dashboard read path
+   * dedupes with `LIMIT 1 BY chunk_index`, so restarting at 0 under the same
+   * (session_id, window_id) would silently drop every chunk of the new page.
+   */
+  startChunkIndex = 0,
 ): void {
   if (typeof document === 'undefined' || typeof window === 'undefined') {
     return;
@@ -85,7 +92,7 @@ export function startReplayRecorder(
   const idleThresholdMs = config.idleThresholdMs ?? DEFAULT_IDLE_THRESHOLD_MS;
 
   let buffer: eventWithTime[] = [];
-  let chunkIndex = 0;
+  let chunkIndex = startChunkIndex;
   let flushTimer: ReturnType<typeof setInterval> | null = null;
 
   // Idle state (PostHog-style). We start "active" so the initial snapshot is
@@ -155,7 +162,10 @@ export function startReplayRecorder(
     // On checkout, flush immediately so the FullSnapshot begins a fresh,
     // cleanly-bounded chunk (the is_full_snapshot column is derived from
     // chunk content inside flush()).
-    if (buffer.length >= maxEventsPerChunk || (isCheckout && buffer.length > 0)) {
+    if (
+      buffer.length >= maxEventsPerChunk ||
+      (isCheckout && buffer.length > 0)
+    ) {
       flush();
     }
   }
@@ -185,7 +195,10 @@ export function startReplayRecorder(
             // will re-anchor shortly; not fatal.
           }
         }
-      } else if (!isIdle && event.timestamp - lastActivityMs > idleThresholdMs) {
+      } else if (
+        !isIdle &&
+        event.timestamp - lastActivityMs > idleThresholdMs
+      ) {
         // No real interaction for idleThresholdMs. Go idle: flush what we have
         // and stop capturing so background churn doesn't grow a ghost recording.
         isIdle = true;

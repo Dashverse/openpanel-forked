@@ -29,10 +29,10 @@ export type TrackHandlerPayload =
 export type ReplayPayload = {
   session_id: string;
   /**
-   * Client-generated UUID unique per tab / per page-load. Regenerated on
-   * every SDK init (not persisted), so a refresh in the same tab starts a
-   * fresh recording. Distinguishes chunks from multiple tabs sharing the
-   * same session_id — server keys chunks on
+   * Client-generated UUID unique per tab, per session. The web SDK persists
+   * it in sessionStorage so a full page load in the same tab keeps recording
+   * into the same window. Distinguishes chunks from multiple tabs sharing
+   * the same session_id — server keys chunks on
    * (project_id, session_id, window_id, chunk_index).
    *
    * Optional for backward compat with older SDKs that don't set it.
@@ -59,9 +59,9 @@ export type TrackPayload = {
    */
   session_id?: string;
   /**
-   * Client-generated UUID unique per tab / per page-load. Regenerated
-   * on every SDK init (not persisted). Same value as ReplayPayload's
-   * window_id so events and chunks from the same tab join correctly.
+   * Client-generated UUID unique per tab, per session. Same value as
+   * ReplayPayload's window_id so events and chunks from the same tab join
+   * correctly.
    */
   window_id?: string;
 };
