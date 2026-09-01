@@ -39,6 +39,20 @@ const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000; // 5 min (matches PostHog)
 // we drop, loudly. The ingest API accepts far larger bodies (500 MB).
 const HARD_EVENT_CAP_BYTES = 10 * 1024 * 1024; // 10 MB
 
+// Split threshold used only for the unload flush (pagehide / hidden). The base
+// SDK sends with `keepalive: true` only while the request body stays under
+// 60 KB (packages/sdks/sdk/src/api.ts), and a non-keepalive request is killed
+// the moment the page goes away, which is exactly when this flush runs. The
+// events JSON is embedded as a JSON *string* in the outer body, so quote
+// escaping inflates it by roughly half again: 32 KB of events lands well
+// inside the 60 KB budget.
+//
+// Chrome also caps the TOTAL in-flight keepalive body at 64 KB per document,
+// so a very large pending buffer can still lose its tail. The periodic flush
+// keeps the buffer small enough that this is rare, and sending what fits is
+// strictly better than today, where a single oversized request loses all of it.
+const UNLOAD_CHUNK_BYTES = 32 * 1024;
+
 /** An event counts as user activity only if it's an interactive incremental. */
 function isInteractiveEvent(event: eventWithTime): boolean {
   return (
@@ -104,22 +118,22 @@ export function startReplayRecorder(
   // still updates on every interactive event (in-memory, cheap).
   let lastActivityNotifyMs = 0;
 
-  function flush(): void {
+  function flush(splitBytes: number = maxPayloadBytes): void {
     if (buffer.length === 0) return;
 
     const payloadJson = JSON.stringify(buffer);
     const payloadBytes = new TextEncoder().encode(payloadJson).length;
 
-    if (payloadBytes > maxPayloadBytes) {
+    if (payloadBytes > splitBytes) {
       // Recursively split oversized batches so each request stays small.
       if (buffer.length > 1) {
         const mid = Math.floor(buffer.length / 2);
         const firstHalf = buffer.slice(0, mid);
         const secondHalf = buffer.slice(mid);
         buffer = firstHalf;
-        flush();
+        flush(splitBytes);
         buffer = secondHalf;
-        flush();
+        flush(splitBytes);
         return;
       }
       // A single event over the split threshold is sent as its own chunk —
@@ -230,14 +244,17 @@ export function startReplayRecorder(
     flush();
   }, flushIntervalMs);
 
+  // Both handlers fire when the page may be about to go away (mobile browsers
+  // often skip pagehide entirely and only ever report hidden), so both split
+  // down to a keepalive-sized body.
   function onVisibilityChange(): void {
     if (document.visibilityState === 'hidden') {
-      flush();
+      flush(UNLOAD_CHUNK_BYTES);
     }
   }
 
   function onPageHide(): void {
-    flush();
+    flush(UNLOAD_CHUNK_BYTES);
   }
 
   document.addEventListener('visibilitychange', onVisibilityChange);
