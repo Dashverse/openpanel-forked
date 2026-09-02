@@ -132,6 +132,54 @@ export async function getMember(organizationId: string, userId: string) {
   });
 }
 
+/**
+ * Everyone who reaches this point has already cleared the Google Workspace
+ * domain check, so they are a verified member of the company. Without this they
+ * would land with no organization, see nothing, and need a manual `members` row
+ * before the dashboard was of any use — and in the meantime many of them create
+ * a stray personal organization through onboarding.
+ *
+ * Opt-in per environment: with DEFAULT_ORGANIZATION_ID unset, nothing changes.
+ *
+ * Only applies to users who belong to no organization at all, so it can never
+ * alter the access of an existing member, and re-running it is a no-op.
+ */
+export async function connectUserToDefaultOrganization({ user }: { user: User }) {
+  const organizationId = process.env.DEFAULT_ORGANIZATION_ID?.trim();
+  if (!organizationId) {
+    return null;
+  }
+
+  const existing = await db.$primary().member.findFirst({
+    where: { userId: user.id },
+  });
+  if (existing) {
+    return null;
+  }
+
+  const organization = await db.$primary().organization.findUnique({
+    where: { id: organizationId },
+  });
+  if (!organization) {
+    throw new Error(
+      `DEFAULT_ORGANIZATION_ID "${organizationId}" does not exist`,
+    );
+  }
+
+  const member = await db.member.create({
+    data: {
+      organizationId,
+      userId: user.id,
+      role: 'org:member',
+      email: user.email,
+    },
+  });
+
+  await getOrganizationAccess.clear({ userId: user.id, organizationId });
+
+  return member;
+}
+
 export async function connectUserToOrganization({
   user,
   inviteId,
