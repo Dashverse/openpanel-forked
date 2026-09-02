@@ -200,16 +200,44 @@ async function getSessionLookbackDays(projectId: string): Promise<number> {
 }
 
 /**
- * WHERE fragment keeping only sessions that have a replay recording within the
- * lookback window. Reads just the cheap, ZSTD-compressed session_id column from
- * session_replay_chunks, so it stays fast on the large table.
+ * WHERE fragment keeping only sessions that have a replay recording.
+ *
+ * `sessions` is `ORDER BY (project_id, toDate(created_at), …)` /
+ * `PARTITION BY toYYYYMM(created_at)`, and `id` is NOT in the sort key — so
+ * `id IN (…)` alone cannot prune and full-scans the entire project (measured
+ * 281M rows / 11.7 GiB / ~15-19s for dashreels → the replay tab times out).
+ *
+ * Fix: also constrain `created_at` to the exact days that actually have chunks.
+ * ClickHouse then prunes to the relevant month-partitions and skips granules
+ * down to just those days. This is derived from the data (the set of chunk
+ * dates), so it adapts to any retention/TTL — we deliberately do NOT hardcode a
+ * chunk-age cap. For a sparse/recent project this is a ~240x cut (dashreels
+ * 15s → 0.06s); a project that records every day degrades gracefully to the
+ * org-window scan. `d - 1` covers a session that started just before midnight
+ * whose first chunk landed on the following day. `started_at <= now()` drops
+ * corrupt future timestamps from the pruning set (e.g. a chunk stamped 2299).
+ *
+ * `days` is the caller's org lookback window (see getSessionLookbackDays) — the
+ * same window the rest of the list uses, kept so the count and list agree.
  */
 function buildHasReplayWhere(projectId: string, days: number): string {
+  const proj = sqlstring.escape(projectId);
+  const scope = `project_id = ${proj}
+        AND started_at > now() - INTERVAL ${days} DAY
+        AND started_at <= now()`;
   return `id IN (
       SELECT DISTINCT session_id
       FROM ${TABLE_NAMES.session_replay_chunks}
-      WHERE project_id = ${sqlstring.escape(projectId)}
-        AND started_at > now() - INTERVAL ${days} DAY
+      WHERE ${scope}
+    )
+    AND created_at > now() - INTERVAL ${days} DAY
+    AND toDate(created_at) IN (
+      SELECT arrayJoin([d - 1, d])
+      FROM (
+        SELECT DISTINCT toDate(started_at) AS d
+        FROM ${TABLE_NAMES.session_replay_chunks}
+        WHERE ${scope}
+      )
     )`;
 }
 
