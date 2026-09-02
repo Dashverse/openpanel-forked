@@ -8,8 +8,9 @@ import {
   startReplayRecorder,
   stopReplayRecorder,
 } from './replay';
+import { decideReplaySample } from './replay/sampling';
 import { SessionIdManager } from './session-id-manager';
-import { sessionStore } from './storage';
+import { localStore, sessionStore } from './storage';
 
 export type * from '@openpanel/sdk';
 export { OpenPanel as OpenPanelBase } from '@openpanel/sdk';
@@ -18,6 +19,10 @@ export type SessionReplayOptions = ReplayRecorderConfig & {
   enabled: boolean;
   /**
    * Fraction of sessions to record. 0..1 (default 1 = record all).
+   *
+   * Rolled once per session and persisted, so every page load of a sampled
+   * session records and a session that misses records nothing. Without that,
+   * a server-rendered site would produce one recording with holes in it.
    */
   sampleRate?: number;
   /**
@@ -171,6 +176,12 @@ export class OpenPanel extends OpenPanelBase {
   private static readonly WINDOW_CHUNK_INDEX_KEY = '_op_window_chunk_index';
 
   /**
+   * Replay sample decision for the current session, `<sessionId>:1` or
+   * `<sessionId>:0`. localStorage, next to the session id it is scoped to.
+   */
+  private static readonly REPLAY_SAMPLED_KEY = '_op_replay_sampled';
+
+  /**
    * Generate a v4 UUID. Uses `crypto.randomUUID()` where available
    * (modern browsers + secure contexts including http://localhost);
    * falls back to `Math.random` for older browsers and sandboxed
@@ -268,20 +279,52 @@ export class OpenPanel extends OpenPanelBase {
     sessionStore.set(OpenPanel.WINDOW_CHUNK_INDEX_KEY, String(next));
   }
 
+  /**
+   * Is this session in the replay sample? Rolled once per session_id and
+   * persisted, so every page load of the same session gets the same answer.
+   * A per-init roll would leave holes in a server-rendered site's recording,
+   * because one window_id now spans full page loads.
+   *
+   * Without localStorage there is nowhere to keep the decision, so we fall
+   * back to the old per-init roll.
+   */
+  private isReplaySessionSampled(
+    sampleRate: number,
+    sessionId: string,
+  ): boolean {
+    if (!localStore.isAvailable()) {
+      return Math.random() < sampleRate;
+    }
+
+    const decision = decideReplaySample({
+      sampleRate,
+      sessionId,
+      stored: localStore.get(OpenPanel.REPLAY_SAMPLED_KEY),
+      random: Math.random(),
+    });
+
+    if (decision.store !== null) {
+      localStore.set(OpenPanel.REPLAY_SAMPLED_KEY, decision.store);
+    }
+
+    return decision.recorded;
+  }
+
   private maybeStartReplay() {
     const opts = this.options.sessionReplay;
     if (!opts?.enabled) return;
 
     const sampleRate = opts.sampleRate ?? 1;
-    if (Math.random() >= sampleRate) {
-      this.log('replay sample miss, not recording');
-      return;
-    }
 
     // session_id is available synchronously now — no polling. The manager
     // read/created it in the constructor.
     if (!this.sessionManager || !this.sessionId) {
       this.log('replay: sessionManager unavailable, not starting recorder');
+      return;
+    }
+
+    if (!this.isReplaySessionSampled(sampleRate, this.sessionId)) {
+      this.log('replay sample miss, not recording');
       return;
     }
 
@@ -330,6 +373,14 @@ export class OpenPanel extends OpenPanelBase {
           windowId: this.windowId,
         });
         this.sessionId = newId;
+
+        // The new session gets its own roll. Being in the sample says nothing
+        // about the session that replaced it.
+        if (!this.isReplaySessionSampled(sampleRate, newId)) {
+          this.log('replay sample miss, not recording');
+          return;
+        }
+
         startForSession(newId);
       },
     );
