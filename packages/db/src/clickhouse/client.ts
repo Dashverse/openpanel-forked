@@ -70,8 +70,6 @@ export const TABLE_NAMES = {
   cohort_members: 'cohort_members',
   cohort_metadata: 'cohort_metadata',
   profile_event_summary_mv: 'profile_event_summary_mv',
-  profile_event_property_summary_mv: 'profile_event_property_summary_mv',
-  profile_event_property_summary_v2: 'profile_event_property_summary_v2',
   session_replay_chunks: 'session_replay_chunks',
 };
 
@@ -105,29 +103,6 @@ export function getEventsTableForRange(startDate?: string | null): string {
   // Visible routing decision (only logs when routing is enabled). Grep the dev
   // process output for `[events-routing]` to see events vs events_v2 per query.
   logger.info(`[events-routing] -> ${table}`, { table, startDate, minDate });
-  return table;
-}
-
-/**
- * Property-summary MV routing.
- *
- * v1 `profile_event_property_summary_mv` carries a `profile_id != device_id`
- * filter, so it counts identified users only — it silently drops anonymous
- * events (e.g. web appOpen from a referring domain is mostly anon), undercounting
- * ~5-7×. v2 `profile_event_property_summary_v2` has NO such filter (anon-inclusive)
- * and holds data from `PROPERTY_MV_V2_MIN_DATE` (Jul 1 2026) forward.
- *
- * Route to v2 only when the query's whole range starts at/after that cutoff (v2
- * has no pre-cutoff history); otherwise fall back to v1. Gated OFF by default:
- * unset `PROPERTY_MV_V2_MIN_DATE` = always v1 (byte-identical to before).
- */
-export function getPropertyMvTableForRange(startDate?: string | null): string {
-  const minDate = process.env.PROPERTY_MV_V2_MIN_DATE?.trim();
-  const table =
-    minDate && startDate && String(startDate) >= minDate
-      ? TABLE_NAMES.profile_event_property_summary_v2
-      : TABLE_NAMES.profile_event_property_summary_mv;
-  logger.info(`[property-mv-routing] -> ${table}`, { table, startDate, minDate });
   return table;
 }
 
