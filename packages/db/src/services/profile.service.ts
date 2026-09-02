@@ -264,64 +264,6 @@ function behavioralTimeClause(
   return `created_at >= now() - INTERVAL ${days} DAY`;
 }
 
-// ─── v2 property MV routing for the behavioural filter ───────────────────────
-// The behavioural filter ("profiles who did event X where properties.k=v")
-// runs `profiles FINAL WHERE created_at BETWEEN <window> AND id IN (SELECT
-// profile_id FROM events …)`. The inner events scan is ~7s on a high-volume
-// event.
-//
-// Fix: swap ONLY the inner subquery to `profile_event_property_summary_v2` —
-// its sort key (project, name, property_key, property_value) makes the
-// event+property lookup a near-instant prefix scan. The outer profiles query is
-// unchanged, so "Last seen" stays `profiles.created_at` (precise, windowed,
-// sorted) and the seen-window still prunes profiles — feeding the v2 id-set
-// into `profiles FINAL` measured ~350ms vs ~7s. Correctness bonus: v2 has no
-// `WHERE profile_id != device_id` filter, so anonymous-heavy events count fully.
-//
-// Guards (route ONLY when ALL true):
-//   1. Project is in the env allowlist — controlled per-project rollout.
-//   2. Query date range starts on/after the env START_DATE — v2 only covers a
-//      recent window (see docs/v2-migration-progress.md); default skips the
-//      known 07-10 PM / 07-11 gap.
-//   3. At most one property filter, and it targets a `properties.*` key — v2
-//      does NOT store bare event columns (country/os/path/…) or handle
-//      multi-property (needs INTERSECT; deferred).
-// Any false → fall back to the existing events-table subquery (unchanged).
-const PROFILES_BEHAVIORAL_V2_PROJECTS = new Set(
-  (process.env.PROFILES_BEHAVIORAL_V2_PROJECTS ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean),
-);
-// Default 2026-07-12 skips the live-MV gap (07-10 11:36 → 07-11 15:58 UTC)
-// documented in v2-migration-progress.md. Drop to 2026-07-01 via env once the
-// 07-10 → 07-12 recovery backfill lands.
-// Anchored to UTC (both this and queryStart) so the gate is deterministic
-// regardless of server timezone. A blank/garbled env value falls back to the
-// default instead of silently disabling the guard — `new Date('') `is Invalid
-// Date, and `queryStart < InvalidDate` is always false (guard would never fire).
-const PROFILES_BEHAVIORAL_V2_START_DATE = (() => {
-  const raw = process.env.PROFILES_BEHAVIORAL_V2_START_DATE?.trim() || '2026-07-12';
-  const parsed = new Date(`${raw}T00:00:00Z`);
-  return Number.isNaN(parsed.getTime())
-    ? new Date('2026-07-12T00:00:00Z')
-    : parsed;
-})();
-
-function canRouteBehavioralToV2(
-  projectId: string,
-  filters: IChartEventFilter[],
-  range: string | undefined,
-  startDate: string | null | undefined,
-): boolean {
-  // RETIRED: profile_event_property_summary_v2 is being dropped. The Profiles
-  // behavioral filter now always uses raw `events`; the events fallback below
-  // resolves each property to its MATERIALIZED column (via getSelectPropertyKey
-  // in eventFilterClauses), so materialized-key filters are fast (~74ms) and
-  // anon-inclusive. Always fall through to events.
-  return false;
-}
-
 // Full operator support for a value filter, mirroring chart.service.ts. `col` is
 // the SQL expression the operator compares (property_value, properties['x'], or
 // a bare column). Fixes the old "every unhandled operator falls through to IN"
@@ -403,85 +345,10 @@ function profileAttrFilterClauses(filters: IChartEventFilter[]): string[] {
   return out;
 }
 
-function buildBehavioralV2WhereClause(
-  projectId: string,
-  eventNames: string[],
-  filters: IChartEventFilter[],
-  range: string | undefined,
-  startDate: string | null | undefined,
-  endDate: string | null | undefined,
-  tz: string,
-): string {
-  const names = eventNames.map((e) => sqlstring.escape(e)).join(',');
-  const active = (filters ?? []).filter((f) => f.name && f.value?.length)[0];
-
-  // `event_date` is `toStartOfDay(created_at)` computed in UTC — a UTC-day
-  // bucket. The window (start/end) is wall-clock in the project tz, so we must
-  // align the bound to UTC days too: `toTimeZone(toDateTime(x, tz), 'UTC')`
-  // gives the same instant re-tagged UTC, and `toStartOfDay` then truncates to
-  // the UTC midnight that matches how event_date was stored. Truncating in the
-  // project tz instead lands ~half a day off and silently drops the last UTC
-  // day of the window — under-counting membership AND the count near the end.
-  const timeClause =
-    startDate && endDate
-      ? `event_date >= toStartOfDay(toTimeZone(toDateTime(${sqlstring.escape(startDate)}, ${sqlstring.escape(tz)}), 'UTC')) AND event_date <= toStartOfDay(toTimeZone(toDateTime(${sqlstring.escape(endDate)}, ${sqlstring.escape(tz)}), 'UTC'))`
-      : `event_date >= toStartOfDay(now() - INTERVAL ${RANGE_TO_DAYS[range ?? '30d'] ?? 30} DAY)`;
-
-  const parts = [
-    `project_id = ${sqlstring.escape(projectId)}`,
-    `name IN (${names})`,
-    timeClause,
-  ];
-
-  if (active) {
-    const key = active.name!.replace(/^properties\./, '');
-    parts.push(`property_key = ${sqlstring.escape(key)}`);
-    parts.push(operatorClause('property_value', active.operator, active.value!));
-  }
-
-  return parts.join(' AND ');
-}
-
-// v2-backed behavioural subquery — a drop-in replacement for the `events`
-// subquery. Same shape (`SELECT DISTINCT profile_id … WHERE …`), so the outer
-// profiles query is untouched: the "Last seen" column stays `profiles.created_at`
-// (precise, windowed, sorted) exactly as PR #371, and the created_at seen-window
-// prunes profiles so feeding the id-set into `profiles FINAL` stays fast
-// (~350ms measured vs ~7s for the events scan).
-function buildBehavioralV2Subquery(
-  projectId: string,
-  eventNames: string[],
-  filters: IChartEventFilter[],
-  range: string | undefined,
-  startDate: string | null | undefined,
-  endDate: string | null | undefined,
-  tz: string,
-  eventCount: IProfileEventCount | undefined,
-): string {
-  const where = buildBehavioralV2WhereClause(
-    projectId,
-    eventNames,
-    filters,
-    range,
-    startDate,
-    endDate,
-    tz,
-  );
-  // Apply the same exact-window clamp + count threshold as the two-step path, so
-  // the search+behavioral list (which routes through here, not the two-step)
-  // matches the count and honours "OP N times". Without a HAVING, a plain
-  // DISTINCT is enough and cheaper.
-  const having = buildBehavioralV2Having(startDate, endDate, tz, eventCount);
-  if (having) {
-    return `SELECT profile_id FROM ${TABLE_NAMES.profile_event_property_summary_v2} WHERE ${where} GROUP BY profile_id ${having}`;
-  }
-  return `SELECT DISTINCT profile_id FROM ${TABLE_NAMES.profile_event_property_summary_v2} WHERE ${where}`;
-}
-
 // The behavioural membership id-set: profiles who did the event(s) (with the
-// event-property filters + count threshold), as an `IN (…)` subquery. Routes to
-// v2 when allowed, else raw events. Shared by the list (buildSql) and the count
-// so they can never disagree on membership.
+// event-property filters + count threshold), as an `IN (…)` subquery over raw
+// events. Shared by the list (buildSql) and the count so they can never
+// disagree on membership.
 function buildBehavioralIdSubquery(
   projectId: string,
   eventNames: string[],
@@ -492,18 +359,6 @@ function buildBehavioralIdSubquery(
   tz: string,
   eventCount: IProfileEventCount | undefined,
 ): string {
-  if (canRouteBehavioralToV2(projectId, eventFilters, range, startDate)) {
-    return buildBehavioralV2Subquery(
-      projectId,
-      eventNames,
-      eventFilters,
-      range,
-      startDate,
-      endDate,
-      tz,
-      eventCount,
-    );
-  }
   const names = eventNames.map((e) => sqlstring.escape(e)).join(',');
   const parts = [
     `project_id = ${sqlstring.escape(projectId)}`,
@@ -517,137 +372,9 @@ function buildBehavioralIdSubquery(
     : `SELECT DISTINCT profile_id FROM ${TABLE_NAMES.events} WHERE ${parts.join(' AND ')}`;
 }
 
-// HAVING clause for the v2 behavioural path. Two jobs:
-//  1. EXACT-window clamp on `last_event_time` (stored at ms precision, UTC).
-//     The `event_date` WHERE bound is UTC-day granular and over-includes the
-//     partial edge days (e.g. a 09:00→13:59 IST window leaks 05:30 IST / next-
-//     day 05:29 IST rows). Clamping the merged max to the exact instant window
-//     makes membership + the displayed "Last seen" strictly "last did the event
-//     WITHIN the window". Straddlers whose last event is after the window are
-//     excluded (their last activity isn't in-window) — this is the intended
-//     "who did this in this window" semantic, and it's why the clamped count is
-//     lower than the UTC-day count.
-//  2. Optional "≥ N times" threshold on the summed count.
-// Both reference merge-state aggregates, so this is valid in any GROUP BY
-// profile_id context (list rank query AND the count subquery).
-function buildBehavioralV2Having(
-  startDate: string | null | undefined,
-  endDate: string | null | undefined,
-  tz: string,
-  eventCount: IProfileEventCount | undefined,
-): string {
-  const parts: string[] = [];
-  if (startDate && endDate) {
-    parts.push(
-      `maxMerge(last_event_time) >= toDateTime(${sqlstring.escape(startDate)}, ${sqlstring.escape(tz)})`,
-      `maxMerge(last_event_time) <= toDateTime(${sqlstring.escape(endDate)}, ${sqlstring.escape(tz)})`,
-    );
-  }
-  const countClause = countHavingClause('countMerge(event_count)', eventCount);
-  if (countClause) parts.push(countClause);
-  return parts.length ? `HAVING ${parts.join(' AND ')}` : '';
-}
-
-// Two-step v2 behavioural list — "Last seen" = the EXACT last time the profile
-// did the event with the property, sorted by it.
-//
-// v2 stores `maxState(created_at) AS last_event_time` per
-// (project_id, name, property_key, property_value, profile_id), so
-// `maxMerge(last_event_time)` is the real ms-precision last-event timestamp
-// (UTC), NOT the day-granular `event_date` bucket. (event_date is only the
-// GROUP BY key / partition prune.)
-//
-// Step 1 ranks INSIDE v2 (group/sort/limit on the property-prefix range) and
-// returns only one page of (profile_id, last_seen). Step 2 hydrates just those
-// ids from `profiles` by exact PK — so a huge match set never touches
-// `profiles FINAL`. Step 3 emits in rank order with createdAt overridden to
-// last_seen.
-//
-// Deliberately NO is_external filter: the behavioural view mixes anonymous +
-// identified profiles (a profile can do the event pre- and post-identify, and
-// v2's profile_id is anon device_id before identify). Membership here matches
-// getProfileListCount, which also counts uniq(profile_id) over v2 with no
-// is_external.
-async function getBehavioralV2ProfileList(opts: {
-  projectId: string;
-  eventNames: string[];
-  filters: IChartEventFilter[];
-  range: string | undefined;
-  startDate: string | null | undefined;
-  endDate: string | null | undefined;
-  tz: string;
-  take: number;
-  offset: number;
-  orderDir: 'ASC' | 'DESC';
-  eventCount?: IProfileEventCount;
-}): Promise<IServiceProfile[]> {
-  const where = buildBehavioralV2WhereClause(
-    opts.projectId,
-    opts.eventNames,
-    opts.filters,
-    opts.range,
-    opts.startDate,
-    opts.endDate,
-    opts.tz,
-  );
-  // Exact-window clamp on last_event_time + optional "≥ N times". See
-  // buildBehavioralV2Having — makes "Last seen" strictly within the window.
-  const having = buildBehavioralV2Having(
-    opts.startDate,
-    opts.endDate,
-    opts.tz,
-    opts.eventCount,
-  );
-
-  // Step 1 — rank in v2. All the heavy lifting (aggregate + sort + limit)
-  // happens on the property-prefix range; only `take` rows come back.
-  const ranked = await chQuery<{ profile_id: string; last_seen: string }>(
-    `SELECT profile_id, maxMerge(last_event_time) AS last_seen
-     FROM ${TABLE_NAMES.profile_event_property_summary_v2}
-     WHERE ${where}
-     GROUP BY profile_id
-     ${having}
-     ORDER BY last_seen ${opts.orderDir}
-     LIMIT ${opts.take} OFFSET ${opts.offset}`,
-    undefined,
-    true,
-  );
-  if (ranked.length === 0) return [];
-
-  // Step 2 — hydrate this page by id via getProfiles (GROUP BY id + any/
-  // last_value, NO FINAL). FINAL here is catastrophic: `profiles FINAL WHERE id
-  // IN (50)` merges across every monthly partition (~17M rows / ~2.1s on prod),
-  // dwarfing the rank query; the no-FINAL aggregation returns the same result
-  // in ~190ms.
-  const ids = ranked.map((r) => r.profile_id);
-  const hydrated = await getProfiles(ids, opts.projectId);
-  const byId = new Map(hydrated.map((p) => [p.id, p]));
-
-  // Step 3 — emit in v2 rank order with "Last seen" = last_seen (exact UTC ms).
-  // A ranked id with no profile row yet (event seen, profile never upserted)
-  // still shows so the page stays full and consistent with the count.
-  return ranked.map(({ profile_id, last_seen }) => {
-    const createdAt = convertClickhouseDateToJs(last_seen);
-    const p = byId.get(profile_id);
-    if (p) return { ...p, createdAt };
-    return {
-      id: profile_id,
-      email: '',
-      avatar: '',
-      firstName: '',
-      lastName: '',
-      createdAt,
-      isExternal: false,
-      projectId: opts.projectId,
-      properties: {},
-    };
-  });
-}
-
-// Two-step behavioural list on the RAW events table — the fallback for anything
-// v2 can't serve (name-only, multi-key, non-allowlisted). Same shape as the v2
-// two-step: rank profiles by the exact last-event time (max(created_at)) INSIDE
-// events, LIMIT to one page, then hydrate. Two wins over the old buildSql path:
+// Two-step behavioural list on the RAW events table. Rank profiles by the exact
+// last-event time (max(created_at)) INSIDE events, LIMIT to one page, then
+// hydrate. Two wins over the old buildSql path:
 //  1. "Last seen" = the real last EVENT time (not profiles.created_at, which is
 //     the profile-record write time and can be months stale).
 //  2. It never feeds a huge id-set into `profiles FINAL` — it ranks+limits in
@@ -914,32 +641,13 @@ export async function getProfileList({
   const tz =
     (await getOrganizationByProjectIdCached(projectId))?.timezone || 'UTC';
 
-  // Behavioural + v2-routable + no free-text search → two-step: rank by exact
-  // last-event time in v2, hydrate the page. "Last seen" becomes the true last
-  // time the profile did the event with the property (not profiles.created_at).
-  // Search is a separate mode (id/fuzzy) and keeps the subquery-swap path below.
   // Behavioural + no search + no profile.* filter → a two-step that ranks by
-  // the exact last-EVENT time and hydrates one page. "Last seen" = event time
-  // on both branches. profile.* filters (need the outer profiles query) and
-  // search (filters profiles) fall through to buildSql below.
+  // the exact last-EVENT time in events and hydrates one page. "Last seen" =
+  // event time. profile.* filters (need the outer profiles query) and search
+  // (filters profiles) fall through to buildSql below.
   // `cursor` is already the row offset ((page-1)*take) — do NOT multiply again.
   const offset = Math.max(0, cursor ?? 0);
   if (!search && !profileFilters.length && eventNames?.length) {
-    if (canRouteBehavioralToV2(projectId, eventFilters, range, startDate)) {
-      return getBehavioralV2ProfileList({
-        projectId,
-        eventNames,
-        filters: eventFilters,
-        range,
-        startDate,
-        endDate,
-        tz,
-        take,
-        offset,
-        orderDir,
-        eventCount,
-      });
-    }
     return getBehavioralEventsProfileList({
       projectId,
       eventNames,
@@ -1135,25 +843,8 @@ export async function getProfileListCount({
     : null;
 
   // FAST PATH — behavioural with no profile.* filter and no search: count the
-  // event id-set directly (v2 HLL / grouped count), matching the two-step list.
+  // event id-set directly (grouped count over events), matching the two-step list.
   if (behavioralSubquery && !profileFilters.length && !search) {
-    if (canRouteBehavioralToV2(projectId, eventFilters, range, startDate)) {
-      const where = buildBehavioralV2WhereClause(
-        projectId,
-        eventNames!,
-        eventFilters,
-        range,
-        startDate,
-        endDate,
-        tz,
-      );
-      const having = buildBehavioralV2Having(startDate, endDate, tz, eventCount);
-      const sql = having
-        ? `SELECT count() as count FROM (SELECT profile_id FROM ${TABLE_NAMES.profile_event_property_summary_v2} WHERE ${where} GROUP BY profile_id ${having})`
-        : `SELECT uniq(profile_id) as count FROM ${TABLE_NAMES.profile_event_property_summary_v2} WHERE ${where}`;
-      const data = await chQuery<{ count: number }>(sql, undefined, true);
-      return data[0]?.count ?? 0;
-    }
     const data = await chQuery<{ count: number }>(
       `SELECT count() as count FROM (${behavioralSubquery})`,
       undefined,

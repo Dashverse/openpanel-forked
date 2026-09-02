@@ -25,12 +25,6 @@ import { db } from '../prisma-client';
 import { getSelectPropertyKey } from './chart.service';
 import { operatorClause } from './filter-operators';
 
-// v2 property MV (profile_event_property_summary_v2) is anon-inclusive but only
-// backfilled from this date forward; June/pre-July is dirty/partial. Property
-// cohorts whose timeframe STARTS on/after this route to v2 (all projects); older
-// ones fall back to the anon-excluded v1 MV. Env-overridable coverage date.
-const COHORTS_V2_START_DATE = process.env.COHORTS_V2_START_DATE || '2026-07-01';
-
 /**
  * Build time constraint SQL from timeframe
  */
@@ -55,34 +49,6 @@ function buildTimeConstraint(timeframe: Timeframe): string {
       return `created_at >= toDate('${start}')`;
     }
   }
-}
-
-/**
- * The UTC start day of a criterion's timeframe. Relative "Nd" resolves to
- * N days before today; absolute uses its `start`. Used only to gate v1 vs v2.
- */
-function criteriaTimeframeStart(timeframe: Timeframe): Date {
-  if (timeframe.type === 'relative') {
-    const match = timeframe.value.match(/^(\d+)d$/);
-    const days = match ? Number.parseInt(match[1]!, 10) : 0;
-    const d = new Date();
-    d.setUTCDate(d.getUTCDate() - days);
-    return d;
-  }
-  return new Date(`${timeframe.start}T00:00:00Z`);
-}
-
-/**
- * Property cohorts route to the anon-inclusive v2 MV only when the whole
- * timeframe sits within v2's coverage window (start >= COHORTS_V2_START_DATE);
- * otherwise fall back to v1 so we never read a partial/absent v2 range.
- */
-function canRouteCohortToV2(_criteria: EventCriteria): boolean {
-  // RETIRED: profile_event_property_summary_v2 is being dropped. Property
-  // cohorts now serve from raw `events` + materialized columns (the fallback
-  // branch below, resolved via getSelectPropertyKey) — anon-inclusive and fast
-  // on materialized keys. Always fall through to events.
-  return false;
 }
 
 /**
@@ -145,83 +111,26 @@ export function buildEventCriteriaQuery(
   const eventsPrefilter = profileIdPrefilter
     ? `AND ${eventsPid} IN (${profileIdPrefilter})`
     : '';
-  // The property-summary MV has NO device_id column, so resolve via profile_id
-  // (valid post-2026-08-24: proxy #107 made anon profile_id == $device_id ==
-  // alias key). `mvPid`/`mvPrefilter` are computed inside the property branch
-  // below, once the concrete `propertyTable` (v1 vs v2) is known, so the raw
-  // column can be qualified with that table.
 
   // Check if there are event property filters
   const hasEventPropertyFilters = filters.some(
     (f) => f.name.startsWith('properties.') && !f.name.startsWith('profile.properties.')
   );
 
-  // PROPERTY criteria ("did X where flag=Y").
-  //   - v2 window  → anon-inclusive `profile_event_property_summary_v2` MV
-  //     (exploded property_key/property_value schema, fast).
-  //   - pre-v2     → the v1 property MV is RETIRED (anon-EXCLUDING, `profile_id
-  //     != device_id`). Fall through to raw `events` with a `properties[key]`
-  //     Map predicate: anon-inclusive and correct, never the undercounting v1 MV.
+  // PROPERTY criteria ("did X where flag=Y") → raw `events` with a
+  // `properties[key]` Map predicate: anon-inclusive and correct. Resolve each
+  // property to its MATERIALIZED column when one exists (indexed persisted
+  // column, ~80× faster than reading the `properties` Map over a wide range —
+  // e.g. a `source` cohort over showOpen scanned 465GB/40s via the Map vs
+  // 4.4GB/0.5s via the column); getSelectPropertyKey falls back to
+  // `properties['key']` otherwise. Values are stored identically in both forms
+  // (e.g. JSON-quoted `"base"`), so the same operatorClause value applies. Uses
+  // created_at + plain count() for frequency (no event_date/countMerge).
   if (hasEventPropertyFilters) {
     const propertyFilters = filters.filter((f) =>
       f.name.startsWith('properties.'),
     );
 
-    if (canRouteCohortToV2(criteria)) {
-      const propertyTable = TABLE_NAMES.profile_event_property_summary_v2;
-      // Resolve via profile_id, QUALIFIED with the concrete propertyTable so the
-      // raw column can't bind to the `AS profile_id` output alias (see eventsPid).
-      const mvPid = resolve
-        ? resolvedProfileIdSql(projectId, `${propertyTable}.profile_id`)
-        : 'profile_id';
-      const mvPrefilter = profileIdPrefilter
-        ? `AND ${mvPid} IN (${profileIdPrefilter})`
-        : '';
-
-      // One `(property_key = k AND <value predicate>)` per filter, OR'd together.
-      // operatorClause handles ALL operators (contains/doesNotContain/gt/regex/…).
-      const propertyConditions = propertyFilters
-        .map((filter) => {
-          const propertyKey = filter.name.replace('properties.', '');
-          const { value, operator } = filter;
-          return `(property_key = ${sqlstring.escape(propertyKey)} AND ${operatorClause('property_value', operator, value)})`;
-        })
-        .join(' OR ');
-
-      if (frequency) {
-        const frequencyOp = getFrequencyOperator(frequency);
-        return `
-        SELECT ${mvPid} AS profile_id
-        FROM ${propertyTable}
-        WHERE project_id = ${sqlstring.escape(projectId)}
-          AND name = ${sqlstring.escape(name)}
-          AND ${timeConstraint.replace('created_at', 'event_date')}
-          AND (${propertyConditions})
-          ${mvPrefilter}
-        GROUP BY ${mvPid}
-        HAVING countMerge(event_count) ${frequencyOp}
-      `;
-      }
-
-      return `
-      SELECT DISTINCT ${mvPid} AS profile_id
-      FROM ${propertyTable}
-      WHERE project_id = ${sqlstring.escape(projectId)}
-        AND name = ${sqlstring.escape(name)}
-        AND ${timeConstraint.replace('created_at', 'event_date')}
-        AND (${propertyConditions})
-        ${mvPrefilter}
-    `;
-    }
-
-    // Pre-v2 window: retired v1 MV → raw events. Resolve each property to its
-    // MATERIALIZED column when one exists (indexed persisted column, ~80× faster
-    // than reading the `properties` Map over a wide range — e.g. a `source`
-    // cohort over showOpen scanned 465GB/40s via the Map vs 4.4GB/0.5s via the
-    // column); getSelectPropertyKey falls back to `properties['key']` otherwise.
-    // Values are stored identically in both forms (e.g. JSON-quoted `"base"`),
-    // so the same operatorClause value applies. Uses created_at + plain count()
-    // for frequency (no event_date/countMerge).
     const eventsPropertyConditions = propertyFilters
       .map((filter) => {
         const { value, operator } = filter;
@@ -256,12 +165,10 @@ export function buildEventCriteriaQuery(
     `;
   }
 
-  // NAME-ONLY criteria ("did X", any N×) → raw events. The property MV explodes
-  // each event into one row per property (ARRAY JOIN), so countMerge over it
-  // massively overcounts frequency; and cohort_events_mv is anon-excluded. Raw
-  // events is exact for any frequency, anon-inclusive, and faster than v2 here
-  // (name is an effective sort-key prefix via the proj_funnel projection). Uses
-  // created_at + plain count() — no event_date/countMerge rewrite.
+  // NAME-ONLY criteria ("did X", any N×) → raw events. cohort_events_mv is
+  // anon-excluded; raw events is exact for any frequency, anon-inclusive, and
+  // fast here (name is an effective sort-key prefix via the proj_funnel
+  // projection). Uses created_at + plain count() — no event_date/countMerge.
   if (frequency) {
     const frequencyOp = getFrequencyOperator(frequency);
 
