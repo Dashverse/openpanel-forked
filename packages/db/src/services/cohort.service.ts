@@ -77,10 +77,12 @@ function criteriaTimeframeStart(timeframe: Timeframe): Date {
  * timeframe sits within v2's coverage window (start >= COHORTS_V2_START_DATE);
  * otherwise fall back to v1 so we never read a partial/absent v2 range.
  */
-function canRouteCohortToV2(criteria: EventCriteria): boolean {
-  const start = criteriaTimeframeStart(criteria.timeframe);
-  const gate = new Date(`${COHORTS_V2_START_DATE}T00:00:00Z`);
-  return start.getTime() >= gate.getTime();
+function canRouteCohortToV2(_criteria: EventCriteria): boolean {
+  // RETIRED: profile_event_property_summary_v2 is being dropped. Property
+  // cohorts now serve from raw `events` + materialized columns (the fallback
+  // branch below, resolved via getSelectPropertyKey) — anon-inclusive and fast
+  // on materialized keys. Always fall through to events.
+  return false;
 }
 
 /**

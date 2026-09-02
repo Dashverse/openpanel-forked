@@ -15,6 +15,10 @@ import {
   formatClickhouseDate,
 } from '../clickhouse/client';
 import { createSqlBuilder } from '../sql-builder';
+// getSelectPropertyKey resolves `properties.X` to its MATERIALIZED column when
+// one exists (else the raw Map). Imported at runtime only (used in query
+// builders), and chart.service does not import profile.service, so no cycle.
+import { getSelectPropertyKey } from './chart.service';
 import { getOrganizationByProjectIdCached } from './organization.service';
 
 export type IProfileMetrics = {
@@ -310,27 +314,12 @@ function canRouteBehavioralToV2(
   range: string | undefined,
   startDate: string | null | undefined,
 ): boolean {
-  if (!PROFILES_BEHAVIORAL_V2_PROJECTS.has(projectId)) return false;
-  // Parse the naive wall-clock as UTC so the comparison matches START_DATE's
-  // frame (a ~few-hours tz slop at the boundary only flips slow-vs-fast routing,
-  // never correctness — the fallback path is also correct).
-  const queryStart = startDate
-    ? new Date(`${startDate.replace(' ', 'T')}Z`)
-    : new Date(Date.now() - (RANGE_TO_DAYS[range ?? '30d'] ?? 30) * 86400_000);
-  if (Number.isNaN(queryStart.getTime())) return false;
-  if (queryStart < PROFILES_BEHAVIORAL_V2_START_DATE) return false;
-  const active = (filters ?? []).filter((f) => f.name && f.value?.length);
-  // Require EXACTLY ONE properties.* filter. v2 is keyed by
-  // (project_id, name, property_key, property_value, …) so it only wins when we
-  // can pin property_key+property_value for a prefix scan (~345ms). With ZERO
-  // property filters ("did event X at all"), v2 is the WRONG table: each event
-  // is ARRAY JOIN-exploded into one row per property, so a name-only scan reads
-  // ~10× the event volume across every property combo — far slower than the
-  // events fallback. So: 0 filters → events; >1 filters → needs INTERSECT
-  // (deferred); exactly 1 properties.* → v2.
-  if (active.length !== 1) return false;
-  if (!active[0]!.name!.startsWith('properties.')) return false;
-  return true;
+  // RETIRED: profile_event_property_summary_v2 is being dropped. The Profiles
+  // behavioral filter now always uses raw `events`; the events fallback below
+  // resolves each property to its MATERIALIZED column (via getSelectPropertyKey
+  // in eventFilterClauses), so materialized-key filters are fast (~74ms) and
+  // anon-inclusive. Always fall through to events.
+  return false;
 }
 
 // Full operator support for a value filter, mirroring chart.service.ts. `col` is
@@ -759,7 +748,11 @@ function eventFilterClauses(filters: IChartEventFilter[]): string[] {
     if (!f.name || !f.value?.length) continue;
     let col: string;
     if (f.name.startsWith('properties.')) {
-      col = `properties[${sqlstring.escape(f.name.replace(/^properties\./, ''))}]`;
+      // Resolve to the MATERIALIZED column when one exists (indexed, ~74ms on
+      // events) instead of the raw `properties` Map (the old ~2-8s scan). Same
+      // helper charts/cohorts use; falls back to properties['key'] when the key
+      // isn't materialized.
+      col = getSelectPropertyKey(f.name);
     } else {
       // Bare event column — must be a known column (see EVENT_FILTER_COLUMNS).
       if (!EVENT_FILTER_COLUMNS.has(f.name)) continue;

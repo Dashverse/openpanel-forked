@@ -1074,21 +1074,13 @@ export async function getChartSql({
   // has (project_id, name, property_key, property_value, ...) as sort-key
   // prefix — ~140x faster than the events-table skip-index scan (0.38s vs
   // 52.4s measured on dashreels 30-day logIn + type='truecaller').
-  if (
-    !customEvent &&
-    canUsePropertyMV(event, breakdowns, interval, startDate, projectId)
-  ) {
-    return getChartSqlFromPropertyMV({
-      event,
-      breakdowns,
-      interval,
-      startDate,
-      endDate,
-      projectId,
-      timezone,
-      limit,
-    });
-  }
+  // RETIRED: property-filter/breakdown charts no longer read the v2 property MV
+  // (profile_event_property_summary_v2 is being dropped — its per-(profile,key,
+  // value) key made it 3.33 TiB / the #1 merge consumer for ~9 reads/day). They
+  // fall through to the events path below, which resolves each property to its
+  // MATERIALIZED column via getSelectPropertyKey — anon-inclusive, ~74ms on
+  // materialized keys, and faster than the MV on uniq. canUsePropertyMV /
+  // getChartSqlFromPropertyMV are now dead and can be deleted in a cleanup.
 
   const {
     sb,
