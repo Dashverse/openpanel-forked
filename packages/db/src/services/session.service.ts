@@ -751,8 +751,14 @@ export async function batchSessionReplayDuration(
   try {
     const inList = sessionIds.map((id) => sqlstring.escape(id)).join(',');
     const rows = await chQuery<{ session_id: string; duration_ms: string }>(
+      // Active recording time = the sum of each chunk's OWN span, not
+      // max(ended_at) - min(started_at). The wall-clock envelope over-counts
+      // badly: it includes idle gaps between chunks (the recorder pauses while
+      // the DOM is static) and spans every tab, so a mostly-idle 30-min session
+      // with ~25s of real activity showed "29:03". Summing per-chunk spans
+      // yields the length the player actually plays (idle excluded).
       `SELECT session_id,
-              toUnixTimestamp64Milli(max(ended_at)) - toUnixTimestamp64Milli(min(started_at)) AS duration_ms
+              sum(toUnixTimestamp64Milli(ended_at) - toUnixTimestamp64Milli(started_at)) AS duration_ms
        FROM ${TABLE_NAMES.session_replay_chunks}
        WHERE project_id = ${sqlstring.escape(projectId)}
          AND session_id IN (${inList})

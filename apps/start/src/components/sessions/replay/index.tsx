@@ -285,7 +285,9 @@ function ReplayContent({
       projectId,
       sessionId,
       filters: [],
-      columnVisibility: {},
+      // Request window_id so the feed can scope events to the current tab
+      // (with an empty-string fallback for backend / pre-window_id events).
+      columnVisibility: { windowId: true },
     })
   );
 
@@ -306,7 +308,14 @@ function ReplayContent({
     trpc.session.replayMeta.queryOptions({ sessionId, projectId }),
   );
 
-  const events = eventsData?.data ?? [];
+  // Scope events to the tab (window) being played. Events with an empty
+  // window_id — backend events, and every event in a pre-window_id (legacy)
+  // session — always show. That empty-string arm IS the fallback: a legacy
+  // session has windowId=undefined and all events '' → the filter is a no-op
+  // and you get today's session-wide, timestamp-ordered behaviour.
+  const events = (eventsData?.data ?? []).filter(
+    (e) => !windowId || !e.windowId || e.windowId === windowId,
+  );
   // Memoize the flat events array so its identity is stable across re-renders
   // (replayMeta landing, buffering state flipping, etc.) — otherwise rrweb's
   // useEffect would tear down and recreate the player on every parent render,
