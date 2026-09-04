@@ -12,7 +12,6 @@ export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEve
   const { startTime, isReady, seek } = useReplayContext();
   const currentTime = useCurrentTime(100);
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  const prevCountRef = useRef(0);
 
   // Pre-sort events by offset once when events/startTime changes.
   // This is the expensive part — done once, not on every tick.
@@ -40,23 +39,22 @@ export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEve
     return lo;
   }, [sortedEvents, currentTime]);
 
-  const visibleEvents = sortedEvents.slice(0, visibleCount);
-  const currentEventId = visibleEvents[visibleCount - 1]?.event.id ?? null;
+  // Show the WHOLE journey up front (PostHog-style): every event stays visible
+  // and clickable so you can jump forward — not just events up to the playhead.
+  // `currentIndex` (last event at/under the current time) drives the highlight +
+  // auto-scroll only.
+  const currentIndex = visibleCount - 1;
+  const currentEventId = sortedEvents[currentIndex]?.event.id ?? null;
+  const currentRowRef = useRef<HTMLDivElement | null>(null);
 
+  // Keep the current event in view as playback advances (block: 'nearest' only
+  // scrolls when it's actually off-screen, so it rarely fights manual scrolling).
   useEffect(() => {
-    const viewport = viewportRef.current;
-    if (!viewport || visibleEvents.length === 0) return;
-
-    const isNewItem = visibleEvents.length > prevCountRef.current;
-    prevCountRef.current = visibleEvents.length;
-
-    requestAnimationFrame(() => {
-      viewport.scrollTo({
-        top: viewport.scrollHeight,
-        behavior: isNewItem ? 'smooth' : 'instant',
-      });
+    currentRowRef.current?.scrollIntoView({
+      block: 'nearest',
+      behavior: 'smooth',
     });
-  }, [visibleEvents.length]);
+  }, [currentEventId]);
 
   return (
     <BrowserChrome
@@ -66,21 +64,26 @@ export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEve
     >
       <ScrollArea className="flex-1 min-h-0" ref={viewportRef}>
         <div className="flex w-full flex-col">
-          {visibleEvents.map(({ event, offsetMs }) => (
-            <div
-              key={event.id}
-              className="animate-in fade-in-0 slide-in-from-bottom-3 min-w-0 duration-300 fill-mode-both"
-            >
-              <ReplayEventItem
-                event={event}
-                isCurrent={event.id === currentEventId}
-                onClick={() => seek(Math.max(0, offsetMs))}
-              />
-            </div>
-          ))}
-          {!replayLoading && visibleEvents.length === 0 && (
+          {sortedEvents.map(({ event, offsetMs }) => {
+            const isCurrent = event.id === currentEventId;
+            return (
+              <div
+                key={event.id}
+                ref={isCurrent ? currentRowRef : undefined}
+                className="min-w-0"
+              >
+                <ReplayEventItem
+                  event={event}
+                  isCurrent={isCurrent}
+                  // Seek to 1s BEFORE the event (PostHog) so you see the lead-up.
+                  onClick={() => seek(Math.max(0, offsetMs - 1000))}
+                />
+              </div>
+            );
+          })}
+          {!replayLoading && sortedEvents.length === 0 && (
             <div className="py-8 text-center text-sm text-muted-foreground">
-              Events will appear as the replay plays.
+              No events in this recording.
             </div>
           )}
           {replayLoading &&

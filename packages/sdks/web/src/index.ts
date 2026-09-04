@@ -69,6 +69,52 @@ export class OpenPanel extends OpenPanelBase {
    */
   private windowId?: string;
 
+  /** Subscribers notified whenever windowId changes (init + session rotation). */
+  private windowIdCallbacks: Array<(windowId: string) => void> = [];
+
+  /**
+   * Current per-tab window_id (undefined on the server / before init). Read
+   * this once after `new OpenPanel(...)` for the initial value, then subscribe
+   * via `onWindowIdChanged` — window_id rotates on session idle-rotation, so a
+   * single read goes stale.
+   */
+  public getWindowId(): string | undefined {
+    return this.windowId;
+  }
+
+  /**
+   * Subscribe to window_id changes (fires on session idle-rotation). Returns an
+   * unsubscribe fn. Used to keep a Mixpanel super-property (`_op_window_id`) in
+   * sync so proxied business events land on the exact tab's replay.
+   */
+  public onWindowIdChanged(cb: (windowId: string) => void): () => void {
+    this.windowIdCallbacks.push(cb);
+    return () => {
+      this.windowIdCallbacks = this.windowIdCallbacks.filter((c) => c !== cb);
+    };
+  }
+
+  /**
+   * Set window_id, mirror it into sessionStorage (per-tab — lets app code read
+   * it without a handle to this instance), and notify subscribers.
+   */
+  private setWindowId(windowId: string): void {
+    this.windowId = windowId;
+    try {
+      sessionStorage.setItem('_op_window_id', windowId);
+    } catch {
+      // sessionStorage unavailable (SSR / sandboxed iframe / private mode) —
+      // getWindowId()/onWindowIdChanged still work in-memory.
+    }
+    for (const cb of this.windowIdCallbacks) {
+      try {
+        cb(windowId);
+      } catch {
+        // A subscriber threw — never let it break rotation or siblings.
+      }
+    }
+  }
+
   /**
    * Unsubscribe for the session-rotation listener registered in
    * maybeStartReplay(). Captured so stopReplay() can detach it — otherwise a
@@ -92,7 +138,7 @@ export class OpenPanel extends OpenPanelBase {
       this.sessionManager = new SessionIdManager();
       this.sessionId = this.sessionManager.getSessionId();
       // Fresh window_id per SDK init — dies with the tab / page-load.
-      this.windowId = this.newUuid();
+      this.setWindowId(this.newUuid());
       try {
         const pending = sessionStorage.getItem('openpanel-pending-revenues');
         if (pending) {
@@ -252,7 +298,7 @@ export class OpenPanel extends OpenPanelBase {
       // post-rotation recording is fully self-describing — the dashboard
       // groups by window_id and never stitches pre- and post-idle chunks
       // into one continuous timeline.
-      this.windowId = this.newUuid();
+      this.setWindowId(this.newUuid());
       this.log('replay: session rotated, restarting recorder', {
         from: activeSessionId,
         to: newId,
