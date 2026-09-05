@@ -46,7 +46,9 @@ export function ReportGlobalFilters() {
   };
 
   const onChangeCohort = (cohortId: string, filter: IChartEventFilter) => {
-    dispatch(changeGlobalFilter({ ...filter, cohortId }));
+    dispatch(
+      changeGlobalFilter({ ...filter, name: `cohort:${cohortId}`, cohortId }),
+    );
   };
 
   return (
@@ -62,6 +64,9 @@ export function ReportGlobalFilters() {
               <div key={filter.id} className="rounded-lg border bg-def-100">
                 <PureCohortFilterItem
                   filter={filter}
+                  onChangeProperty={(next) =>
+                    dispatch(changeGlobalFilter(next))
+                  }
                   onRemove={onRemove}
                   onChangeOperator={onChangeOperator}
                   onChangeCohort={onChangeCohort}
@@ -76,6 +81,8 @@ export function ReportGlobalFilters() {
               <PureFilterItem
                 filter={filter}
                 eventName="*"
+                categories={['event', 'profile', 'cohort']}
+                onChangeProperty={(next) => dispatch(changeGlobalFilter(next))}
                 onRemove={onRemove}
                 onChangeValue={onChangeValue}
                 onChangeOperator={onChangeOperator}

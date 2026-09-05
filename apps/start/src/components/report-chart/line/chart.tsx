@@ -1,3 +1,4 @@
+import { useNumber } from '@/hooks/use-numer-formatter';
 import { useRechartDataModel } from '@/hooks/use-rechart-data-model';
 import { useVisibleSeries } from '@/hooks/use-visible-series';
 import { useTRPC } from '@/integrations/trpc/react';
@@ -37,9 +38,11 @@ import { useReportChartContext } from '../context';
 
 interface Props {
   data: IChartData;
+  absoluteData?: IChartData;
+  absoluteUnit?: string;
 }
 
-export function Chart({ data }: Props) {
+export function Chart({ data, absoluteData, absoluteUnit }: Props) {
   const {
     report: {
       previous,
@@ -49,6 +52,7 @@ export function Chart({ data }: Props) {
       endDate,
       range,
       lineType,
+      comparison,
       series: reportSeries,
       breakdowns,
     },
@@ -68,7 +72,10 @@ export function Chart({ data }: Props) {
       {},
     ),
   );
-  const { series, setVisibleSeries } = useVisibleSeries(data);
+  const { series, setVisibleSeries } = useVisibleSeries(
+    data,
+    data.series.length,
+  );
   const rechartData = useRechartDataModel(series);
 
   let dotIndex = undefined;
@@ -129,8 +136,13 @@ export function Chart({ data }: Props) {
   }, [series]);
 
   const xAxisProps = useXAxisProps({ interval, hide: hideXAxis });
+  const number = useNumber();
   const yAxisProps = useYAxisProps({
     hide: hideYAxis,
+    tickFormatter:
+      comparison === 'overall'
+        ? (value) => number.formatWithUnit(value, '%')
+        : undefined,
   });
 
   const getMenuItems = useCallback(
@@ -206,7 +218,11 @@ export function Chart({ data }: Props) {
   );
 
   return (
-    <ReportChartTooltip.TooltipProvider references={references.data}>
+    <ReportChartTooltip.TooltipProvider
+      references={references.data}
+      absoluteData={absoluteData}
+      absoluteUnit={absoluteUnit}
+    >
       <ChartClickMenu getMenuItems={getMenuItems}>
         <div className={cn('h-full w-full', isEditMode && 'card p-4')}>
           <ResponsiveContainer>
@@ -241,7 +257,15 @@ export function Chart({ data }: Props) {
               ))}
               <YAxis
                 {...yAxisProps}
-                domain={maxDomain ? [0, maxDomain] : undefined}
+                domain={
+                  comparison === 'overall'
+                    ? ['auto', 1]
+                    : maxDomain
+                      ? [0, maxDomain]
+                      : undefined
+                }
+                allowDecimals={comparison === 'overall'}
+                allowDataOverflow={comparison === 'overall'}
               />
               <XAxis {...xAxisProps} />
               {series.length > 1 && <Legend content={<CustomLegend />} />}
@@ -321,6 +345,7 @@ export function Chart({ data }: Props) {
         {isEditMode && (
           <ReportTable
             data={data}
+            unit={comparison === 'overall' ? '%' : undefined}
             visibleSeries={series}
             setVisibleSeries={setVisibleSeries}
           />

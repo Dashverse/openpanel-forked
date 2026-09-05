@@ -21,8 +21,8 @@ import {
 import { Combobox } from '@/components/ui/combobox';
 import { useFormatDateInterval } from '@/hooks/use-format-date-interval';
 import { fancyMinutes } from '@/hooks/use-numer-formatter';
-import type { IInterval } from '@openpanel/validation';
 import { cn } from '@/utils/cn';
+import type { IInterval } from '@openpanel/validation';
 import { useXAxisProps, useYAxisProps } from '../common/axis';
 import { SerieIcon } from '../common/serie-icon';
 import { SerieName } from '../common/serie-name';
@@ -55,9 +55,10 @@ type TtcItem = {
   ttc: Record<string, number>;
 };
 
-type FunnelSerieWithTtc = RouterOutputs['chart']['funnel']['current'][number] & {
-  timeToConvert?: TtcItem[];
-};
+type FunnelSerieWithTtc =
+  RouterOutputs['chart']['funnel']['current'][number] & {
+    timeToConvert?: TtcItem[];
+  };
 
 type FunnelData = Omit<RouterOutputs['chart']['funnel'], 'current'> & {
   current: FunnelSerieWithTtc[];
@@ -65,9 +66,10 @@ type FunnelData = Omit<RouterOutputs['chart']['funnel'], 'current'> & {
 
 interface Props {
   data: FunnelData;
+  seriesOrder?: string[];
 }
 
-export function FunnelTtcChart({ data }: Props) {
+export function FunnelTtcChart({ data, seriesOrder }: Props) {
   const {
     report: { interval, lineType, ttcAggregation: savedTtcAggregation },
     isEditMode,
@@ -96,9 +98,7 @@ export function FunnelTtcChart({ data }: Props) {
       };
 
       series.forEach((serie, index) => {
-        const ttcItem = serie.timeToConvert?.find(
-          (item) => item.date === date,
-        );
+        const ttcItem = serie.timeToConvert?.find((item) => item.date === date);
         if (ttcItem) {
           point[`serie:${index}:ttcValue`] =
             ttcItem.ttc?.[ttcAggregation] ?? null;
@@ -120,6 +120,7 @@ export function FunnelTtcChart({ data }: Props) {
   return (
     <TtcTooltipProvider
       series={series}
+      seriesOrder={seriesOrder}
       interval={interval ?? 'day'}
       ttcAggregation={ttcAggregation}
     >
@@ -161,7 +162,11 @@ export function FunnelTtcChart({ data }: Props) {
                       <div
                         className="flex items-center gap-1"
                         key={serie.id}
-                        style={{ color: getChartColor(index) }}
+                        style={{
+                          color: getChartColor(
+                            seriesOrder?.indexOf(serie.id) ?? index,
+                          ),
+                        }}
                       >
                         <SerieIcon name={serie.breakdowns ?? []} />
                         <SerieName
@@ -180,10 +185,12 @@ export function FunnelTtcChart({ data }: Props) {
             )}
             <TtcTooltip />
             {series.map((serie, index) => {
-              const color = getChartColor(index);
+              const color = getChartColor(
+                seriesOrder?.indexOf(serie.id) ?? index,
+              );
               return (
                 <Line
-                  key={`serie:${index}:ttcValue`}
+                  key={serie.id}
                   dataKey={`serie:${index}:ttcValue`}
                   stroke={color}
                   type={lineType ?? 'monotone'}
@@ -205,6 +212,7 @@ const { Tooltip: TtcTooltip, TooltipProvider: TtcTooltipProvider } =
     Record<string, any>,
     {
       series: FunnelSerieWithTtc[];
+      seriesOrder?: string[];
       interval: IInterval;
       ttcAggregation: TtcAggregation;
     }
@@ -236,7 +244,11 @@ const { Tooltip: TtcTooltip, TooltipProvider: TtcTooltipProvider } =
                   <div>{formatDate(date)}</div>
                 </ChartTooltipHeader>
               )}
-              <ChartTooltipItem color={getChartColor(index)}>
+              <ChartTooltipItem
+                color={getChartColor(
+                  context.seriesOrder?.indexOf(serie.id) ?? index,
+                )}
+              >
                 <div className="flex items-center gap-1">
                   <SerieIcon name={serie.breakdowns ?? []} />
                   <SerieName

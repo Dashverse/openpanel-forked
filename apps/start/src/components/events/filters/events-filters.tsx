@@ -26,7 +26,8 @@ export function EventsFilters({
   afterEventSlot?: ReactNode;
 } = {}) {
   const { projectId } = useAppParams();
-  const [filters, setFilter, , removeFilter] = useEventQueryFilters();
+  const [filters, setFilter, , removeFilter, replaceFilter] =
+    useEventQueryFilters();
   const [events, setEvents] = useEventQueryNamesFilter();
   const {
     items: eventNames,
@@ -77,9 +78,14 @@ export function EventsFilters({
           if (isCohort) {
             return (
               <CohortFilterRow
-                key={filter.name}
+                key={filter.id}
                 projectId={projectId}
+                event={selectedEvent}
                 filter={filter}
+                exclude={filters
+                  .filter((item) => item.id !== filter.id)
+                  .map((item) => item.name)}
+                onChangeProperty={(next) => replaceFilter(filter.name, next)}
                 onChangeOperator={(operator) => {
                   if (operator !== filter.operator) {
                     setFilter(filter.name, filter.value, operator);
@@ -92,10 +98,14 @@ export function EventsFilters({
 
           return (
             <FilterRow
-              key={filter.name}
+              key={filter.id}
               projectId={projectId}
               event={selectedEvent}
               filter={filter}
+              exclude={filters
+                .filter((item) => item.id !== filter.id)
+                .map((item) => item.name)}
+              onChangeProperty={(next) => replaceFilter(filter.name, next)}
               onChangeOperator={(operator) => {
                 if (operator !== filter.operator) {
                   setFilter(filter.name, filter.value, operator);

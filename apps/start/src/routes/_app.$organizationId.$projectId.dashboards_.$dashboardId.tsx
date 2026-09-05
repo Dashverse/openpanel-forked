@@ -1,3 +1,4 @@
+import { EditDashboardName } from '@/components/dashboard/edit-dashboard-name';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
 import { ReportChart } from '@/components/report-chart';
@@ -519,7 +520,14 @@ function Component() {
   return (
     <PageContainer fluid>
       <PageHeader
-        title={dashboard.name}
+        title={
+          <EditDashboardName
+            key={dashboard.id}
+            id={dashboard.id}
+            name={dashboard.name}
+            projectId={projectId}
+          />
+        }
         className="mb-3"
         actions={
           <>
