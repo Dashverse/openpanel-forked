@@ -1,0 +1,254 @@
+import { toFineReportLayout, toLegacyReportLayout } from '@openpanel/common';
+import { db } from '@openpanel/db';
+import { z } from 'zod';
+import { getProjectAccess } from '../access';
+import {
+  TRPCAccessError,
+  TRPCBadRequestError,
+  TRPCNotFoundError,
+} from '../errors';
+import { protectedProcedure } from '../trpc';
+
+const dashboardInput = z.object({ dashboardId: z.string() });
+const blockInput = z.object({ id: z.string().uuid() });
+const gridItem = z
+  .object({
+    id: z.string().uuid(),
+    kind: z.enum(['report', 'block']),
+    x: z.number().int().min(0).max(11),
+    y: z.number().int().min(0).max(1000000),
+    w: z.number().int().min(2).max(12),
+    h: z.number().int().min(1).max(100000),
+    minW: z.number().int().min(1).max(12).optional(),
+    minH: z.number().int().min(1).max(100000).optional(),
+    maxW: z.number().int().min(1).max(12).optional(),
+    maxH: z.number().int().min(1).max(100000).optional(),
+  })
+  .refine((item) => item.x + item.w <= 12, 'Item extends beyond the dashboard');
+
+async function authorizeDashboard(dashboardId: string, userId: string) {
+  const dashboard = await db.dashboard.findUnique({
+    where: { id: dashboardId },
+  });
+  if (!dashboard) throw TRPCNotFoundError('Dashboard not found');
+  if (!(await getProjectAccess({ projectId: dashboard.projectId, userId }))) {
+    throw TRPCAccessError('You do not have access to this dashboard');
+  }
+  return dashboard;
+}
+
+async function authorizeBlock(id: string, userId: string) {
+  const block = await db.dashboardBlock.findUnique({ where: { id } });
+  if (!block) throw TRPCNotFoundError('Block not found');
+  await authorizeDashboard(block.dashboardId, userId);
+  return block;
+}
+
+async function getGrid(
+  tx: Pick<typeof db, 'report' | 'dashboardBlock'>,
+  dashboardId: string,
+) {
+  const [reports, blocks] = await Promise.all([
+    tx.report.findMany({
+      where: { dashboardId },
+      include: { layout: true },
+    }),
+    tx.dashboardBlock.findMany({
+      where: { dashboardId },
+      orderBy: { createdAt: 'asc' },
+    }),
+  ]);
+  return [
+    ...reports.map((report, index) =>
+      toFineReportLayout(report.id, report.layout, index),
+    ),
+    ...blocks.map(({ id, x, y, w, h, minW, minH }) => ({
+      id,
+      kind: 'block' as const,
+      x,
+      y,
+      w,
+      h,
+      minW,
+      minH,
+    })),
+  ];
+}
+
+export const dashboardBlockProcedures = {
+  listBlocks: protectedProcedure
+    .input(dashboardInput)
+    .query(async ({ input, ctx }) => {
+      await authorizeDashboard(input.dashboardId, ctx.session.userId);
+      return db.dashboardBlock.findMany({
+        where: { dashboardId: input.dashboardId },
+        orderBy: { createdAt: 'asc' },
+      });
+    }),
+  getLayout: protectedProcedure
+    .input(dashboardInput)
+    .query(async ({ input, ctx }) => {
+      await authorizeDashboard(input.dashboardId, ctx.session.userId);
+      return getGrid(db, input.dashboardId);
+    }),
+  createBlock: protectedProcedure
+    .input(dashboardInput.extend({ kind: z.enum(['text', 'divider']) }))
+    .mutation(async ({ input, ctx }) => {
+      await authorizeDashboard(input.dashboardId, ctx.session.userId);
+      return db.$transaction(async (tx) => {
+        const layout = await getGrid(tx, input.dashboardId);
+        const h = input.kind === 'divider' ? 1 : 2;
+        return tx.dashboardBlock.create({
+          data: {
+            dashboardId: input.dashboardId,
+            kind: input.kind,
+            y: Math.max(0, ...layout.map((item) => item.y + item.h)),
+            h,
+            minH: h,
+          },
+        });
+      });
+    }),
+  updateBlock: protectedProcedure
+    .input(
+      blockInput.extend({
+        heading: z.string().max(500),
+        body: z.string().max(50000),
+      }),
+    )
+    .mutation(async ({ input, ctx }) => {
+      const block = await authorizeBlock(input.id, ctx.session.userId);
+      if (block.kind !== 'text')
+        throw TRPCBadRequestError('Dividers do not have text');
+      return db.dashboardBlock.update({
+        where: { id: input.id },
+        data: { heading: input.heading, body: input.body },
+      });
+    }),
+  duplicateBlock: protectedProcedure
+    .input(blockInput)
+    .mutation(async ({ input, ctx }) => {
+      const block = await authorizeBlock(input.id, ctx.session.userId);
+      return db.$transaction(async (tx) => {
+        const layout = await getGrid(tx, block.dashboardId);
+        const { id, createdAt, updatedAt, ...data } = block;
+        return tx.dashboardBlock.create({
+          data: {
+            ...data,
+            y: Math.max(0, ...layout.map((item) => item.y + item.h)),
+          },
+        });
+      });
+    }),
+  deleteBlock: protectedProcedure
+    .input(blockInput)
+    .mutation(async ({ input, ctx }) => {
+      await authorizeBlock(input.id, ctx.session.userId);
+      return db.dashboardBlock.delete({ where: { id: input.id } });
+    }),
+  saveLayout: protectedProcedure
+    .input(dashboardInput.extend({ items: z.array(gridItem).max(1000) }))
+    .mutation(async ({ input, ctx }) => {
+      await authorizeDashboard(input.dashboardId, ctx.session.userId);
+      if (
+        new Set(input.items.map((item) => item.id)).size !== input.items.length
+      )
+        throw TRPCBadRequestError('Duplicate layout items');
+      return db.$transaction(async (tx) => {
+        const [reports, blocks] = await Promise.all([
+          tx.report.findMany({
+            where: {
+              dashboardId: input.dashboardId,
+              id: {
+                in: input.items
+                  .filter((item) => item.kind === 'report')
+                  .map((item) => item.id),
+              },
+            },
+            select: { id: true },
+          }),
+          tx.dashboardBlock.findMany({
+            where: {
+              dashboardId: input.dashboardId,
+              id: {
+                in: input.items
+                  .filter((item) => item.kind === 'block')
+                  .map((item) => item.id),
+              },
+            },
+            select: { id: true, kind: true },
+          }),
+        ]);
+        if (reports.length + blocks.length !== input.items.length)
+          throw TRPCBadRequestError(
+            'All layout items must belong to this dashboard',
+          );
+        for (const item of input.items) {
+          const minH =
+            item.kind === 'report'
+              ? 8
+              : blocks.find((block) => block.id === item.id)?.kind === 'divider'
+                ? 1
+                : 2;
+          if (item.h < minH) throw TRPCBadRequestError('Item is too short');
+          if (item.kind === 'report') {
+            const projected = toLegacyReportLayout({ ...item, minW: 2, minH });
+            const data = {
+              ...projected,
+              fineLayout: {
+                ...projected.fineLayout,
+                layout: { ...projected.fineLayout.layout },
+              },
+              maxW: projected.maxW ?? null,
+              maxH: projected.maxH ?? null,
+            };
+            await tx.reportLayout.upsert({
+              where: { reportId: item.id },
+              create: { reportId: item.id, ...data },
+              update: data,
+            });
+          } else {
+            await tx.dashboardBlock.update({
+              where: { id: item.id },
+              data: {
+                x: item.x,
+                y: item.y,
+                w: item.w,
+                h: item.h,
+                minW: 2,
+                minH,
+              },
+            });
+          }
+        }
+        return { success: true };
+      });
+    }),
+  resetGridLayout: protectedProcedure
+    .input(dashboardInput)
+    .mutation(async ({ input, ctx }) => {
+      await authorizeDashboard(input.dashboardId, ctx.session.userId);
+      return db.$transaction(async (tx) => {
+        await tx.reportLayout.deleteMany({
+          where: { report: { dashboardId: input.dashboardId } },
+        });
+        const reportCount = await tx.report.count({
+          where: { dashboardId: input.dashboardId },
+        });
+        const blocks = await tx.dashboardBlock.findMany({
+          where: { dashboardId: input.dashboardId },
+          orderBy: { createdAt: 'asc' },
+        });
+        let y = Math.ceil(reportCount / 3) * 16;
+        for (const block of blocks) {
+          const h = block.kind === 'divider' ? 1 : 2;
+          await tx.dashboardBlock.update({
+            where: { id: block.id },
+            data: { x: 0, y, w: 12, h, minW: 2, minH: h },
+          });
+          y += h;
+        }
+        return { success: true };
+      });
+    }),
+};

@@ -1,3 +1,4 @@
+import { DashboardBlock } from '@/components/dashboard/dashboard-block';
 import { EditDashboardName } from '@/components/dashboard/edit-dashboard-name';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
@@ -13,9 +14,11 @@ import {
 import { Input } from '@/components/ui/input';
 import { cn } from '@/utils/cn';
 import { createProjectTitle } from '@/utils/title';
+import { DASHBOARD_ROW_HEIGHT, toFineReportLayout } from '@openpanel/common';
 import {
   CopyIcon,
   LayoutPanelTopIcon,
+  MinusIcon,
   MoreHorizontal,
   PlusIcon,
   RefreshCw,
@@ -23,6 +26,7 @@ import {
   SearchIcon,
   Trash,
   TrashIcon,
+  TypeIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -274,6 +278,19 @@ function Component() {
     }),
   );
 
+  const blocksQuery = useQuery(
+    trpc.dashboard.listBlocks.queryOptions(
+      { dashboardId },
+      { refetchOnMount: 'always' },
+    ),
+  );
+  const layoutQuery = useQuery(
+    trpc.dashboard.getLayout.queryOptions(
+      { dashboardId },
+      { refetchOnMount: 'always' },
+    ),
+  );
+
   const queryClient = useQueryClient();
   // Bumped on Reload to remount every ReportChart, which resets the latched
   // lazy-loading state (`once.current`). That way Reload behaves like a fresh
@@ -357,33 +374,76 @@ function Component() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const allReports = reportsQuery.data ?? [];
-  const reports = searchQuery
-    ? allReports.filter((r) =>
-        r.name.toLowerCase().includes(searchQuery.toLowerCase()),
-      )
-    : allReports;
+  const allBlocks = blocksQuery.data ?? [];
+  const search = searchQuery.trim().toLowerCase();
+  const reports = allReports.filter((report) =>
+    report.name.toLowerCase().includes(search),
+  );
+  const blocks = allBlocks.filter((block) =>
+    `${block.heading} ${block.body} ${block.kind}`
+      .toLowerCase()
+      .includes(search),
+  );
+  const itemCount = reports.length + blocks.length;
   const dashboard = dashboardQuery.data;
   const [isGridReady, setIsGridReady] = useState(false);
   const [enableTransitions, setEnableTransitions] = useState(false);
 
-  // Wait for initial render to ensure grid has proper dimensions
   useEffect(() => {
-    if (reports.length > 0 && !isGridReady) {
-      // Small delay to ensure container has rendered with proper width
-      const timer = setTimeout(() => {
-        setIsGridReady(true);
-        // Enable transitions after initial render
-        setTimeout(() => setEnableTransitions(true), 100);
-      }, 0);
+    if (itemCount > 0 && !isGridReady) {
+      const timer = setTimeout(() => setIsGridReady(true), 0);
       return () => clearTimeout(timer);
     }
-  }, [reports.length, isGridReady]);
+  }, [itemCount, isGridReady]);
+  useEffect(() => {
+    if (!isGridReady) return;
+    const timer = setTimeout(() => setEnableTransitions(true), 100);
+    return () => clearTimeout(timer);
+  }, [isGridReady]);
+
+  const refreshGrid = () =>
+    Promise.all([
+      queryClient.invalidateQueries(
+        trpc.dashboard.listBlocks.queryFilter({ dashboardId }),
+      ),
+      queryClient.invalidateQueries(
+        trpc.dashboard.getLayout.queryFilter({ dashboardId }),
+      ),
+    ]);
+  const createBlock = useMutation(
+    trpc.dashboard.createBlock.mutationOptions({
+      onError: handleErrorToastOptions({}),
+      onSuccess: () => {
+        setSearchQuery('');
+        return refreshGrid();
+      },
+    }),
+  );
+  const updateBlock = useMutation(
+    trpc.dashboard.updateBlock.mutationOptions({
+      onError: handleErrorToastOptions({}),
+      onSuccess: refreshGrid,
+    }),
+  );
+  const duplicateBlock = useMutation(
+    trpc.dashboard.duplicateBlock.mutationOptions({
+      onError: handleErrorToastOptions({}),
+      onSuccess: refreshGrid,
+    }),
+  );
+  const deleteBlock = useMutation(
+    trpc.dashboard.deleteBlock.mutationOptions({
+      onError: handleErrorToastOptions({}),
+      onSuccess: refreshGrid,
+    }),
+  );
 
   const reportDeletion = useMutation(
     trpc.report.delete.mutationOptions({
       onError: handleErrorToastOptions({}),
       onSuccess() {
         reportsQuery.refetch();
+        refreshGrid();
         toast('Report deleted');
       },
     }),
@@ -394,124 +454,82 @@ function Component() {
       onError: handleErrorToastOptions({}),
       onSuccess() {
         reportsQuery.refetch();
+        refreshGrid();
         toast('Report duplicated');
       },
     }),
   );
 
   const updateLayout = useMutation(
-    trpc.report.updateLayout.mutationOptions({
+    trpc.dashboard.saveLayout.mutationOptions({
       onError: handleErrorToastOptions({}),
-      onSuccess() {
-        // Silently refetch reports (which includes layouts)
-        reportsQuery.refetch();
-      },
+      onSuccess: refreshGrid,
     }),
   );
-
   const resetLayout = useMutation(
-    trpc.report.resetLayout.mutationOptions({
+    trpc.dashboard.resetGridLayout.mutationOptions({
       onError: handleErrorToastOptions({}),
       onSuccess() {
         toast('Layout reset to default');
-        reportsQuery.refetch();
+        return refreshGrid();
       },
     }),
   );
-
-  // Convert reports to grid layout format for all breakpoints
   const layouts = useMemo(() => {
-    // Default to 3 reports per row (each 4 of 12 cols wide). Reports with a
-    // saved layout keep their own size/position.
-    const baseLayout = reports.map((report, index) => ({
-      i: report.id,
-      x: report.layout?.x ?? (index % 3) * 4,
-      y: report.layout?.y ?? Math.floor(index / 3) * 4,
-      w: report.layout?.w ?? 4,
-      h: report.layout?.h ?? 4,
-      minW: 2,
-      minH: 2,
-    }));
-
-    // Create responsive layouts for different breakpoints
+    const saved = new Map(
+      (layoutQuery.data ?? []).map((item) => [item.id, item]),
+    );
+    const baseLayout = [
+      ...(reportsQuery.data ?? []).map(
+        (report, index) =>
+          saved.get(report.id) ??
+          toFineReportLayout(report.id, report.layout, index),
+      ),
+      ...(blocksQuery.data ?? []).map(
+        (block) =>
+          saved.get(block.id) ?? {
+            id: block.id,
+            kind: 'block' as const,
+            x: block.x,
+            y: block.y,
+            w: block.w,
+            h: block.h,
+            minW: block.minW,
+            minH: block.minH,
+          },
+      ),
+    ].map((item) => ({ ...item, i: item.id }));
     return {
       lg: baseLayout,
       md: baseLayout,
-      sm: baseLayout.map((item) => ({ ...item, w: Math.min(item.w, 6) })),
+      sm: baseLayout.map((item) => ({
+        ...item,
+        w: Math.min(item.w, 6),
+        x: Math.min(item.x, 6 - Math.min(item.w, 6)),
+      })),
       xs: baseLayout.map((item) => ({ ...item, w: 4, x: 0 })),
       xxs: baseLayout.map((item) => ({ ...item, w: 2, x: 0 })),
     };
-  }, [reports]);
-
-  const handleLayoutChange = useCallback((newLayout: Layout[]) => {
-    // This is called during dragging/resizing, we'll save on drag/resize stop
-  }, []);
-
-  const handleDragStop = useCallback(
-    (newLayout: Layout[]) => {
-      // Save each changed layout after drag stops
-      newLayout.forEach((item) => {
-        const report = reports.find((r) => r.id === item.i);
-        if (report) {
-          const oldLayout = report.layout;
-          // Only update if layout actually changed
-          if (
-            !oldLayout ||
-            oldLayout.x !== item.x ||
-            oldLayout.y !== item.y ||
-            oldLayout.w !== item.w ||
-            oldLayout.h !== item.h
-          ) {
-            updateLayout.mutate({
-              reportId: item.i,
-              layout: {
-                x: item.x,
-                y: item.y,
-                w: item.w,
-                h: item.h,
-                minW: item.minW ?? 2,
-                minH: item.minH ?? 2,
-              },
-            });
-          }
-        }
-      });
-    },
-    [reports, updateLayout],
-  );
-
-  const handleResizeStop = useCallback(
-    (newLayout: Layout[]) => {
-      // Save each changed layout after resize stops
-      newLayout.forEach((item) => {
-        const report = reports.find((r) => r.id === item.i);
-        if (report) {
-          const oldLayout = report.layout;
-          // Only update if layout actually changed
-          if (
-            !oldLayout ||
-            oldLayout.x !== item.x ||
-            oldLayout.y !== item.y ||
-            oldLayout.w !== item.w ||
-            oldLayout.h !== item.h
-          ) {
-            updateLayout.mutate({
-              reportId: item.i,
-              layout: {
-                x: item.x,
-                y: item.y,
-                w: item.w,
-                h: item.h,
-                minW: item.minW ?? 2,
-                minH: item.minH ?? 2,
-              },
-            });
-          }
-        }
-      });
-    },
-    [reports, updateLayout],
-  );
+  }, [layoutQuery.data, reportsQuery.data, blocksQuery.data]);
+  const [breakpoint, setBreakpoint] = useState('lg');
+  const saveLayout = (newLayout: Layout[]) => {
+    if (search || updateLayout.isPending) return;
+    const original = layouts.lg;
+    const items = newLayout.flatMap((item) => {
+      const previous = original.find((entry) => entry.id === item.i);
+      if (!previous) return [];
+      return [
+        {
+          ...previous,
+          x: breakpoint === 'lg' || breakpoint === 'md' ? item.x : previous.x,
+          w: breakpoint === 'lg' || breakpoint === 'md' ? item.w : previous.w,
+          y: item.y,
+          h: item.h,
+        },
+      ];
+    });
+    updateLayout.mutate({ dashboardId, items });
+  };
 
   if (!dashboard) {
     return null; // Loading handled by suspense
@@ -531,6 +549,33 @@ function Component() {
         className="mb-3"
         actions={
           <>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  icon={PlusIcon}
+                  disabled={createBlock.isPending}
+                >
+                  Add block
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() =>
+                    createBlock.mutate({ dashboardId, kind: 'text' })
+                  }
+                >
+                  <TypeIcon className="mr-2 size-4" /> Text
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() =>
+                    createBlock.mutate({ dashboardId, kind: 'divider' })
+                  }
+                >
+                  <MinusIcon className="mr-2 size-4" /> Divider
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             <LinkButton
               from={Route.fullPath}
               to={'/$organizationId/$projectId/reports'}
@@ -552,8 +597,7 @@ function Component() {
                       showConfirm({
                         title: 'Reset layout',
                         text: 'Are you sure you want to reset the layout to default? This will clear all custom positioning and sizing.',
-                        onConfirm: () =>
-                          resetLayout.mutate({ dashboardId, projectId }),
+                        onConfirm: () => resetLayout.mutate({ dashboardId }),
                       })
                     }
                   >
@@ -565,7 +609,7 @@ function Component() {
                     onClick={() =>
                       showConfirm({
                         title: 'Delete dashboard',
-                        text: 'Are you sure you want to delete this dashboard? All your reports will be deleted!',
+                        text: 'Are you sure you want to delete this dashboard? All reports, text blocks, and dividers will be deleted!',
                         onConfirm: () =>
                           dashboardDeletion.mutate({ id: dashboardId }),
                       })
@@ -581,13 +625,17 @@ function Component() {
         }
       />
       <div className="row mb-4 flex-wrap items-center gap-2">
-        <OverviewRange />
-        <OverviewInterval />
+        {allReports.length > 0 && (
+          <>
+            <OverviewRange />
+            <OverviewInterval />
+          </>
+        )}
         <div className="row ml-auto gap-2">
           <div className="relative flex items-center">
             <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
             <Input
-              placeholder="Search reports..."
+              placeholder="Search dashboard..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-48"
@@ -618,9 +666,27 @@ function Component() {
         </div>
       </div>
 
-      {allReports.length === 0 ? (
-        <FullPageEmptyState title="No reports" icon={LayoutPanelTopIcon}>
-          <p>You can visualize your data with a report</p>
+      {reportsQuery.isError || blocksQuery.isError || layoutQuery.isError ? (
+        <FullPageEmptyState
+          title="Could not load dashboard"
+          icon={LayoutPanelTopIcon}
+        >
+          <Button
+            onClick={() => {
+              reportsQuery.refetch();
+              refreshGrid();
+            }}
+          >
+            Try again
+          </Button>
+        </FullPageEmptyState>
+      ) : reportsQuery.isLoading ||
+        blocksQuery.isLoading ||
+        layoutQuery.isLoading ? (
+        <FullPageLoadingState />
+      ) : allReports.length + allBlocks.length === 0 ? (
+        <FullPageEmptyState title="Empty dashboard" icon={LayoutPanelTopIcon}>
+          <p>Add a report, text, or divider to build your dashboard.</p>
           <LinkButton
             from={Route.fullPath}
             to={'/$organizationId/$projectId/reports'}
@@ -630,9 +696,9 @@ function Component() {
             Create report
           </LinkButton>
         </FullPageEmptyState>
-      ) : reports.length === 0 ? (
-        <FullPageEmptyState title="No reports found" icon={SearchIcon}>
-          <p>No reports match "{searchQuery}"</p>
+      ) : itemCount === 0 ? (
+        <FullPageEmptyState title="No items found" icon={SearchIcon}>
+          <p>No items match "{searchQuery}"</p>
         </FullPageEmptyState>
       ) : !isGridReady || reportsQuery.isLoading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -644,7 +710,7 @@ function Component() {
           <ReportSkeleton />
         </div>
       ) : (
-        <div className="overflow-hidden -mx-4">
+        <div className="-mx-4">
           <style>{`
             .react-grid-item {
               transition: ${enableTransitions ? 'transform 200ms ease, width 200ms ease, height 200ms ease' : 'none'} !important;
@@ -659,21 +725,25 @@ function Component() {
             .react-grid-item.resizing {
               transition: none !important;
             }
+            .react-grid-item:has([data-editing="true"]) {
+              z-index: 20;
+            }
           `}</style>
           <ResponsiveGridLayout
+            key={`${dashboardId}:${search ? 'search' : 'all'}`}
             className="layout"
             layouts={layouts}
             breakpoints={{ lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 }}
             cols={{ lg: 12, md: 12, sm: 6, xs: 4, xxs: 2 }}
-            rowHeight={100}
-            onLayoutChange={handleLayoutChange}
-            onDragStop={handleDragStop}
-            onResizeStop={handleResizeStop}
+            rowHeight={DASHBOARD_ROW_HEIGHT}
+            onDragStop={saveLayout}
+            onResizeStop={saveLayout}
+            onBreakpointChange={setBreakpoint}
             draggableHandle=".drag-handle"
             compactType="vertical"
             preventCollision={false}
-            isDraggable={true}
-            isResizable={true}
+            isDraggable={!search && !updateLayout.isPending}
+            isResizable={!search && !updateLayout.isPending}
             margin={[16, 16]}
             transformScale={1}
             useCSSTransforms={true}
@@ -695,6 +765,18 @@ function Component() {
                   onDuplicate={(reportId) => {
                     reportDuplicate.mutate({ reportId });
                   }}
+                />
+              </div>
+            ))}
+            {blocks.map((block) => (
+              <div key={block.id}>
+                <DashboardBlock
+                  block={block}
+                  onSave={(values) =>
+                    updateBlock.mutateAsync({ id: block.id, ...values })
+                  }
+                  onDuplicate={() => duplicateBlock.mutate({ id: block.id })}
+                  onDelete={() => deleteBlock.mutate({ id: block.id })}
                 />
               </div>
             ))}
