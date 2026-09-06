@@ -36,7 +36,8 @@ export default function OverviewFilters({
   mode,
 }: OverviewFiltersProps) {
   const { projectId } = useAppParams();
-  const [filters, setFilter] = useEventQueryFilters(nuqsOptions);
+  const [filters, setFilter, , removeFilter, replaceFilter] =
+    useEventQueryFilters(nuqsOptions);
   const [event, setEvent] = useEventQueryNamesFilter(nuqsOptions);
   const {
     items: eventNames,
@@ -78,11 +79,33 @@ export default function OverviewFilters({
             return (
               <PureFilterItem
                 className="border-t p-4 first:border-0"
-                eventName="screen_view"
-                key={filter.name}
+                eventName={event.length === 1 ? event[0]! : '*'}
+                key={filter.id}
                 filter={filter}
+                categories={
+                  mode === 'events'
+                    ? ['event']
+                    : mode === 'profile'
+                      ? ['profile']
+                      : ['event', 'profile']
+                }
+                exclude={[
+                  ...filters
+                    .filter((item) => item.id !== filter.id)
+                    .map((item) => item.name),
+                  ...(enableEventsFilter
+                    ? []
+                    : [
+                        'properties.*',
+                        'name',
+                        'duration',
+                        'created_at',
+                        'has_profile',
+                      ]),
+                ]}
+                onChangeProperty={(next) => replaceFilter(filter.name, next)}
                 onRemove={() => {
-                  setFilter(filter.name, [], filter.operator);
+                  removeFilter(filter.name);
                 }}
                 onChangeValue={(value) => {
                   setFilter(filter.name, value, filter.operator);

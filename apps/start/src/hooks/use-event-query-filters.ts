@@ -34,7 +34,7 @@ export const eventQueryFiltersParser = createParser({
     return value
       .map(
         (filter) =>
-          `${filter.id},${filter.operator},${filter.value.map((v) => encodeURIComponent(v.trim())).join('|')}`,
+          `${filter.name},${filter.operator},${filter.value.map((v) => encodeURIComponent(v.trim())).join('|')}`,
       )
       .join(';');
   },
@@ -94,7 +94,9 @@ export function useEventQueryFilters(options: NuqsOptions = {}) {
         return [
           ...prev,
           {
-            id: name,
+            id: prev.some((filter) => filter.id === name)
+              ? crypto.randomUUID()
+              : name,
             name,
             operator:
               !operator && newValue.length === 0
@@ -115,7 +117,33 @@ export function useEventQueryFilters(options: NuqsOptions = {}) {
     [setFilters],
   );
 
-  return [filters, setFilter, setFilters, removeFilter] as const;
+  const replaceFilter = useCallback(
+    (
+      name: string,
+      replacement: { name: string; operator: IChartEventFilterOperator },
+    ) => {
+      setFilters((prev) => {
+        if (
+          replacement.name === name ||
+          prev.some((filter) => filter.name === replacement.name)
+        )
+          return prev;
+        return prev.map((filter) =>
+          filter.name === name
+            ? {
+                ...filter,
+                name: replacement.name,
+                operator: replacement.operator,
+                value: [],
+              }
+            : filter,
+        );
+      });
+    },
+    [setFilters],
+  );
+
+  return [filters, setFilter, setFilters, removeFilter, replaceFilter] as const;
 }
 
 export const eventQueryNamesFilter = parseAsArrayOf(parseAsString).withDefault(

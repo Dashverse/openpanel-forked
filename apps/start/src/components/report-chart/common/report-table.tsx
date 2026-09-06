@@ -45,9 +45,12 @@ declare module '@tanstack/react-table' {
 }
 
 interface ReportTableProps {
+  unit?: string;
   data: IChartData;
   visibleSeries: IChartData['series'] | string[];
-  setVisibleSeries: (idsOrFn: string[] | ((prev: string[]) => string[])) => void;
+  setVisibleSeries: (
+    idsOrFn: string[] | ((prev: string[]) => string[]),
+  ) => void;
 }
 
 const DEFAULT_COLUMN_WIDTH = 150;
@@ -217,6 +220,7 @@ export function ReportTable({
   data,
   visibleSeries,
   setVisibleSeries,
+  unit,
 }: ReportTableProps) {
   const [grouped, setGrouped] = useState(false);
   const [expanded, setExpanded] = useState<ExpandedState>({});
@@ -667,7 +671,30 @@ export function ReportTable({
     // Serie name column (pinned left) with checkbox
     cols.push({
       id: 'serie-name',
-      header: 'Serie',
+      header: () => (
+        <div className="flex items-center gap-2">
+          <Checkbox
+            aria-label="Select all series"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            checked={
+              data.series.every((serie) => visibleSeriesIds.includes(serie.id))
+                ? true
+                : data.series.some((serie) =>
+                      visibleSeriesIds.includes(serie.id),
+                    )
+                  ? 'indeterminate'
+                  : false
+            }
+            onCheckedChange={(checked) =>
+              setVisibleSeries(
+                checked ? data.series.map((serie) => serie.id) : [],
+              )
+            }
+          />
+          Serie
+        </div>
+      ),
       accessorKey: 'serieName',
       enableSorting: true,
       size: DEFAULT_COLUMN_WIDTH,
@@ -979,7 +1006,10 @@ export function ReportTable({
               )}
               style={backgroundStyle}
             >
-              {number.format(value)}
+              {number.formatWithUnit(
+                value,
+                metric.key === 'count' ? undefined : unit,
+              )}
             </div>
           );
         },
@@ -1024,7 +1054,7 @@ export function ReportTable({
               )}
               style={backgroundStyle}
             >
-              {number.format(value)}
+              {number.formatWithUnit(value, unit)}
             </div>
           );
         },
@@ -1043,6 +1073,7 @@ export function ReportTable({
     expandableRows,
     rows,
     metricRanges,
+    unit,
     dateRanges,
     columnSizing,
     expanded,
@@ -1303,7 +1334,6 @@ export function ReportTable({
         }
         search={globalFilter}
         onSearchChange={setGlobalFilter}
-        onUnselectAll={() => setVisibleSeries([])}
       />
       <div
         ref={parentRef}

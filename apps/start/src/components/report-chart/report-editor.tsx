@@ -1,6 +1,6 @@
 import { ReportChart } from '@/components/report-chart';
+import { ReportCompare } from '@/components/report/ReportCompare';
 import { ReportInterval } from '@/components/report/ReportInterval';
-import { ReportLineType } from '@/components/report/ReportLineType';
 import { ReportSaveButton } from '@/components/report/ReportSaveButton';
 import {
   changeDateRanges,
@@ -211,7 +211,7 @@ export default function ReportEditor({
                 startDate={report.startDate}
                 endDate={report.endDate}
               />
-              <ReportLineType className="min-w-0" />
+              <ReportCompare className="min-w-0" />
             </div>
           </div>
           <div className="flex flex-col gap-4 p-4" id="report-editor">

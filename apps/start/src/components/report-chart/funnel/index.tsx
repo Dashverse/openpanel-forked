@@ -1,4 +1,6 @@
+import { setHiddenSeries } from '@/components/report/reportSlice';
 import { useTRPC } from '@/integrations/trpc/react';
+import { useDispatch } from '@/redux';
 import type { RouterOutputs } from '@/trpc/client';
 import { useQuery } from '@tanstack/react-query';
 
@@ -11,7 +13,7 @@ import { ReportChartEmpty } from '../common/empty';
 import { ReportChartError } from '../common/error';
 import { ReportChartLoading } from '../common/loading';
 import { useReportChartContext } from '../context';
-import { Chart, Summary, Tables } from './chart';
+import { BreakdownTable, Chart, Summary, Tables } from './chart';
 import { FunnelTtcChart } from './ttc-chart';
 
 export function ReportFunnelChart() {
@@ -30,12 +32,14 @@ export function ReportFunnelChart() {
       globalFilters,
       measuring,
       cohortFilters,
+      hiddenSeries = [],
     },
     isLazyLoading,
     isEditMode,
     options,
   } = useReportChartContext();
 
+  const dispatch = useDispatch();
   const input: IChartInput = {
     series,
     range,
@@ -75,6 +79,11 @@ export function ReportFunnelChart() {
   }
 
   const isTtc = measuring === 'time_to_convert';
+  const visibleData = {
+    ...res.data,
+    current: res.data.current.filter((item) => !hiddenSeries.includes(item.id)),
+  };
+  const setHidden = (ids: string[]) => dispatch(setHiddenSeries(ids));
 
   return (
     <div
@@ -84,23 +93,41 @@ export function ReportFunnelChart() {
       )}
     >
       <ChartDownloadButton type="funnel" data={res.data} />
-      {isEditMode && !isTtc && res.data.current.length > 1 && (
-        <Summary data={res.data} />
+      {isEditMode && !isTtc && visibleData.current.length > 1 && (
+        <Summary data={visibleData} />
       )}
-      {isTtc ? (
-        <FunnelTtcChart data={res.data as any} />
+      {visibleData.current.length === 0 ? (
+        <div className="py-16 text-center text-sm text-muted-foreground">
+          Select breakdown values to display.
+        </div>
+      ) : isTtc ? (
+        <FunnelTtcChart
+          data={visibleData as any}
+          seriesOrder={res.data.current.map((item) => item.id)}
+        />
       ) : (
-        <Chart data={res.data} />
+        <Chart data={res.data} hiddenSeries={hiddenSeries} />
       )}
       {isEditMode &&
-        res.data.current.map((item, index) => (
-          <Tables
-            key={item.id}
-            data={{
-              current: item,
-              previous: res.data.previous?.[index] ?? null,
-            }}
+        (breakdowns.length > 0 ? (
+          <BreakdownTable
+            data={res.data}
+            hiddenSeries={hiddenSeries}
+            onHiddenSeriesChange={setHidden}
           />
+        ) : (
+          res.data.current.map((item) => (
+            <Tables
+              key={item.id}
+              data={{
+                current: item,
+                previous:
+                  res.data.previous?.find(
+                    (previous) => previous.id === item.id,
+                  ) ?? null,
+              }}
+            />
+          ))
         ))}
     </div>
   );

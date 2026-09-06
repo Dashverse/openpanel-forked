@@ -1,3 +1,4 @@
+import { FilterPropertyPicker } from '@/components/filter-property-picker';
 import { Button } from '@/components/ui/button';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
@@ -19,6 +20,8 @@ interface CohortFilterItemProps {
 
 interface PureCohortFilterItemProps {
   filter: IChartEventFilter;
+  eventName?: string;
+  onChangeProperty: (filter: IChartEventFilter) => void;
   onRemove: (filter: IChartEventFilter) => void;
   onChangeOperator: (
     operator: IChartEventFilterOperator,
@@ -72,6 +75,7 @@ export function CohortFilterItem({ filter, event }: CohortFilterItemProps) {
           if (item.id === id) {
             return {
               ...item,
+              name: `cohort:${cohortId}`,
               cohortId,
             };
           }
@@ -85,6 +89,18 @@ export function CohortFilterItem({ filter, event }: CohortFilterItemProps) {
   return (
     <PureCohortFilterItem
       filter={filter}
+      eventName={event.name}
+      onChangeProperty={(next) =>
+        dispatch(
+          changeEvent({
+            ...event,
+            type: 'event',
+            filters: event.filters.map((item) =>
+              item.id === next.id ? next : item,
+            ),
+          }),
+        )
+      }
       onRemove={onRemove}
       onChangeOperator={onChangeOperator}
       onChangeCohort={onChangeCohort}
@@ -99,6 +115,8 @@ export function PureCohortFilterItem({
   onChangeOperator,
   onChangeCohort,
   className,
+  eventName,
+  onChangeProperty,
 }: PureCohortFilterItemProps) {
   const { projectId } = useAppParams();
 
@@ -134,9 +152,15 @@ export function PureCohortFilterItem({
           size={14}
           className="shrink-0 text-muted-foreground"
         />
-        <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-          Cohort
-        </span>
+        <div className="min-w-0 flex-1">
+          <FilterPropertyPicker
+            projectId={projectId}
+            event={eventName}
+            filter={filter}
+            label="Cohort"
+            onChange={onChangeProperty}
+          />
+        </div>
         <Button
           variant="ghost"
           size="sm"

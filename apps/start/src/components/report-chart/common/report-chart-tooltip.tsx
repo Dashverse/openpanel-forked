@@ -8,7 +8,7 @@ import {
   ChartTooltipItem,
   createChartTooltip,
 } from '@/components/charts/chart-tooltip';
-import type { RouterOutputs } from '@/trpc/client';
+import type { IChartData, RouterOutputs } from '@/trpc/client';
 import type { IInterval } from '@openpanel/validation';
 import {
   format,
@@ -49,6 +49,8 @@ const getMatchingReferences = (
 };
 
 type Context = {
+  absoluteData?: IChartData;
+  absoluteUnit?: string;
   references?: RouterOutputs['reference']['getChartReferences'];
 };
 type Data = {
@@ -58,7 +60,7 @@ type Data = {
   [key: `${string}:payload`]: IRechartPayloadItem;
 };
 export const ReportChartTooltip = createChartTooltip<Data, Context>(
-  ({ context: { references }, data }) => {
+  ({ context: { references, absoluteData, absoluteUnit }, data }) => {
     const {
       report: { interval, unit },
     } = useReportChartContext();
@@ -111,6 +113,19 @@ export const ReportChartTooltip = createChartTooltip<Data, Context>(
               <div className="flex justify-between gap-8 font-mono font-medium">
                 <div className="row gap-1">
                   {number.formatWithUnit(item.count, unit)}
+                  {absoluteData && (
+                    <span className="text-muted-foreground">
+                      (
+                      {number.formatWithUnit(
+                        absoluteData.series
+                          .find((serie) => serie.id === item.id)
+                          ?.data.find((point) => point.date === item.date)
+                          ?.count,
+                        absoluteUnit,
+                      )}
+                      )
+                    </span>
+                  )}
                   {!!item.previous && (
                     <span className="text-muted-foreground">
                       ({number.formatWithUnit(item.previous.value, unit)})
