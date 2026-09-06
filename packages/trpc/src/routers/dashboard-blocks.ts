@@ -154,75 +154,75 @@ export const dashboardBlockProcedures = {
         new Set(input.items.map((item) => item.id)).size !== input.items.length
       )
         throw TRPCBadRequestError('Duplicate layout items');
-      return db.$transaction(async (tx) => {
-        const [reports, blocks] = await Promise.all([
-          tx.report.findMany({
-            where: {
-              dashboardId: input.dashboardId,
-              id: {
-                in: input.items
-                  .filter((item) => item.kind === 'report')
-                  .map((item) => item.id),
-              },
+      const [reports, blocks] = await Promise.all([
+        db.report.findMany({
+          where: {
+            dashboardId: input.dashboardId,
+            id: {
+              in: input.items
+                .filter((item) => item.kind === 'report')
+                .map((item) => item.id),
             },
-            select: { id: true },
-          }),
-          tx.dashboardBlock.findMany({
-            where: {
-              dashboardId: input.dashboardId,
-              id: {
-                in: input.items
-                  .filter((item) => item.kind === 'block')
-                  .map((item) => item.id),
-              },
+          },
+          select: { id: true },
+        }),
+        db.dashboardBlock.findMany({
+          where: {
+            dashboardId: input.dashboardId,
+            id: {
+              in: input.items
+                .filter((item) => item.kind === 'block')
+                .map((item) => item.id),
             },
-            select: { id: true, kind: true },
-          }),
-        ]);
-        if (reports.length + blocks.length !== input.items.length)
-          throw TRPCBadRequestError(
-            'All layout items must belong to this dashboard',
-          );
-        for (const item of input.items) {
-          const minH =
-            item.kind === 'report'
-              ? 8
-              : blocks.find((block) => block.id === item.id)?.kind === 'divider'
-                ? 1
-                : 2;
-          if (item.h < minH) throw TRPCBadRequestError('Item is too short');
-          if (item.kind === 'report') {
-            const projected = toLegacyReportLayout({ ...item, minW: 2, minH });
-            const data = {
-              ...projected,
-              fineLayout: {
-                ...projected.fineLayout,
-                layout: { ...projected.fineLayout.layout },
-              },
-              maxW: projected.maxW ?? null,
-              maxH: projected.maxH ?? null,
-            };
-            await tx.reportLayout.upsert({
-              where: { reportId: item.id },
-              create: { reportId: item.id, ...data },
-              update: data,
-            });
-          } else {
-            await tx.dashboardBlock.update({
-              where: { id: item.id },
-              data: {
-                x: item.x,
-                y: item.y,
-                w: item.w,
-                h: item.h,
-                minW: 2,
-                minH,
-              },
-            });
-          }
+          },
+          select: { id: true, kind: true },
+        }),
+      ]);
+      if (reports.length + blocks.length !== input.items.length)
+        throw TRPCBadRequestError(
+          'All layout items must belong to this dashboard',
+        );
+      const blockKinds = new Map(blocks.map((block) => [block.id, block.kind]));
+      const writes = input.items.map((item) => {
+        const minH =
+          item.kind === 'report'
+            ? 8
+            : blockKinds.get(item.id) === 'divider'
+              ? 1
+              : 2;
+        if (item.h < minH) throw TRPCBadRequestError('Item is too short');
+        if (item.kind === 'report') {
+          const projected = toLegacyReportLayout({ ...item, minW: 2, minH });
+          const data = {
+            ...projected,
+            fineLayout: {
+              ...projected.fineLayout,
+              layout: { ...projected.fineLayout.layout },
+            },
+            maxW: projected.maxW ?? null,
+            maxH: projected.maxH ?? null,
+          };
+          return db.reportLayout.upsert({
+            where: { reportId: item.id },
+            create: { reportId: item.id, ...data },
+            update: data,
+          });
         }
-        return { success: true };
+        return db.dashboardBlock.update({
+          where: { id: item.id },
+          data: {
+            x: item.x,
+            y: item.y,
+            w: item.w,
+            h: item.h,
+            minW: 2,
+            minH,
+          },
+        });
       });
+      // Keep changed items atomic without an interactive transaction deadline.
+      if (writes.length > 0) await db.$transaction(writes);
+      return { success: true };
     }),
   resetGridLayout: protectedProcedure
     .input(dashboardInput)

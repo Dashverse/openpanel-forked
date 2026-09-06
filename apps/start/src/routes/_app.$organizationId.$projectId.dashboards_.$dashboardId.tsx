@@ -514,21 +514,27 @@ function Component() {
   const [breakpoint, setBreakpoint] = useState('lg');
   const saveLayout = (newLayout: Layout[]) => {
     if (search || updateLayout.isPending) return;
-    const original = layouts.lg;
+    const original = new Map(layouts.lg.map((item) => [item.id, item]));
     const items = newLayout.flatMap((item) => {
-      const previous = original.find((entry) => entry.id === item.i);
+      const previous = original.get(item.i);
       if (!previous) return [];
-      return [
-        {
-          ...previous,
-          x: breakpoint === 'lg' || breakpoint === 'md' ? item.x : previous.x,
-          w: breakpoint === 'lg' || breakpoint === 'md' ? item.w : previous.w,
-          y: item.y,
-          h: item.h,
-        },
-      ];
+      const next = {
+        ...previous,
+        x: breakpoint === 'lg' || breakpoint === 'md' ? item.x : previous.x,
+        w: breakpoint === 'lg' || breakpoint === 'md' ? item.w : previous.w,
+        y: item.y,
+        h: item.h,
+      };
+      if (
+        next.x === previous.x &&
+        next.y === previous.y &&
+        next.w === previous.w &&
+        next.h === previous.h
+      )
+        return [];
+      return [next];
     });
-    updateLayout.mutate({ dashboardId, items });
+    if (items.length > 0) updateLayout.mutate({ dashboardId, items });
   };
 
   if (!dashboard) {
