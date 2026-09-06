@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { DashboardBlockEditorProps, DashboardBlockView } from './types';
 
 function TextBlockEditor({
+  className,
   block,
   onSave,
   onClose,
@@ -21,7 +22,7 @@ function TextBlockEditor({
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
   }, []);
 
   const close = (restoreFocus = false) => {
@@ -52,7 +53,10 @@ function TextBlockEditor({
 
   return (
     <div
-      className="absolute inset-0 z-20 flex min-h-44 flex-col gap-2 rounded-md border bg-card p-2 shadow-md"
+      className={cn(
+        'absolute inset-0 z-20 flex min-h-44 flex-col gap-2 rounded-md border bg-card p-2 shadow-md',
+        className,
+      )}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) void save();
       }}

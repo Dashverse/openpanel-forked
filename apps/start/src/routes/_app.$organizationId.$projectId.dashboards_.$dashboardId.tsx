@@ -20,7 +20,10 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/utils/cn';
 import { createProjectTitle } from '@/utils/title';
 import { DASHBOARD_ROW_HEIGHT, toFineReportLayout } from '@openpanel/common';
-import { dashboardBlockKindSchema } from '@openpanel/validation';
+import {
+  dashboardBlockKindSchema,
+  parseDashboardBlock,
+} from '@openpanel/validation';
 import {
   BarChart3Icon,
   ChevronDownIcon,
@@ -379,6 +382,8 @@ function Component() {
   );
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [newBlockId, setNewBlockId] = useState<string | null>(null);
+  const onBlockRevealed = useCallback(() => setNewBlockId(null), []);
   const allReports = reportsQuery.data ?? [];
   const allBlocks = blocksQuery.data ?? [];
   const search = searchQuery.trim().toLowerCase();
@@ -417,8 +422,19 @@ function Component() {
   const createBlock = useMutation(
     trpc.dashboard.createBlock.mutationOptions({
       onError: handleErrorToastOptions({}),
-      onSuccess: () => {
+      onSuccess: async (block) => {
+        await queryClient.cancelQueries(
+          trpc.dashboard.listBlocks.queryFilter({ dashboardId }),
+        );
+        setNewBlockId(block.id);
         setSearchQuery('');
+        queryClient.setQueryData(
+          trpc.dashboard.listBlocks.queryKey({ dashboardId }),
+          (blocks = []) => [
+            ...blocks.filter((item) => item.id !== block.id),
+            { ...block, ...parseDashboardBlock(block) },
+          ],
+        );
         return refreshGrid();
       },
     }),
@@ -778,6 +794,8 @@ function Component() {
               <div key={block.id}>
                 <DashboardBlock
                   block={block}
+                  reveal={newBlockId === block.id}
+                  onRevealed={onBlockRevealed}
                   onSave={(values) =>
                     updateBlock.mutateAsync({ id: block.id, ...values })
                   }

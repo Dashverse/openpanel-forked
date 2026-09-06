@@ -3,6 +3,7 @@ import type { LucideIcon } from 'lucide-react';
 import type { ComponentType, ReactNode } from 'react';
 
 export interface DashboardBlockEditorProps {
+  className?: string;
   block: DashboardBlockContent;
   onSave: (values: DashboardBlockContent) => Promise<unknown>;
   onClose: (restoreFocus?: boolean) => void;

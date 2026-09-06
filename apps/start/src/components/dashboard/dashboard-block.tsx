@@ -14,7 +14,7 @@ import {
   PencilIcon,
   TrashIcon,
 } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { dashboardBlockViews } from './blocks';
 
 export { dashboardBlockViews, getDashboardBlockSearchText } from './blocks';
@@ -22,6 +22,8 @@ export { dashboardBlockViews, getDashboardBlockSearchText } from './blocks';
 interface DashboardBlockProps {
   block: { id: string } & DashboardBlockContent;
   onSave: (values: DashboardBlockContent) => Promise<unknown>;
+  reveal?: boolean;
+  onRevealed?: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }
@@ -29,14 +31,46 @@ interface DashboardBlockProps {
 export function DashboardBlock({
   block,
   onSave,
+  reveal = false,
+  onRevealed,
   onDuplicate,
   onDelete,
 }: DashboardBlockProps) {
   const [editing, setEditing] = useState(false);
+  const [highlighted, setHighlighted] = useState(false);
+  const blockRef = useRef<HTMLDivElement>(null);
   const editingRef = useRef(false);
   const contentRef = useRef<HTMLButtonElement>(null);
   const view = dashboardBlockViews[block.kind];
   const Editor = view.Editor;
+
+  useEffect(() => {
+    if (!reveal) return;
+    setHighlighted(true);
+    if (Editor) {
+      editingRef.current = true;
+      setEditing(true);
+    }
+    const frame = requestAnimationFrame(() => {
+      const target = Editor
+        ? blockRef.current?.firstElementChild
+        : blockRef.current;
+      target?.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 'instant'
+          : 'smooth',
+        block: 'center',
+      });
+      onRevealed?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [reveal, Editor, onRevealed]);
+
+  useEffect(() => {
+    if (!highlighted) return;
+    const timer = window.setTimeout(() => setHighlighted(false), 2400);
+    return () => window.clearTimeout(timer);
+  }, [highlighted]);
 
   const startEditing = () => {
     editingRef.current = true;
@@ -51,15 +85,22 @@ export function DashboardBlock({
 
   return (
     <div
+      ref={blockRef}
       data-dashboard-block
       data-editing={editing}
       className={cn(
         'group relative h-full w-full rounded-md',
         editing && 'z-20',
+        highlighted && !editing && 'bg-primary/5 ring-2 ring-primary/40',
       )}
     >
       {editing && Editor ? (
-        <Editor block={block} onSave={onSave} onClose={closeEditor} />
+        <Editor
+          block={block}
+          onSave={onSave}
+          onClose={closeEditor}
+          className={highlighted ? 'ring-2 ring-primary/40' : undefined}
+        />
       ) : Editor ? (
         <button
           ref={contentRef}
