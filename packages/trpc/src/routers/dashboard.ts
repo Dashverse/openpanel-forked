@@ -1,3 +1,4 @@
+import { parseDashboardBlock } from '@openpanel/validation';
 import { PrismaError } from 'prisma-error-enum';
 import { z } from 'zod';
 
@@ -244,7 +245,11 @@ export const dashboardRouter = createTRPCRouter({
         for (const block of dashboard.blocks) {
           const { id, dashboardId, createdAt, updatedAt, ...data } = block;
           await tx.dashboardBlock.create({
-            data: { ...data, dashboardId: newDashboard.id },
+            data: {
+              ...data,
+              config: parseDashboardBlock(block).config,
+              dashboardId: newDashboard.id,
+            },
           });
         }
 

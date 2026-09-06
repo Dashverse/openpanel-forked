@@ -1,5 +1,11 @@
 import { toFineReportLayout, toLegacyReportLayout } from '@openpanel/common';
 import { db } from '@openpanel/db';
+import {
+  dashboardBlockKindSchema,
+  dashboardBlockSchema,
+  getDashboardBlockDefinition,
+  parseDashboardBlock,
+} from '@openpanel/validation';
 import { z } from 'zod';
 import { getProjectAccess } from '../access';
 import {
@@ -17,7 +23,7 @@ const gridItem = z
     kind: z.enum(['report', 'block']),
     x: z.number().int().min(0).max(11),
     y: z.number().int().min(0).max(1000000),
-    w: z.number().int().min(2).max(12),
+    w: z.number().int().min(1).max(12),
     h: z.number().int().min(1).max(100000),
     minW: z.number().int().min(1).max(12).optional(),
     minH: z.number().int().min(1).max(100000).optional(),
@@ -80,10 +86,14 @@ export const dashboardBlockProcedures = {
     .input(dashboardInput)
     .query(async ({ input, ctx }) => {
       await authorizeDashboard(input.dashboardId, ctx.session.userId);
-      return db.dashboardBlock.findMany({
+      const blocks = await db.dashboardBlock.findMany({
         where: { dashboardId: input.dashboardId },
         orderBy: { createdAt: 'asc' },
       });
+      return blocks.map((block) => ({
+        ...block,
+        ...parseDashboardBlock(block),
+      }));
     }),
   getLayout: protectedProcedure
     .input(dashboardInput)
@@ -92,37 +102,32 @@ export const dashboardBlockProcedures = {
       return getGrid(db, input.dashboardId);
     }),
   createBlock: protectedProcedure
-    .input(dashboardInput.extend({ kind: z.enum(['text', 'divider']) }))
+    .input(dashboardInput.extend({ kind: dashboardBlockKindSchema }))
     .mutation(async ({ input, ctx }) => {
       await authorizeDashboard(input.dashboardId, ctx.session.userId);
       return db.$transaction(async (tx) => {
         const layout = await getGrid(tx, input.dashboardId);
-        const h = input.kind === 'divider' ? 1 : 2;
+        const definition = getDashboardBlockDefinition(input.kind);
         return tx.dashboardBlock.create({
           data: {
             dashboardId: input.dashboardId,
             kind: input.kind,
+            config: definition.defaultConfig,
+            ...definition.defaultLayout,
             y: Math.max(0, ...layout.map((item) => item.y + item.h)),
-            h,
-            minH: h,
           },
         });
       });
     }),
   updateBlock: protectedProcedure
-    .input(
-      blockInput.extend({
-        heading: z.string().max(500),
-        body: z.string().max(50000),
-      }),
-    )
+    .input(blockInput.and(dashboardBlockSchema))
     .mutation(async ({ input, ctx }) => {
       const block = await authorizeBlock(input.id, ctx.session.userId);
-      if (block.kind !== 'text')
-        throw TRPCBadRequestError('Dividers do not have text');
+      if (block.kind !== input.kind)
+        throw TRPCBadRequestError('Block kind cannot be changed');
       return db.dashboardBlock.update({
         where: { id: input.id },
-        data: { heading: input.heading, body: input.body },
+        data: { config: input.config },
       });
     }),
   duplicateBlock: protectedProcedure
@@ -135,6 +140,7 @@ export const dashboardBlockProcedures = {
         return tx.dashboardBlock.create({
           data: {
             ...data,
+            config: parseDashboardBlock(block).config,
             y: Math.max(0, ...layout.map((item) => item.y + item.h)),
           },
         });
@@ -184,15 +190,15 @@ export const dashboardBlockProcedures = {
         );
       const blockKinds = new Map(blocks.map((block) => [block.id, block.kind]));
       const writes = input.items.map((item) => {
-        const minH =
+        const { minW, minH } =
           item.kind === 'report'
-            ? 8
-            : blockKinds.get(item.id) === 'divider'
-              ? 1
-              : 2;
+            ? { minW: 2, minH: 8 }
+            : getDashboardBlockDefinition(blockKinds.get(item.id)!)
+                .defaultLayout;
         if (item.h < minH) throw TRPCBadRequestError('Item is too short');
+        if (item.w < minW) throw TRPCBadRequestError('Item is too narrow');
         if (item.kind === 'report') {
-          const projected = toLegacyReportLayout({ ...item, minW: 2, minH });
+          const projected = toLegacyReportLayout({ ...item, minW, minH });
           const data = {
             ...projected,
             fineLayout: {
@@ -215,7 +221,7 @@ export const dashboardBlockProcedures = {
             y: item.y,
             w: item.w,
             h: item.h,
-            minW: 2,
+            minW,
             minH,
           },
         });
@@ -241,12 +247,12 @@ export const dashboardBlockProcedures = {
         });
         let y = Math.ceil(reportCount / 3) * 16;
         for (const block of blocks) {
-          const h = block.kind === 'divider' ? 1 : 2;
+          const layout = getDashboardBlockDefinition(block.kind).defaultLayout;
           await tx.dashboardBlock.update({
             where: { id: block.id },
-            data: { x: 0, y, w: 12, h, minW: 2, minH: h },
+            data: { x: 0, y, ...layout },
           });
-          y += h;
+          y += layout.h;
         }
         return { success: true };
       });

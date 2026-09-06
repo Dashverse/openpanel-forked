@@ -1,4 +1,8 @@
-import { DashboardBlock } from '@/components/dashboard/dashboard-block';
+import {
+  DashboardBlock,
+  dashboardBlockViews,
+  getDashboardBlockSearchText,
+} from '@/components/dashboard/dashboard-block';
 import { EditDashboardName } from '@/components/dashboard/edit-dashboard-name';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
@@ -9,16 +13,19 @@ import {
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/utils/cn';
 import { createProjectTitle } from '@/utils/title';
 import { DASHBOARD_ROW_HEIGHT, toFineReportLayout } from '@openpanel/common';
+import { dashboardBlockKindSchema } from '@openpanel/validation';
 import {
+  BarChart3Icon,
+  ChevronDownIcon,
   CopyIcon,
   LayoutPanelTopIcon,
-  MinusIcon,
   MoreHorizontal,
   PlusIcon,
   RefreshCw,
@@ -26,7 +33,6 @@ import {
   SearchIcon,
   Trash,
   TrashIcon,
-  TypeIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -39,7 +45,7 @@ import { openServerCacheBypassWindow } from '@/integrations/trpc/cache-bypass';
 import { handleErrorToastOptions, useTRPC } from '@/integrations/trpc/react';
 import { showConfirm } from '@/modals';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { createFileRoute, useRouter } from '@tanstack/react-router';
+import { Link, createFileRoute, useRouter } from '@tanstack/react-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Responsive, WidthProvider } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
@@ -380,9 +386,7 @@ function Component() {
     report.name.toLowerCase().includes(search),
   );
   const blocks = allBlocks.filter((block) =>
-    `${block.heading} ${block.body} ${block.kind}`
-      .toLowerCase()
-      .includes(search),
+    getDashboardBlockSearchText(block).toLowerCase().includes(search),
   );
   const itemCount = reports.length + blocks.length;
   const dashboard = dashboardQuery.data;
@@ -557,39 +561,35 @@ function Component() {
           <>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  icon={PlusIcon}
-                  disabled={createBlock.isPending}
-                >
-                  Add block
+                <Button icon={PlusIcon}>
+                  Add
+                  <ChevronDownIcon className="ml-0.5 size-4" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={() =>
-                    createBlock.mutate({ dashboardId, kind: 'text' })
-                  }
-                >
-                  <TypeIcon className="mr-2 size-4" /> Text
+              <DropdownMenuContent align="end" className="w-44">
+                <DropdownMenuItem asChild>
+                  <Link
+                    from={Route.fullPath}
+                    to="/$organizationId/$projectId/reports"
+                  >
+                    <BarChart3Icon className="mr-2 size-4" /> Report
+                  </Link>
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() =>
-                    createBlock.mutate({ dashboardId, kind: 'divider' })
-                  }
-                >
-                  <MinusIcon className="mr-2 size-4" /> Divider
-                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {dashboardBlockKindSchema.options.map((kind) => {
+                  const { label, icon: Icon } = dashboardBlockViews[kind];
+                  return (
+                    <DropdownMenuItem
+                      key={kind}
+                      disabled={createBlock.isPending}
+                      onClick={() => createBlock.mutate({ dashboardId, kind })}
+                    >
+                      <Icon className="mr-2 size-4" /> {label}
+                    </DropdownMenuItem>
+                  );
+                })}
               </DropdownMenuContent>
             </DropdownMenu>
-            <LinkButton
-              from={Route.fullPath}
-              to={'/$organizationId/$projectId/reports'}
-              icon={PlusIcon}
-            >
-              <span className="max-sm:hidden">Create report</span>
-              <span className="sm:hidden">Report</span>
-            </LinkButton>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline">

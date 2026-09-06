@@ -4,8 +4,7 @@ CREATE TABLE "dashboard_blocks" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "dashboardId" TEXT NOT NULL,
     "kind" TEXT NOT NULL,
-    "heading" TEXT NOT NULL DEFAULT '',
-    "body" TEXT NOT NULL DEFAULT '',
+    "config" JSONB NOT NULL,
     "x" INTEGER NOT NULL DEFAULT 0,
     "y" INTEGER NOT NULL DEFAULT 0,
     "w" INTEGER NOT NULL DEFAULT 12,
@@ -14,8 +13,7 @@ CREATE TABLE "dashboard_blocks" (
     "minH" INTEGER NOT NULL DEFAULT 2,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
-    CONSTRAINT "dashboard_blocks_pkey" PRIMARY KEY ("id"),
-    CONSTRAINT "dashboard_blocks_kind_check" CHECK ("kind" IN ('text', 'divider'))
+    CONSTRAINT "dashboard_blocks_pkey" PRIMARY KEY ("id")
 );
 
 CREATE INDEX "dashboard_blocks_dashboardId_idx" ON "dashboard_blocks"("dashboardId");

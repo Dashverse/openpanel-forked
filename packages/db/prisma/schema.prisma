@@ -305,8 +305,7 @@ model DashboardBlock {
   dashboardId String
   dashboard   Dashboard @relation(fields: [dashboardId], references: [id], onDelete: Cascade)
   kind        String
-  heading     String    @default("")
-  body        String    @default("")
+  config      Json
   x           Int       @default(0)
   y           Int       @default(0)
   w           Int       @default(12)
