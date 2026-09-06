@@ -141,7 +141,7 @@ export function Chart({ data, absoluteData, absoluteUnit }: Props) {
     hide: hideYAxis,
     tickFormatter:
       comparison === 'overall'
-        ? (value) => number.formatWithUnit(value, '%')
+        ? (value) => number.formatWithUnit(value, '%').replace(' %', '%')
         : undefined,
   });
 
