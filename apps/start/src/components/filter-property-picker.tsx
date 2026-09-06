@@ -38,7 +38,7 @@ export function FilterPropertyPicker({
         type="button"
         variant="outline"
         size="sm"
-        className="min-w-0 max-w-[28rem] justify-start"
+        className="min-w-0 max-w-[28rem] justify-start gap-2"
         aria-label={`Change filter property: ${label}`}
       >
         <RenderDots className="min-w-0 truncate" truncate>
