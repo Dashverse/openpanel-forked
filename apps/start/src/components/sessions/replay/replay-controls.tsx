@@ -37,12 +37,14 @@ export function ReplaySpeedControl() {
 }
 
 export function ReplayTime() {
-  const { duration } = useReplayContext();
+  // Show gap-collapsed (display) time so the readout matches the scrubber and
+  // the tab-chip duration — not rrweb's raw wall-clock span.
+  const { displayDuration, toDisplayMs } = useReplayContext();
   const currentTime = useCurrentTime(250);
 
   return (
     <span className="text-sm tabular-nums text-muted-foreground font-mono">
-      {formatDuration(currentTime)} / {formatDuration(duration)}
+      {formatDuration(toDisplayMs(currentTime))} / {formatDuration(displayDuration)}
     </span>
   );
 }

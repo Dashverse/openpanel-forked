@@ -18,7 +18,12 @@ import { formatDuration, getEventOffsetMs } from './replay-utils';
 export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
   const {
     currentTimeRef,
-    duration,
+    // Display (gap-collapsed) space — the scrubber renders in this so idle air
+    // isn't shown. seek() still takes a wall-clock offset (fromDisplayMs).
+    displayDuration,
+    toDisplayMs,
+    fromDisplayMs,
+    segmentBoundariesMs,
     startTime,
     isReady,
     seek,
@@ -47,11 +52,15 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
     };
   }, []);
 
-  // Update progress bar and thumb directly via DOM on every tick — no React re-render.
+  // Update progress bar and thumb directly via DOM on every tick — no React
+  // re-render. currentTime is wall-clock; map it into display space.
   useEffect(() => {
-    if (duration <= 0) return;
+    if (displayDuration <= 0) return;
     return subscribeToCurrentTime((t) => {
-      const pct = Math.max(0, Math.min(100, (t / duration) * 100));
+      const pct = Math.max(
+        0,
+        Math.min(100, (toDisplayMs(t) / displayDuration) * 100),
+      );
       if (progressBarRef.current) {
         progressBarRef.current.style.width = `${pct}%`;
       }
@@ -59,20 +68,23 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
         thumbRef.current.style.left = `calc(${pct}% - 8px)`;
       }
     });
-  }, [subscribeToCurrentTime, duration]);
+  }, [subscribeToCurrentTime, displayDuration, toDisplayMs]);
 
+  // Map a click/hover X into both display ms (for the badge) and the wall-clock
+  // ms that seek() needs (gaps collapsed → the two differ).
   const getTimeFromClientX = useCallback(
     (clientX: number) => {
-      if (!trackRef.current || duration <= 0) return null;
+      if (!trackRef.current || displayDuration <= 0) return null;
       const rect = trackRef.current.getBoundingClientRect();
       if (rect.width <= 0 || !Number.isFinite(rect.width)) {
         return null;
       }
       const x = clientX - rect.left;
       const pct = Math.max(0, Math.min(1, x / rect.width));
-      return { pct, timeMs: pct * duration };
+      const displayMs = pct * displayDuration;
+      return { pct, displayMs, wallMs: fromDisplayMs(displayMs) };
     },
-    [duration],
+    [displayDuration, fromDisplayMs],
   );
 
   const handleTrackMouseMove = useCallback(
@@ -82,7 +94,7 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
         return;
       }
       const info = getTimeFromClientX(e.clientX);
-      if (info) setHoverInfo(info);
+      if (info) setHoverInfo({ pct: info.pct, timeMs: info.displayMs });
     },
     [getTimeFromClientX],
   );
@@ -100,57 +112,73 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
       )
         return;
       const info = getTimeFromClientX(e.clientX);
-      if (info) seek(info.timeMs);
+      if (info) seek(info.wallMs);
     },
     [getTimeFromClientX, seek],
   );
 
+  // Each event carries both its wall-clock offset (for seek) and its display
+  // (gap-collapsed) offset (for positioning on the scrubber).
   const eventsWithOffset = useMemo(
     () =>
       events
-        .map((ev) => ({
-          event: ev,
-          offsetMs: startTime != null ? getEventOffsetMs(ev, startTime) : 0,
-        }))
-        .filter(({ offsetMs }) => offsetMs >= 0 && offsetMs <= duration),
-    [events, startTime, duration],
+        .map((ev) => {
+          const wallOffsetMs =
+            startTime != null ? getEventOffsetMs(ev, startTime) : 0;
+          return {
+            event: ev,
+            wallOffsetMs,
+            offsetMs: toDisplayMs(wallOffsetMs),
+          };
+        })
+        .filter(
+          ({ offsetMs, wallOffsetMs }) =>
+            wallOffsetMs >= 0 && offsetMs >= 0 && offsetMs <= displayDuration,
+        ),
+    [events, startTime, displayDuration, toDisplayMs],
   );
 
-  // Group events that are within 24px of each other on the track.
-  // We need the track width for pixel math — use a stable ref-based calculation.
+  // Group events that are within 24px of each other on the track (display space).
   const groupedEvents = useMemo(() => {
-    if (!eventsWithOffset.length || duration <= 0) return [];
+    if (!eventsWithOffset.length || displayDuration <= 0) return [];
 
-    // Sort by offsetMs so we sweep left-to-right
+    // Sort by display offset so we sweep left-to-right
     const sorted = [...eventsWithOffset].sort((a, b) => a.offsetMs - b.offsetMs);
 
     // 24px in ms — recalculated from container width; fall back to 2% of duration
     const trackWidth = trackRef.current?.offsetWidth ?? 600;
-    const thresholdMs = (24 / trackWidth) * duration;
+    const thresholdMs = (24 / trackWidth) * displayDuration;
 
     const groups: { items: typeof sorted; pct: number }[] = [];
     for (const item of sorted) {
       const last = groups[groups.length - 1];
-      const lastPct = last ? (last.items[last.items.length - 1]!.offsetMs / duration) * 100 : -Infinity;
-      const thisPct = (item.offsetMs / duration) * 100;
+      const thisPct = (item.offsetMs / displayDuration) * 100;
 
-      if (last && item.offsetMs - last.items[last.items.length - 1]!.offsetMs <= thresholdMs) {
+      if (
+        last &&
+        item.offsetMs - last.items[last.items.length - 1]!.offsetMs <=
+          thresholdMs
+      ) {
         last.items.push(item);
         // Anchor the group at its first item's position
       } else {
         groups.push({ items: [item], pct: thisPct });
       }
-      // keep pct pointing at the first item (already set on push)
-      void lastPct;
     }
 
     return groups;
-  }, [eventsWithOffset, duration]);
+  }, [eventsWithOffset, displayDuration]);
 
-  if (!isReady || duration <= 0) return null;
+  if (!isReady || displayDuration <= 0) return null;
 
-  const progressPct = Math.max(0, Math.min(100, (currentTimeRef.current / duration) * 100));
-  const bufferedPct = Math.max(0, Math.min(100, (loadedUpToMs / duration) * 100));
+  const progressPct = Math.max(
+    0,
+    Math.min(100, (toDisplayMs(currentTimeRef.current) / displayDuration) * 100),
+  );
+  const bufferedPct = Math.max(
+    0,
+    Math.min(100, (toDisplayMs(loadedUpToMs) / displayDuration) * 100),
+  );
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -177,8 +205,8 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
             ref={trackRef}
             role="slider"
             aria-valuemin={0}
-            aria-valuemax={duration}
-            aria-valuenow={currentTime}
+            aria-valuemax={displayDuration}
+            aria-valuenow={toDisplayMs(currentTime)}
             tabIndex={0}
             className="relative flex h-8 cursor-pointer items-center outline-0"
             onMouseDown={handleTrackMouseDown}
@@ -191,7 +219,7 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
                 seek(Math.max(0, currentTime - step));
               } else if (e.key === 'ArrowRight') {
                 e.preventDefault();
-                seek(Math.min(duration, currentTime + step));
+                seek(currentTime + step);
               }
             }}
           >
@@ -208,6 +236,19 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
                 style={{ width: `${progressPct}%` }}
               />
             </div>
+            {/* Collapsed-idle markers — a thin notch where an idle gap was
+             * removed, so the jump in real time is visible (PostHog-style). */}
+            {segmentBoundariesMs.map((ms) => {
+              const pct = (ms / displayDuration) * 100;
+              return (
+                <div
+                  key={ms}
+                  className="pointer-events-none absolute top-1/2 z-[4] h-3 w-px -translate-y-1/2 bg-foreground/25"
+                  style={{ left: `${pct}%` }}
+                  aria-hidden
+                />
+              );
+            })}
             <div
               ref={thumbRef}
               className="absolute left-0 top-1/2 z-10 h-4 w-4 -translate-y-1/2 rounded-full border-2 border-primary bg-background shadow-sm"
@@ -257,7 +298,8 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
                       style={{ left: `${group.pct}%`, marginLeft: -12 }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        seek(first.offsetMs);
+                        // Seek uses the wall-clock offset, not the display one.
+                        seek(first.wallOffsetMs);
                       }}
                       aria-label={isGroup ? `${group.items.length} events at ${formatDuration(first.offsetMs)}` : `${first.event.name} at ${formatDuration(first.offsetMs)}`}
                     >

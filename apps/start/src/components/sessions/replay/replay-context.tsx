@@ -4,6 +4,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -48,9 +49,26 @@ interface ReplayContextValue {
   subscribeToCurrentTime: (fn: CurrentTimeListener) => () => void;
   // Low-frequency state (safe to consume directly)
   isPlaying: boolean;
+  // Raw wall-clock duration (rrweb coordinate). seek()/currentTime are in this
+  // space. The scrubber/readout use the *display* space below instead.
   duration: number;
   startTime: number | null;
   isReady: boolean;
+  // ── Display (gap-collapsed) time space ──────────────────────────────────
+  // A window_id is reused across reloads, so its wall-clock span is mostly idle
+  // air. The player stays wall-clock; these collapse the idle gaps for the
+  // scrubber + time readout only (PostHog-style), so what the user sees is real
+  // recorded time. Identity fallback (== wall-clock) when no segments are set.
+  displayDuration: number;
+  // wall-clock offset (ms from startTime) → gap-collapsed display ms
+  toDisplayMs: (wallOffsetMs: number) => number;
+  // gap-collapsed display ms → wall-clock offset (ms from startTime), for seek
+  fromDisplayMs: (displayMs: number) => number;
+  // Display-space positions of collapsed idle gaps (for scrubber markers).
+  segmentBoundariesMs: number[];
+  // Register the active recording segments (absolute wall ms) for the playing
+  // window. Null/empty ⇒ identity mapping (legacy single-recording sessions).
+  setSegments: (segments: { startMs: number; endMs: number }[] | null) => void;
   // Buffered-region tracking — for the YouTube-style buffered progress bar
   // and the buffer-aware seek path.
   loadedUpToMs: number;
@@ -171,6 +189,83 @@ export function ReplayProvider({
   const [loadedUpToMs, setLoadedUpToMs] = useState(0);
   const [isBuffering, setIsBuffering] = useState(false);
   const [speed, setSpeedState] = useState(1);
+  // Active recording segments (absolute wall ms) for the playing window.
+  const [segments, setSegmentsState] = useState<
+    { startMs: number; endMs: number }[] | null
+  >(null);
+
+  const setSegments = useCallback(
+    (s: { startMs: number; endMs: number }[] | null) => {
+      setSegmentsState(s && s.length > 0 ? s : null);
+    },
+    [],
+  );
+
+  // Piecewise-linear map between wall-clock offsets (rrweb/seek space) and the
+  // gap-collapsed display space. Rebuilt only when the segment list or the
+  // player's startTime changes. Identity when no segments (legacy sessions or
+  // before segments load) so nothing regresses.
+  const timeMapping = useMemo(() => {
+    if (!segments || startTime == null) {
+      return {
+        displayDuration: duration,
+        toDisplayMs: (wallOffsetMs: number) => wallOffsetMs,
+        fromDisplayMs: (displayMs: number) => displayMs,
+        segmentBoundariesMs: [] as number[],
+      };
+    }
+    // Convert to offsets from startTime, drop empties, order, accumulate.
+    const rows: {
+      wallStart: number;
+      wallEnd: number;
+      compStart: number;
+      dur: number;
+    }[] = [];
+    let acc = 0;
+    const norm = segments
+      .map((s) => ({
+        start: Math.max(0, s.startMs - startTime),
+        end: Math.max(0, s.endMs - startTime),
+      }))
+      .filter((s) => s.end > s.start)
+      .sort((a, b) => a.start - b.start);
+    for (const s of norm) {
+      const dur = s.end - s.start;
+      rows.push({ wallStart: s.start, wallEnd: s.end, compStart: acc, dur });
+      acc += dur;
+    }
+    const displayDuration = acc > 0 ? acc : duration;
+
+    const toDisplayMs = (wallOffsetMs: number) => {
+      if (rows.length === 0) return wallOffsetMs;
+      for (const r of rows) {
+        // In the idle gap before this segment → snap to its (compressed) start,
+        // which equals the previous segment's compressed end.
+        if (wallOffsetMs < r.wallStart) return r.compStart;
+        if (wallOffsetMs <= r.wallEnd) {
+          return r.compStart + (wallOffsetMs - r.wallStart);
+        }
+      }
+      return displayDuration;
+    };
+
+    const fromDisplayMs = (displayMs: number) => {
+      if (rows.length === 0) return displayMs;
+      const clamped = Math.max(0, Math.min(displayDuration, displayMs));
+      for (const r of rows) {
+        if (clamped <= r.compStart + r.dur) {
+          return r.wallStart + Math.max(0, clamped - r.compStart);
+        }
+      }
+      return rows[rows.length - 1]!.wallEnd;
+    };
+
+    // Display-space positions where an idle gap was collapsed (each segment's
+    // start except the first) — the scrubber renders a marker at each.
+    const segmentBoundariesMs = rows.slice(1).map((r) => r.compStart);
+
+    return { displayDuration, toDisplayMs, fromDisplayMs, segmentBoundariesMs };
+  }, [segments, startTime, duration]);
 
   const setIsPlayingWithRef = useCallback((playing: boolean) => {
     isPlayingRef.current = playing;
@@ -429,6 +524,11 @@ export function ReplayProvider({
     duration,
     startTime,
     isReady,
+    displayDuration: timeMapping.displayDuration,
+    toDisplayMs: timeMapping.toDisplayMs,
+    fromDisplayMs: timeMapping.fromDisplayMs,
+    segmentBoundariesMs: timeMapping.segmentBoundariesMs,
+    setSegments,
     loadedUpToMs,
     isBuffering,
     play,
