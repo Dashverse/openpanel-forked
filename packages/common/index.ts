@@ -12,3 +12,4 @@ export * from './src/group-by-labels';
 export * from './server/get-client-ip';
 
 export * from './src/compare-overall';
+export * from './src/dashboard-layout';

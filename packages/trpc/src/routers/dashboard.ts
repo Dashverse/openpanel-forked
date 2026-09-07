@@ -1,3 +1,4 @@
+import { parseDashboardBlock } from '@openpanel/validation';
 import { PrismaError } from 'prisma-error-enum';
 import { z } from 'zod';
 
@@ -13,8 +14,10 @@ import type { Prisma } from '@openpanel/db';
 import { getProjectAccess } from '../access';
 import { TRPCAccessError, TRPCNotFoundError } from '../errors';
 import { createTRPCRouter, protectedProcedure } from '../trpc';
+import { dashboardBlockProcedures } from './dashboard-blocks';
 
 export const dashboardRouter = createTRPCRouter({
+  ...dashboardBlockProcedures,
   list: protectedProcedure
     .input(
       z.object({
@@ -175,6 +178,7 @@ export const dashboardRouter = createTRPCRouter({
       const dashboard = await db.dashboard.findUniqueOrThrow({
         where: { id: input.id },
         include: {
+          blocks: true,
           reports: {
             include: { layout: true },
           },
@@ -236,6 +240,17 @@ export const dashboardRouter = createTRPCRouter({
               } as Prisma.ReportLayoutUncheckedCreateInput,
             });
           }
+        }
+
+        for (const block of dashboard.blocks) {
+          const { id, dashboardId, createdAt, updatedAt, ...data } = block;
+          await tx.dashboardBlock.create({
+            data: {
+              ...data,
+              config: parseDashboardBlock(block).config,
+              dashboardId: newDashboard.id,
+            },
+          });
         }
 
         return newDashboard;
