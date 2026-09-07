@@ -119,17 +119,19 @@ export function PropertyPicker({
 
   const cohortActions = useMemo<PropertyAction[]>(
     () =>
-      cohorts.map((cohort) => ({
-        value: `cohort:${cohort.id}`,
-        label: cohort.name,
-        description:
-          cohort.description ||
-          (typeof cohort.profileCount === 'number'
-            ? `${cohort.profileCount} users`
-            : ''),
-        cohortId: cohort.id,
-      })),
-    [cohorts],
+      cohorts
+        .filter((cohort) => shouldShowProperty(`cohort:${cohort.id}`))
+        .map((cohort) => ({
+          value: `cohort:${cohort.id}`,
+          label: cohort.name,
+          description:
+            cohort.description ||
+            (typeof cohort.profileCount === 'number'
+              ? `${cohort.profileCount} users`
+              : ''),
+          cohortId: cohort.id,
+        })),
+    [cohorts, exclude],
   );
 
   const actions =

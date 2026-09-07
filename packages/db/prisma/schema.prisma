@@ -317,6 +317,7 @@ model Report {
   endDate      String?
   chartType    ChartType
   lineType     String    @default("monotone")
+  comparison   String    @default("none")
   breakdowns   Json
   events       Json
   formula      String?

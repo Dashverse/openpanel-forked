@@ -55,7 +55,7 @@ export const zPerUserAggregation = z.enum([
 export const zChartEventPerUser = z
   .object({
     aggregation: zPerUserAggregation.describe(
-      'How to reduce each user\'s events to a single per-user value',
+      "How to reduce each user's events to a single per-user value",
     ),
     property: z
       .string()
@@ -268,6 +268,7 @@ export const zChartInputBase = z.object({
     .optional()
     .default('conversion_rate')
     .describe('What to measure: conversion rate or time to convert'),
+  comparison: z.enum(['none', 'overall']).optional(),
   sortOrder: z
     .enum(['asc', 'desc'])
     .optional()

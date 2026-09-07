@@ -471,6 +471,15 @@ function EventCriteriaItem({
                 eventName={criteria.name}
                 filter={filter}
                 onRemove={removeFilter}
+                onChangeProperty={(next) =>
+                  onChange({
+                    ...criteria,
+                    filters: criteria.filters.map((item) =>
+                      item.id === next.id ? next : item,
+                    ),
+                  })
+                }
+                categories={['event']}
                 onChangeValue={updateFilterValue}
                 onChangeOperator={updateFilterOperator}
                 className="rounded border p-2"
@@ -610,6 +619,18 @@ function PropertyBasedBuilder({
               eventName=""
               filter={filter}
               onRemove={removePropertyFilter}
+              onChangeProperty={(next) =>
+                onChange({
+                  ...definition,
+                  criteria: {
+                    ...definition.criteria,
+                    properties: definition.criteria.properties.map((item) =>
+                      item.id === next.id ? next : item,
+                    ),
+                  },
+                })
+              }
+              categories={['profile']}
               onChangeValue={updatePropertyFilterValue}
               onChangeOperator={updatePropertyFilterOperator}
               className="rounded border p-2"

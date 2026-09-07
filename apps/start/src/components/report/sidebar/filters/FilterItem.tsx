@@ -1,4 +1,7 @@
-import { RenderDots } from '@/components/ui/RenderDots';
+import {
+  FilterPropertyPicker,
+  type FilterPropertyPickerProps,
+} from '@/components/filter-property-picker';
 import { Button } from '@/components/ui/button';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
@@ -24,6 +27,9 @@ interface FilterProps {
 
 interface PureFilterProps {
   eventName: string;
+  onChangeProperty: (filter: IChartEventFilter) => void;
+  categories?: FilterPropertyPickerProps['categories'];
+  exclude?: string[];
   filter: IChartEventFilter;
   onRemove: (filter: IChartEventFilter) => void;
   onChangeValue: (
@@ -98,6 +104,18 @@ export function FilterItem({ filter, event }: FilterProps) {
     <PureFilterItem
       filter={filter}
       eventName={event.name}
+      categories={['event', 'profile', 'cohort']}
+      onChangeProperty={(next) =>
+        dispatch(
+          changeEvent({
+            ...event,
+            type: 'event',
+            filters: event.filters.map((item) =>
+              item.id === next.id ? next : item,
+            ),
+          }),
+        )
+      }
       onRemove={onRemove}
       onChangeValue={onChangeValue}
       onChangeOperator={onChangeOperator}
@@ -113,6 +131,9 @@ export function PureFilterItem({
   onChangeValue,
   onChangeOperator,
   className,
+  onChangeProperty,
+  categories = ['event', 'profile'],
+  exclude,
 }: PureFilterProps) {
   const { projectId } = useAppParams();
 
@@ -147,8 +168,15 @@ export function PureFilterItem({
           size={14}
           className="shrink-0 text-muted-foreground"
         />
-        <div className="flex flex-1 ">
-          <RenderDots truncate>{filter.name}</RenderDots>
+        <div className="flex min-w-0 flex-1">
+          <FilterPropertyPicker
+            projectId={projectId}
+            event={eventName || undefined}
+            filter={filter}
+            onChange={onChangeProperty}
+            categories={categories}
+            exclude={exclude}
+          />
         </div>
         <Button variant="ghost" size="sm" onClick={removeFilter}>
           <Trash size={16} />
@@ -157,18 +185,23 @@ export function PureFilterItem({
       <div className="flex gap-1">
         <DropdownMenuComposed
           onChange={changeFilterOperator}
-          items={mapKeys(operators).map((key) => ({
-            value: key,
-            label: operators[key],
-          }))}
+          items={mapKeys(operators)
+            .filter((key) => key !== 'inCohort' && key !== 'notInCohort')
+            .map((key) => ({
+              value: key,
+              label: operators[key],
+            }))}
           label="Operator"
         >
           <Button variant={'outline'} className="whitespace-nowrap">
             {operators[filter.operator]}
           </Button>
         </DropdownMenuComposed>
-        {filter.operator === 'is' || filter.operator === 'isNot' ? (
+        {filter.operator === 'isNull' ||
+        filter.operator === 'isNotNull' ? null : filter.operator === 'is' ||
+          filter.operator === 'isNot' ? (
           <ComboboxAdvanced
+            key={filter.name}
             items={valuesCombobox}
             value={filter.value}
             className="flex-1"
@@ -177,6 +210,7 @@ export function PureFilterItem({
           />
         ) : (
           <InputEnter
+            key={filter.name}
             value={filter.value[0] ? String(filter.value[0]) : ''}
             onChangeValue={(value) => changeFilterValue([value])}
           />

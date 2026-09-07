@@ -1,4 +1,4 @@
-import { RenderDots } from '@/components/ui/RenderDots';
+import { FilterPropertyPicker } from '@/components/filter-property-picker';
 import { Button } from '@/components/ui/button';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
@@ -20,6 +20,8 @@ interface FilterRowProps {
   onChangeOperator: (operator: IChartEventFilterOperator) => void;
   onChangeValue: (value: IChartEventFilterValue[]) => void;
   onRemove: () => void;
+  onChangeProperty: (filter: IChartEventFilter) => void;
+  exclude?: string[];
 }
 
 export function FilterRow({
@@ -29,6 +31,8 @@ export function FilterRow({
   onChangeOperator,
   onChangeValue,
   onRemove,
+  onChangeProperty,
+  exclude,
 }: FilterRowProps) {
   const potentialValues = usePropertyValues({
     event,
@@ -47,11 +51,13 @@ export function FilterRow({
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      <div className="flex h-8 w-fit min-w-0 max-w-[28rem] items-center overflow-hidden rounded-md border bg-background px-2.5 text-sm font-medium">
-        <RenderDots className="min-w-0 truncate" truncate>
-          {filter.name}
-        </RenderDots>
-      </div>
+      <FilterPropertyPicker
+        projectId={projectId}
+        filter={filter}
+        onChange={onChangeProperty}
+        exclude={exclude}
+        event={event}
+      />
       <DropdownMenuComposed
         onChange={onChangeOperator}
         items={mapKeys(operators)
@@ -68,6 +74,7 @@ export function FilterRow({
       </DropdownMenuComposed>
       {isNoValue ? null : isValueSelect ? (
         <ComboboxAdvanced
+          key={filter.name}
           items={valuesCombobox}
           value={filter.value}
           className="w-[220px]"
@@ -78,6 +85,7 @@ export function FilterRow({
       ) : (
         <div className="w-[220px]">
           <InputEnter
+            key={filter.name}
             className="h-8"
             value={filter.value[0] ? String(filter.value[0]) : ''}
             onChangeValue={(value) => onChangeValue([value])}

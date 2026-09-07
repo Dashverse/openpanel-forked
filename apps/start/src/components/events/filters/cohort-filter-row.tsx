@@ -1,4 +1,4 @@
-import { RenderDots } from '@/components/ui/RenderDots';
+import { FilterPropertyPicker } from '@/components/filter-property-picker';
 import { Button } from '@/components/ui/button';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
 import { useCohorts } from '@/hooks/use-cohorts';
@@ -10,16 +10,22 @@ import { Trash2 } from 'lucide-react';
 
 interface CohortFilterRowProps {
   projectId: string;
+  event?: string;
   filter: IChartEventFilter;
   onChangeOperator: (operator: IChartEventFilterOperator) => void;
   onRemove: () => void;
+  onChangeProperty: (filter: IChartEventFilter) => void;
+  exclude?: string[];
 }
 
 export function CohortFilterRow({
   projectId,
+  event,
   filter,
   onChangeOperator,
   onRemove,
+  onChangeProperty,
+  exclude,
 }: CohortFilterRowProps) {
   const { items: cohorts } = useCohorts({ projectId, includeCount: false });
 
@@ -41,11 +47,14 @@ export function CohortFilterRow({
           {isNotIn ? 'Not in cohort' : 'In cohort'}
         </Button>
       </DropdownMenuComposed>
-      <div className="flex h-8 w-fit min-w-0 max-w-[28rem] items-center overflow-hidden rounded-md border bg-background px-2.5 text-sm font-medium">
-        <RenderDots className="min-w-0 truncate" truncate>
-          {cohort?.name ?? cohortId ?? filter.name}
-        </RenderDots>
-      </div>
+      <FilterPropertyPicker
+        projectId={projectId}
+        event={event}
+        filter={filter}
+        onChange={onChangeProperty}
+        exclude={exclude}
+        label={cohort?.name ?? cohortId ?? filter.name}
+      />
       <Button
         variant="ghost"
         size="icon"
