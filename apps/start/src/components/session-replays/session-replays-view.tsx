@@ -7,12 +7,13 @@ import { useTRPC } from '@/integrations/trpc/react';
 import { cn } from '@/utils/cn';
 import { formatDateTime } from '@/utils/date';
 import { getProfileName } from '@/utils/getters';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { EventsFilters } from '@/components/events/filters/events-filters';
 import {
-  Loader2Icon,
-  MonitorPlayIcon,
-  SearchIcon,
-} from 'lucide-react';
+  useEventQueryFilters,
+  useEventQueryNamesFilter,
+} from '@/hooks/use-event-query-filters';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { Loader2Icon, MonitorPlayIcon, SearchIcon } from 'lucide-react';
 import { parseAsString, useQueryState } from 'nuqs';
 import { useEffect, useMemo, useRef } from 'react';
 
@@ -27,6 +28,10 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
     'session',
     parseAsString,
   );
+  // Reuse the chart/events filter model (URL state): event name(s) + property
+  // filters. Passed to session.list as an events subquery ("sessions who did …").
+  const [replayEventFilters] = useEventQueryFilters();
+  const [replayEventNames] = useEventQueryNamesFilter();
 
   const listQuery = useInfiniteQuery(
     trpc.session.list.infiniteQueryOptions(
@@ -34,7 +39,9 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
         projectId,
         take: 30,
         onlyReplays: true,
-        search: debouncedSearch,
+        search: debouncedSearch || undefined,
+        replayEventNames,
+        replayEventFilters,
       },
       {
         getNextPageParam: (lastPage) => lastPage.meta.next,
@@ -45,7 +52,9 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
   const countQuery = useQuery(
     trpc.session.replayCount.queryOptions({
       projectId,
-      search: debouncedSearch,
+      search: debouncedSearch || undefined,
+      replayEventNames,
+      replayEventFilters,
     }),
   );
 
@@ -92,9 +101,12 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search for replays"
+              placeholder="Search by user id"
               className="h-8 pl-8 text-sm"
             />
+          </div>
+          <div className="mt-2">
+            <EventsFilters eventLabel="Sessions who did" />
           </div>
         </div>
 

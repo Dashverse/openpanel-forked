@@ -345,7 +345,11 @@ export const chartRouter = createTRPCRouter({
   values: protectedProcedure
     .input(
       z.object({
-        event: z.string(),
+        // Optional: the filter UI leaves this unset when the event selector is
+        // on "All Events". Missing/empty is treated the same as '*' below, so
+        // values populate across all events instead of the query 400ing on a
+        // required-string input and the dropdown coming back empty.
+        event: z.string().optional(),
         property: z.string(),
         projectId: z.string(),
       }),
@@ -381,10 +385,10 @@ export const chartRouter = createTRPCRouter({
       } else {
         // Read session-level columns (geo/device/referrer) from the tiny
         // `sessions` table instead of scanning billions of `events` rows. Only
-        // when querying all events (`*`) and not a profile.* column — sessions
-        // has no `name` column and no profile join.
+        // when querying all events (`*` or unset) and not a profile.* column —
+        // sessions has no `name` column and no profile join.
         const useSessions =
-          event === '*' &&
+          (event === '*' || !event) &&
           !property.startsWith('profile.') &&
           SESSION_LEVEL_VALUE_COLUMNS.has(property);
 
@@ -402,7 +406,7 @@ export const chartRouter = createTRPCRouter({
           .orderBy('created_at', 'DESC')
           .limit(100_000);
 
-        if (!useSessions && event !== '*') {
+        if (!useSessions && event && event !== '*') {
           query.where('name', '=', event);
         }
 
