@@ -46,7 +46,7 @@ export async function firstEvent() {
     // returning users (firebase-keyed install_profile that's a known canonical account,
     // i.e. a returning user on a new/reset deviceUID the device-guard can't see).
     // Emitting feeds the guard (via first_event_dedup_device_mv), so a device fires once.
-    const candidates = await chQuery<Candidate>(`
+    const candidatesQuery = `
       SELECT
         candidates.deviceUID AS device_id,
         candidates.project_id AS project_id,
@@ -76,7 +76,31 @@ export async function firstEvent() {
         ON candidates.project_id = pa.project_id
         AND candidates.install_profile = pa.profile_id
       SETTINGS max_execution_time = 60
-    `);
+    `;
+
+    // The ANTI LEFT JOIN on the Replicated guard intermittently throws a transient
+    // analyzer error on the first attempt ("Unknown table expression identifier
+    // 'first_event_dedup_device'", code 60) even though the table is present, replicated
+    // and 0-delay on every node — an identical retry resolves fine. It also occasionally
+    // trips the 60s max_execution_time. Retry a few times with a short backoff so the job
+    // absorbs the transient failure silently instead of erroring the whole run (which
+    // spammed ERROR logs and, when both attempts failed in an hour, skipped it). A genuine
+    // failure still throws after the final attempt.
+    const MAX_ATTEMPTS = 3;
+    let candidates: Candidate[] = [];
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        candidates = await chQuery<Candidate>(candidatesQuery);
+        break;
+      } catch (error) {
+        if (attempt === MAX_ATTEMPTS) throw error;
+        logger.warn(
+          `[first-event] candidates query failed (attempt ${attempt}/${MAX_ATTEMPTS}) — retrying`,
+          error instanceof Error ? error.message : String(error),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 2_000 * attempt));
+      }
+    }
 
     if (candidates.length === 0) {
       logger.info('[first-event] No new devices to process');
