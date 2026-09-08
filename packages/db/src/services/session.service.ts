@@ -106,6 +106,12 @@ export interface GetSessionListOptions {
    *  Session Replays tab. Implemented as a `session_id IN (…)` subquery against
    *  session_replay_chunks, scoped to the same date window as the list. */
   onlyReplays?: boolean;
+  /** Replay behavior filters (reuse the chart filter model): keep only sessions
+   *  that fired one of `replayEventNames` and/or matched these event-property
+   *  filters. Applied as an events subquery, so it's "session HAD an event that…"
+   *  (not a session-column match). Built with getEventFiltersWhereClause. */
+  replayEventNames?: string[];
+  replayEventFilters?: IChartEventFilter[];
 }
 
 export function transformSession(session: IClickhouseSession): IServiceSession {
@@ -161,29 +167,60 @@ type Cursor = {
 };
 
 /**
- * Build the session-list WHERE clause for a free-text search. Matches the user
- * (profile name / email) — resolved to profile_ids since the sessions table
- * doesn't carry names. Path/referrer search is intentionally omitted for now.
+ * Session-list search WHERE clause: EXACT user-id (profile_id) match. The old
+ * name/email `ILIKE '%…%'` was removed on purpose — a leading-wildcard scan of
+ * the profiles table is unaffordable at high scale (dashreels). Paste a UID.
  */
-async function buildSessionSearchWhere(
-  search: string,
+function buildSessionSearchWhere(search: string): string {
+  return `profile_id = ${sqlstring.escape(search.trim())}`;
+}
+
+/**
+ * Replay behavior filter — "sessions that HAD an event matching X". Built as an
+ * events subquery so it reuses the chart filter model (getEventFiltersWhereClause
+ * builds the property WHERE against `events`) and the events sort key
+ * (project_id, toDate, name, …) prunes `name` cheaply. The outer sessions query +
+ * has-replay narrows the rest. e.g. name=pricingModalViewed, or platform=web.
+ */
+function buildReplayBehaviorWhere(
   projectId: string,
-): Promise<string> {
-  const s = sqlstring.escape(`%${search}%`);
-  const profileRows = await chQuery<{ id: string }>(
-    `SELECT DISTINCT id
-     FROM ${TABLE_NAMES.profiles}
-     WHERE project_id = ${sqlstring.escape(projectId)}
-       AND (first_name ILIKE ${s}
-            OR last_name ILIKE ${s}
-            OR email ILIKE ${s}
-            OR concat(first_name, ' ', last_name) ILIKE ${s})
-     LIMIT 1000`,
-  );
-  // No matching users → match no sessions (search is user-only for now).
-  if (profileRows.length === 0) return '0';
-  const ids = profileRows.map((r) => sqlstring.escape(r.id)).join(', ');
-  return `profile_id IN (${ids})`;
+  days: number,
+  eventNames?: string[],
+  filters?: IChartEventFilter[],
+): string {
+  const proj = sqlstring.escape(projectId);
+  const chunkScope = `project_id = ${proj}
+        AND started_at > now() - INTERVAL ${days} DAY
+        AND started_at <= now()`;
+  const conds = [
+    `project_id = ${proj}`,
+    `created_at > now() - INTERVAL ${days} DAY`,
+    // Prune the event scan to the days that actually have replays (same
+    // data-derived trick as buildHasReplayWhere). Without this a high-frequency
+    // event (e.g. showOpen) is scanned across the whole org window (360d, 100M+
+    // rows). Replays are sparse/recent, so this cuts it to a handful of days.
+    `toDate(created_at) IN (
+        SELECT arrayJoin([d - 1, d])
+        FROM (
+          SELECT DISTINCT toDate(started_at) AS d
+          FROM ${TABLE_NAMES.session_replay_chunks}
+          WHERE ${chunkScope}
+        )
+      )`,
+  ];
+  if (eventNames?.length) {
+    conds.push(
+      `name IN (${eventNames.map((n) => sqlstring.escape(n)).join(', ')})`,
+    );
+  }
+  if (filters?.length) {
+    conds.push(...Object.values(getEventFiltersWhereClause(filters)));
+  }
+  return `id IN (
+      SELECT DISTINCT session_id
+      FROM ${TABLE_NAMES.events}
+      WHERE ${conds.join(' AND ')}
+    )`;
 }
 
 /**
@@ -200,16 +237,60 @@ async function getSessionLookbackDays(projectId: string): Promise<number> {
 }
 
 /**
- * WHERE fragment keeping only sessions that have a replay recording within the
- * lookback window. Reads just the cheap, ZSTD-compressed session_id column from
- * session_replay_chunks, so it stays fast on the large table.
+ * The Session Replays list uses a much tighter default window than the org
+ * lookback. Replays are recent (~90d TTL) and the list — especially event/
+ * property filters that scan events (e.g. platform) — is slow over a 360-day
+ * window at dashreels scale. Users widen it with the date-range filter.
+ */
+const REPLAY_LOOKBACK_DAYS = 14;
+
+/** Minimum session duration (ms) for the replay list — hides trivial/empty
+ *  recordings (PostHog's default is > 5s). */
+const MIN_REPLAY_DURATION_MS = 5000;
+
+async function getReplayLookbackDays(projectId: string): Promise<number> {
+  return Math.min(await getSessionLookbackDays(projectId), REPLAY_LOOKBACK_DAYS);
+}
+
+/**
+ * WHERE fragment keeping only sessions that have a replay recording.
+ *
+ * `sessions` is `ORDER BY (project_id, toDate(created_at), …)` /
+ * `PARTITION BY toYYYYMM(created_at)`, and `id` is NOT in the sort key — so
+ * `id IN (…)` alone cannot prune and full-scans the entire project (measured
+ * 281M rows / 11.7 GiB / ~15-19s for dashreels → the replay tab times out).
+ *
+ * Fix: also constrain `created_at` to the exact days that actually have chunks.
+ * ClickHouse then prunes to the relevant month-partitions and skips granules
+ * down to just those days. This is derived from the data (the set of chunk
+ * dates), so it adapts to any retention/TTL — we deliberately do NOT hardcode a
+ * chunk-age cap. For a sparse/recent project this is a ~240x cut (dashreels
+ * 15s → 0.06s); a project that records every day degrades gracefully to the
+ * org-window scan. `d - 1` covers a session that started just before midnight
+ * whose first chunk landed on the following day. `started_at <= now()` drops
+ * corrupt future timestamps from the pruning set (e.g. a chunk stamped 2299).
+ *
+ * `days` is the caller's org lookback window (see getSessionLookbackDays) — the
+ * same window the rest of the list uses, kept so the count and list agree.
  */
 function buildHasReplayWhere(projectId: string, days: number): string {
+  const proj = sqlstring.escape(projectId);
+  const scope = `project_id = ${proj}
+        AND started_at > now() - INTERVAL ${days} DAY
+        AND started_at <= now()`;
   return `id IN (
       SELECT DISTINCT session_id
       FROM ${TABLE_NAMES.session_replay_chunks}
-      WHERE project_id = ${sqlstring.escape(projectId)}
-        AND started_at > now() - INTERVAL ${days} DAY
+      WHERE ${scope}
+    )
+    AND created_at > now() - INTERVAL ${days} DAY
+    AND toDate(created_at) IN (
+      SELECT arrayJoin([d - 1, d])
+      FROM (
+        SELECT DISTINCT toDate(started_at) AS d
+        FROM ${TABLE_NAMES.session_replay_chunks}
+        WHERE ${scope}
+      )
     )`;
 }
 
@@ -223,6 +304,8 @@ export async function getSessionList({
   endDate,
   search,
   onlyReplays,
+  replayEventNames,
+  replayEventFilters,
 }: GetSessionListOptions) {
   const { sb, getSql } = createSqlBuilder();
 
@@ -237,18 +320,33 @@ export async function getSessionList({
   if (profileId)
     sb.where.profileId = `profile_id = ${sqlstring.escape(profileId)}`;
   if (search) {
-    sb.where.search = await buildSessionSearchWhere(search, projectId);
+    sb.where.search = buildSessionSearchWhere(search);
   }
   if (filters?.length) {
     Object.assign(sb.where, getEventFiltersWhereClause(filters));
   }
 
   // This will speed up the query quite a lot for big organizations
-  const dateIntervalInDays = await getSessionLookbackDays(projectId);
+  const dateIntervalInDays = onlyReplays
+    ? await getReplayLookbackDays(projectId)
+    : await getSessionLookbackDays(projectId);
 
   if (onlyReplays) {
     // Keep only sessions with a replay recording, within the same date window.
     sb.where.hasReplay = buildHasReplayWhere(projectId, dateIntervalInDays);
+    // Hide trivial/empty recordings (PostHog defaults to > 5s).
+    sb.where.minDuration = `duration >= ${MIN_REPLAY_DURATION_MS}`;
+  }
+
+  // Behavior filters (PostHog-style): keep sessions that fired the selected
+  // event(s) and/or matched the event-property filters — one events subquery.
+  if (replayEventNames?.length || replayEventFilters?.length) {
+    sb.where.replayBehavior = buildReplayBehaviorWhere(
+      projectId,
+      dateIntervalInDays,
+      replayEventNames,
+      replayEventFilters,
+    );
   }
 
   if (cursor) {
@@ -355,16 +453,25 @@ export async function getSessionsCount({
   endDate,
   search,
   onlyReplays,
+  replayEventNames,
+  replayEventFilters,
 }: Omit<GetSessionListOptions, 'take' | 'cursor'>) {
   const { sb, getSql } = createSqlBuilder();
 
-  sb.select.count = 'count(*) as count';
+  // uniqExact(id) — count DISTINCT sessions. `count(*) WHERE sign=1` over-counts
+  // a VersionedCollapsingMergeTree by the number of un-merged session versions.
+  sb.select.count = 'uniqExact(id) as count';
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   sb.where.sign = 'sign = 1';
 
   if (onlyReplays) {
-    const days = await getSessionLookbackDays(projectId);
+    const days = onlyReplays
+      ? await getReplayLookbackDays(projectId)
+      : await getSessionLookbackDays(projectId);
     sb.where.hasReplay = buildHasReplayWhere(projectId, days);
+    // Hide trivial/empty recordings (PostHog defaults to > 5s). Half of dashreels
+    // replay sessions are < 5s (0:00 rows) and just pad the count.
+    sb.where.minDuration = `duration >= ${MIN_REPLAY_DURATION_MS}`;
   }
 
   if (profileId) {
@@ -376,7 +483,19 @@ export async function getSessionsCount({
   }
 
   if (search) {
-    sb.where.search = await buildSessionSearchWhere(search, projectId);
+    sb.where.search = buildSessionSearchWhere(search);
+  }
+
+  if (replayEventNames?.length || replayEventFilters?.length) {
+    const days = onlyReplays
+      ? await getReplayLookbackDays(projectId)
+      : await getSessionLookbackDays(projectId);
+    sb.where.replayBehavior = buildReplayBehaviorWhere(
+      projectId,
+      days,
+      replayEventNames,
+      replayEventFilters,
+    );
   }
 
   if (filters && filters.length > 0) {
@@ -496,13 +615,28 @@ export async function getSessionReplayChunksFrom(
   };
 }
 
+// A recording's window_id is reused across reloads/idle, so its raw span is
+// mostly dead air between chunks. Chunk gaps larger than this are treated as
+// idle and collapsed on the scrubber (matches "skip idle" playback semantics).
+// Shared by getSessionWindows (chip duration) and getSessionWindowSegments
+// (scrubber) so the two always agree.
+const REPLAY_IDLE_GAP_MS = 15_000;
+
 export type SessionReplayWindow = {
   windowId: string;
   chunkCount: number;
   fullSnapshotCount: number;
   startedAtMs: number;
   endedAtMs: number;
+  // Raw wall-clock span (max ended_at − min started_at). This is the coordinate
+  // the player/scrubber uses — rrweb positions events at their true timestamps.
   durationMs: number;
+  // Honest "how long was this actually recorded" duration: the sum of each
+  // chunk's own span, which excludes the dead gaps *between* chunks. window_id
+  // persists in sessionStorage across reloads/SPA-navs, so one window can glue
+  // dozens of page-loads together with huge idle gaps — `durationMs` counts that
+  // dead air (a tab reads 163 min when only ~16 min was recorded), this doesn't.
+  activeDurationMs: number;
 };
 
 /**
@@ -524,16 +658,34 @@ export async function getSessionWindows(
     full_snapshot_count: string;
     started_at_ms: string;
     ended_at_ms: string;
+    active_ms: string;
   }>(
+    // active_ms = raw span minus the idle gaps (≥ REPLAY_IDLE_GAP_MS) between
+    // consecutive chunks. This is the SAME definition as getSessionWindowSegments
+    // (merge chunks whose gap < threshold, collapse the larger gaps), so the tab
+    // chip and the player's gap-collapsed scrubber/readout always agree.
     `SELECT
        window_id,
        toString(count(DISTINCT chunk_index)) AS chunk_count,
        toString(countIf(is_full_snapshot)) AS full_snapshot_count,
        toUnixTimestamp64Milli(min(started_at)) AS started_at_ms,
-       toUnixTimestamp64Milli(max(ended_at)) AS ended_at_ms
-     FROM ${TABLE_NAMES.session_replay_chunks}
-     WHERE session_id = ${sqlstring.escape(sessionId)}
-       AND project_id = ${sqlstring.escape(projectId)}
+       toUnixTimestamp64Milli(max(ended_at)) AS ended_at_ms,
+       toString(greatest(0,
+         (toUnixTimestamp64Milli(max(ended_at)) - toUnixTimestamp64Milli(min(started_at)))
+         - sum(if(prev_e_ms > 0 AND (s_ms - prev_e_ms) >= ${REPLAY_IDLE_GAP_MS}, s_ms - prev_e_ms, 0))
+       )) AS active_ms
+     FROM (
+       SELECT
+         window_id, chunk_index, is_full_snapshot, started_at, ended_at,
+         toUnixTimestamp64Milli(started_at) AS s_ms,
+         lagInFrame(toUnixTimestamp64Milli(ended_at)) OVER (
+           PARTITION BY window_id ORDER BY started_at
+           ROWS BETWEEN 1 PRECEDING AND CURRENT ROW
+         ) AS prev_e_ms
+       FROM ${TABLE_NAMES.session_replay_chunks}
+       WHERE session_id = ${sqlstring.escape(sessionId)}
+         AND project_id = ${sqlstring.escape(projectId)}
+     )
      GROUP BY window_id
      ORDER BY started_at_ms`,
   );
@@ -548,8 +700,58 @@ export async function getSessionWindows(
       startedAtMs,
       endedAtMs,
       durationMs: Math.max(0, endedAtMs - startedAtMs),
+      activeDurationMs: Math.max(0, Number(row.active_ms)),
     };
   });
+}
+
+export type SessionReplaySegment = { startMs: number; endMs: number };
+
+/**
+ * Active recording segments for a window, as wall-clock [startMs, endMs] ranges
+ * with the large idle gaps between chunks removed. The player stays wall-clock;
+ * the scrubber uses these to render a gap-collapsed timeline (PostHog-style) so
+ * a tab that spans 3 hours of mostly-idle air shows its ~few minutes of real
+ * activity with proper spacing.
+ *
+ * Contiguous chunks (gap < REPLAY_IDLE_GAP_MS) merge into one segment; a larger
+ * gap starts a new segment (the gap itself is the collapsed idle period).
+ */
+export async function getSessionWindowSegments(
+  sessionId: string,
+  projectId: string,
+  windowId?: string,
+): Promise<SessionReplaySegment[]> {
+  const windowScope =
+    windowId !== undefined
+      ? `AND window_id = ${sqlstring.escape(windowId)}`
+      : '';
+  const rows = await chQuery<{ start_ms: string; end_ms: string }>(
+    `SELECT
+       toUnixTimestamp64Milli(started_at) AS start_ms,
+       toUnixTimestamp64Milli(ended_at) AS end_ms
+     FROM ${TABLE_NAMES.session_replay_chunks}
+     WHERE session_id = ${sqlstring.escape(sessionId)}
+       AND project_id = ${sqlstring.escape(projectId)}
+       ${windowScope}
+     ORDER BY started_at`,
+  );
+
+  const segments: SessionReplaySegment[] = [];
+  for (const row of rows) {
+    const startMs = Number(row.start_ms);
+    const endMs = Math.max(startMs, Number(row.end_ms));
+    const last = segments[segments.length - 1];
+    // Merge into the current segment when this chunk starts within the idle
+    // threshold of the last one's end (normal recording flow); otherwise the
+    // gap is idle → start a fresh segment.
+    if (last && startMs - last.endMs < REPLAY_IDLE_GAP_MS) {
+      if (endMs > last.endMs) last.endMs = endMs;
+    } else {
+      segments.push({ startMs, endMs });
+    }
+  }
+  return segments;
 }
 
 /**
@@ -723,8 +925,14 @@ export async function batchSessionReplayDuration(
   try {
     const inList = sessionIds.map((id) => sqlstring.escape(id)).join(',');
     const rows = await chQuery<{ session_id: string; duration_ms: string }>(
+      // Active recording time = the sum of each chunk's OWN span, not
+      // max(ended_at) - min(started_at). The wall-clock envelope over-counts
+      // badly: it includes idle gaps between chunks (the recorder pauses while
+      // the DOM is static) and spans every tab, so a mostly-idle 30-min session
+      // with ~25s of real activity showed "29:03". Summing per-chunk spans
+      // yields the length the player actually plays (idle excluded).
       `SELECT session_id,
-              toUnixTimestamp64Milli(max(ended_at)) - toUnixTimestamp64Milli(min(started_at)) AS duration_ms
+              sum(toUnixTimestamp64Milli(ended_at) - toUnixTimestamp64Milli(started_at)) AS duration_ms
        FROM ${TABLE_NAMES.session_replay_chunks}
        WHERE project_id = ${sqlstring.escape(projectId)}
          AND session_id IN (${inList})

@@ -29,8 +29,12 @@ export function ReplayEventItem({
       type="button"
       onClick={onClick}
       className={cn(
-        'col w-full gap-3 border-b px-3 py-2 text-left transition-colors hover:bg-accent',
-        isCurrent ? 'bg-accent/10' : 'bg-card',
+        // All rows carry a transparent left bar so the current row's colored
+        // bar doesn't shift the layout.
+        'col w-full gap-3 border-b border-l-2 border-l-transparent px-3 py-2 text-left transition-colors hover:bg-accent',
+        isCurrent
+          ? 'border-l-primary bg-primary/10 font-medium'
+          : 'bg-card',
       )}
     >
       <div className="row items-center gap-2">

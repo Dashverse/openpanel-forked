@@ -31,6 +31,7 @@ import EventDetails from './event-details';
 import OnboardingTroubleshoot from './onboarding-troubleshoot';
 import OverviewChartDetails from './overview-chart-details';
 import OverviewFilters from './overview-filters';
+import RequestPasswordReset from './request-reset-password';
 import SaveReport from './save-report';
 import SelectBillingPlan from './select-billing-plan';
 import ShareOverviewModal from './share-overview-modal';
@@ -39,6 +40,7 @@ import ViewChartUsers from './view-chart-users';
 const modals = {
   OverviewTopPagesModal: OverviewTopPagesModal,
   OverviewTopGenericModal: OverviewTopGenericModal,
+  RequestPasswordReset: RequestPasswordReset,
   EditEvent: EditEvent,
   EditMember: EditMember,
   EventDetails: EventDetails,

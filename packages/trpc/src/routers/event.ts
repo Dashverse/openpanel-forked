@@ -97,9 +97,14 @@ export const eventRouter = createTRPCRouter({
         // Profile page: merge the identified profile with its anonymous device
         // aliases so the timeline shows the full pre-login + post-login journey.
         mergeIdentity: z.boolean().optional(),
+        // Max events to return. Defaults to 50 (the paginated Events table). The
+        // replay timeline needs the whole session (multi-tab), so it passes a
+        // higher cap — otherwise the top-50 are all from one tab and other tabs
+        // render "No events".
+        take: z.number().max(5000).optional(),
       }),
     )
-    .query(async ({ input: { columnVisibility, mergeIdentity, ...input } }) => {
+    .query(async ({ input: { columnVisibility, mergeIdentity, take, ...input } }) => {
       // Resolve the canonical + anonymous-alias id set once (cached). Passed as a
       // literal `profile_id IN (...)` list — resolving inline as a subquery would
       // re-scan the 36M-row profile_aliases table on every page/paginate.
@@ -111,7 +116,7 @@ export const eventRouter = createTRPCRouter({
       const items = await getEventList({
         ...input,
         profileIds,
-        take: 50,
+        take: take ?? 50,
         cursor: input.cursor ? new Date(input.cursor) : undefined,
         select: {
           ...columnVisibility,

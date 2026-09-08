@@ -237,6 +237,15 @@ function EventCriteriaItem({
                   eventName={criteria.name}
                   filter={filter}
                   onRemove={removeFilter}
+                  onChangeProperty={(next) =>
+                    onChange({
+                      ...criteria,
+                      filters: criteria.filters.map((item) =>
+                        item.id === next.id ? next : item,
+                      ),
+                    })
+                  }
+                  categories={['event']}
                   onChangeValue={updateFilterValue}
                   onChangeOperator={updateFilterOperator}
                   className="rounded border p-2"

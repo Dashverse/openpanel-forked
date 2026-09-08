@@ -25,7 +25,6 @@ import { appRouter, createContext } from '@openpanel/trpc';
 import {
   EMPTY_SESSION,
   type SessionValidationResult,
-  assertGoogleOnlyAuthRuntime,
   decodeSessionToken,
   validateSessionToken,
 } from '@openpanel/auth';
@@ -75,7 +74,6 @@ const port = Number.parseInt(process.env.API_PORT || '3000', 10);
 const startServer = async () => {
   logger.info('Starting server');
   try {
-    assertGoogleOnlyAuthRuntime();
     const fastify = Fastify({
       maxParamLength: 15_000,
       bodyLimit: 1048576 * 500, // 500MB

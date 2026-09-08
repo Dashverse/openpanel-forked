@@ -226,6 +226,24 @@ function ReplayBufferBootstrap({
   return null;
 }
 
+/**
+ * Registers the window's active recording segments with the player context, so
+ * the scrubber + time readout collapse idle gaps (display space). Must render
+ * inside <ReplayProvider>.
+ */
+function ReplaySegmentsBootstrap({
+  segments,
+}: {
+  segments?: { startMs: number; endMs: number }[];
+}) {
+  const { setSegments } = useReplayContext();
+  useEffect(() => {
+    setSegments(segments ?? null);
+    return () => setSegments(null);
+  }, [segments, setSegments]);
+  return null;
+}
+
 export type ReplaySeekControls = { seekToWallMs: (wallMs: number) => void };
 
 /**
@@ -285,7 +303,12 @@ function ReplayContent({
       projectId,
       sessionId,
       filters: [],
-      columnVisibility: {},
+      // The whole session (multi-tab) — not the paginated top-50, or tabs other
+      // than the most recent render empty.
+      take: 2000,
+      // Request window_id so the feed can scope events to the current tab
+      // (with an empty-string fallback for backend / pre-window_id events).
+      columnVisibility: { windowId: true },
     })
   );
 
@@ -306,7 +329,24 @@ function ReplayContent({
     trpc.session.replayMeta.queryOptions({ sessionId, projectId }),
   );
 
-  const events = eventsData?.data ?? [];
+  // Active recording segments (idle gaps collapsed) for the playing window —
+  // drives the gap-collapsed scrubber + time readout (display space).
+  const { data: segments } = useQuery(
+    trpc.session.replayWindowSegments.queryOptions({
+      sessionId,
+      projectId,
+      windowId,
+    }),
+  );
+
+  // Scope events to the tab (window) being played. Events with an empty
+  // window_id — backend events, and every event in a pre-window_id (legacy)
+  // session — always show. That empty-string arm IS the fallback: a legacy
+  // session has windowId=undefined and all events '' → the filter is a no-op
+  // and you get today's session-wide, timestamp-ordered behaviour.
+  const events = (eventsData?.data ?? []).filter(
+    (e) => !windowId || !e.windowId || e.windowId === windowId,
+  );
   // Memoize the flat events array so its identity is stable across re-renders
   // (replayMeta landing, buffering state flipping, etc.) — otherwise rrweb's
   // useEffect would tear down and recreate the player on every parent render,
@@ -367,6 +407,7 @@ function ReplayContent({
       totalDurationMs={windowDurationMs ?? replayMeta?.totalDurationMs}
     >
       <SeekBridge controlsRef={controlsRef} />
+      <ReplaySegmentsBootstrap segments={segments} />
       <div
         className={cn(
           'grid gap-4 [&:fullscreen]:flex [&:fullscreen]:flex-col [&:fullscreen]:bg-background [&:fullscreen]:p-4',
@@ -493,8 +534,10 @@ export function ReplayShell({
             )}
           >
             <span>{w.windowId === '' ? 'Legacy' : `Tab ${i + 1}`}</span>
+            {/* Active (recorded) duration, not the raw wall-clock span — a
+             * window reused across reloads spans hours of dead gaps. */}
             <span className="font-mono opacity-70">
-              {formatDuration(w.durationMs)}
+              {formatDuration(w.activeDurationMs)}
             </span>
           </button>
         );

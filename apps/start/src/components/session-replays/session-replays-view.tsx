@@ -7,73 +7,15 @@ import { useTRPC } from '@/integrations/trpc/react';
 import { cn } from '@/utils/cn';
 import { formatDateTime } from '@/utils/date';
 import { getProfileName } from '@/utils/getters';
-import { EventIcon } from '@/components/events/event-icon';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { format } from 'date-fns';
+import { EventsFilters } from '@/components/events/filters/events-filters';
 import {
-  ChevronDownIcon,
-  Loader2Icon,
-  MonitorPlayIcon,
-  SearchIcon,
-} from 'lucide-react';
+  useEventQueryFilters,
+  useEventQueryNamesFilter,
+} from '@/hooks/use-event-query-filters';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { Loader2Icon, MonitorPlayIcon, SearchIcon } from 'lucide-react';
 import { parseAsString, useQueryState } from 'nuqs';
-import { useEffect, useMemo, useRef, useState } from 'react';
-
-/** Inline event list shown under the selected replay (Mixpanel-style).
- *  Display-only — no click-to-seek, because a session's events span multiple
- *  tabs/windows and the player only shows one at a time, so jumping would land
- *  on the wrong recording. */
-function InlineSessionEvents({
-  projectId,
-  sessionId,
-}: {
-  projectId: string;
-  sessionId: string;
-}) {
-  const trpc = useTRPC();
-  const { data, isLoading } = useQuery(
-    trpc.event.events.queryOptions({
-      projectId,
-      sessionId,
-      filters: [],
-      columnVisibility: {},
-    }),
-  );
-  const events = data?.data ?? [];
-
-  if (isLoading) {
-    return (
-      <div className="flex justify-center py-3">
-        <Loader2Icon className="size-3 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-  if (events.length === 0) {
-    return (
-      <div className="px-3 py-2 pl-12 text-xs text-muted-foreground">
-        No events
-      </div>
-    );
-  }
-  return (
-    <div className="max-h-72 overflow-y-auto bg-muted/30">
-      {events.map((ev) => (
-        <div
-          key={ev.id}
-          className="flex w-full items-center gap-2 border-b border-border/50 px-3 py-1.5 pl-11 text-left text-xs last:border-b-0"
-        >
-          <span className="w-14 shrink-0 text-muted-foreground tabular-nums">
-            {format(new Date(ev.createdAt), 'h:mm a')}
-          </span>
-          <EventIcon name={ev.name} meta={ev.meta} size="xs" />
-          <span className="truncate">
-            {ev.name === 'screen_view' ? ev.path || ev.name : ev.name}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
+import { useEffect, useMemo, useRef } from 'react';
 
 /**
  * Mixpanel-style Session Replays browser: a searchable list of sessions that
@@ -86,9 +28,10 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
     'session',
     parseAsString,
   );
-  const [expandedSessionId, setExpandedSessionId] = useState<string | null>(
-    null,
-  );
+  // Reuse the chart/events filter model (URL state): event name(s) + property
+  // filters. Passed to session.list as an events subquery ("sessions who did …").
+  const [replayEventFilters] = useEventQueryFilters();
+  const [replayEventNames] = useEventQueryNamesFilter();
 
   const listQuery = useInfiniteQuery(
     trpc.session.list.infiniteQueryOptions(
@@ -96,7 +39,9 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
         projectId,
         take: 30,
         onlyReplays: true,
-        search: debouncedSearch,
+        search: debouncedSearch || undefined,
+        replayEventNames,
+        replayEventFilters,
       },
       {
         getNextPageParam: (lastPage) => lastPage.meta.next,
@@ -107,7 +52,9 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
   const countQuery = useQuery(
     trpc.session.replayCount.queryOptions({
       projectId,
-      search: debouncedSearch,
+      search: debouncedSearch || undefined,
+      replayEventNames,
+      replayEventFilters,
     }),
   );
 
@@ -138,7 +85,7 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
   const count = countQuery.data ?? sessions.length;
 
   return (
-    <div className="flex h-[calc(100vh-1rem)] overflow-hidden rounded-lg border bg-background">
+    <div className="flex h-full overflow-hidden bg-background">
       {/* LEFT — replays list */}
       <div className="flex w-[340px] shrink-0 flex-col border-r">
         <div className="border-b p-3">
@@ -154,9 +101,12 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search for replays"
+              placeholder="Search by user id"
               className="h-8 pl-8 text-sm"
             />
+          </div>
+          <div className="mt-2">
+            <EventsFilters eventLabel="Sessions who did" />
           </div>
         </div>
 
@@ -172,7 +122,6 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
           ) : (
             sessions.map((s) => {
               const isActive = s.id === selectedSessionId;
-              const isExpanded = s.id === expandedSessionId;
               const name = getProfileName(s.profile) || s.profileId;
               return (
                 <div key={s.id} className="border-b last:border-b-0">
@@ -186,7 +135,6 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
                       type="button"
                       onClick={() => {
                         void setSelectedSessionId(s.id);
-                        setExpandedSessionId(s.id);
                       }}
                       className="flex min-w-0 flex-1 items-center gap-3 text-left"
                     >
@@ -215,28 +163,7 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
                         </div>
                       </div>
                     </button>
-                    <button
-                      type="button"
-                      aria-label={isExpanded ? 'Hide events' : 'Show events'}
-                      onClick={() =>
-                        setExpandedSessionId(isExpanded ? null : s.id)
-                      }
-                      className="shrink-0 rounded p-1 text-muted-foreground opacity-60 hover:bg-muted hover:opacity-100"
-                    >
-                      <ChevronDownIcon
-                        className={cn(
-                          'size-4 transition-transform',
-                          isExpanded && 'rotate-180',
-                        )}
-                      />
-                    </button>
                   </div>
-                  {isExpanded && (
-                    <InlineSessionEvents
-                      projectId={projectId}
-                      sessionId={s.id}
-                    />
-                  )}
                 </div>
               );
             })
@@ -261,13 +188,12 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
       {/* RIGHT — player (fills the pane; window tabs as a right rail) */}
       <div className="flex min-w-0 flex-1 flex-col overflow-y-auto p-4">
         {selectedSessionId ? (
-          <div className="my-auto w-full">
+          <div className="w-full">
             <ReplayShell
               key={selectedSessionId}
               sessionId={selectedSessionId}
               projectId={projectId}
-              showEventFeed={false}
-              tabsOnRight
+              showEventFeed
             />
           </div>
         ) : (

@@ -6,6 +6,7 @@ import {
   getSessionReplayChunksByIndexRange,
   getSessionReplayChunksFrom,
   getSessionReplayMeta,
+  getSessionWindowSegments,
   getSessionWindows,
   getSessionsCount,
   sessionHasReplay,
@@ -51,6 +52,8 @@ export const sessionRouter = createTRPCRouter({
         search: z.string().optional(),
         take: z.number().default(50),
         onlyReplays: z.boolean().optional(),
+        replayEventNames: z.array(z.string()).optional(),
+        replayEventFilters: z.array(zChartEventFilter).optional(),
       }),
     )
     .query(async ({ input }) => {
@@ -76,6 +79,8 @@ export const sessionRouter = createTRPCRouter({
         startDate: z.date().optional(),
         endDate: z.date().optional(),
         search: z.string().optional(),
+        replayEventNames: z.array(z.string()).optional(),
+        replayEventFilters: z.array(zChartEventFilter).optional(),
       }),
     )
     .query(async ({ input }) => {
@@ -125,6 +130,21 @@ export const sessionRouter = createTRPCRouter({
     .input(z.object({ sessionId: z.string(), projectId: z.string() }))
     .query(({ input: { sessionId, projectId } }) => {
       return getSessionReplayMeta(sessionId, projectId);
+    }),
+
+  // Active recording segments for a window (idle gaps collapsed) — drives the
+  // gap-collapsed scrubber so a mostly-idle multi-hour tab shows its real
+  // minutes of activity.
+  replayWindowSegments: protectedProcedure
+    .input(
+      z.object({
+        sessionId: z.string(),
+        projectId: z.string(),
+        windowId: z.string().optional(),
+      }),
+    )
+    .query(({ input: { sessionId, projectId, windowId } }) => {
+      return getSessionWindowSegments(sessionId, projectId, windowId);
     }),
 
   replayChunksByIndexRange: protectedProcedure

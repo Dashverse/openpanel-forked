@@ -71,6 +71,7 @@ export interface IClickhouseEvent {
   profile_id: string;
   project_id: string;
   session_id: string;
+  window_id: string;
   path: string;
   origin: string;
   referrer: string;
@@ -157,6 +158,7 @@ export function transformEvent(event: IClickhouseEvent): IServiceEvent {
     profileId: event.profile_id,
     projectId: event.project_id,
     sessionId: event.session_id,
+    windowId: event.window_id,
     properties: event.properties,
     createdAt: convertClickhouseDateToJs(event.created_at),
     country: event.country,
@@ -202,6 +204,7 @@ export interface IServiceEvent {
   profileId: string;
   projectId: string;
   sessionId: string;
+  windowId?: string;
   properties: Record<string, unknown> & {
     hash?: string;
     query?: Record<string, unknown>;
@@ -372,6 +375,7 @@ export async function createEvent(payload: IServiceCreateEventPayload) {
     profile_id: payload.profileId ? String(payload.profileId) : '',
     project_id: payload.projectId,
     session_id: payload.sessionId,
+    window_id: payload.windowId ?? '',
     properties: toDots(payload.properties),
     path: payload.path ?? '',
     origin: payload.origin ?? '',
@@ -561,6 +565,9 @@ export async function getEventList(options: GetEventListOptions) {
   }
   if (select.sessionId) {
     sb.select.sessionId = 'session_id';
+  }
+  if (select.windowId) {
+    sb.select.windowId = 'window_id';
   }
   if (select.properties) {
     sb.select.properties = 'properties';

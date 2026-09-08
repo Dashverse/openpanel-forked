@@ -1,5 +1,14 @@
 import { ColorSquare } from '@/components/color-square';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { pushModal } from '@/modals';
 import type { RouterOutputs } from '@/trpc/client';
 import { cn } from '@/utils/cn';
@@ -124,14 +133,7 @@ function ChartName({
   );
 }
 
-export function Tables({
-  data: {
-    current: { steps, mostDropoffsStep, lastStep, breakdowns },
-    previous: previousData,
-  },
-}: Props) {
-  const number = useNumber();
-  const hasHeader = breakdowns.length > 0;
+function useInspectFunnelStep() {
   const {
     report: {
       projectId,
@@ -147,7 +149,10 @@ export function Tables({
     },
   } = useReportChartContext();
 
-  const handleInspectStep = (step: (typeof steps)[0], stepIndex: number) => {
+  return (
+    step: Props['data']['current']['steps'][number],
+    stepIndex: number,
+  ) => {
     if (!projectId || !step.event.id) return;
 
     // For funnels, we need to pass the step index so the modal can query
@@ -171,6 +176,17 @@ export function Tables({
       stepIndex, // Pass the step index for funnel queries
     });
   };
+}
+
+export function Tables({
+  data: {
+    current: { steps, mostDropoffsStep, lastStep, breakdowns },
+    previous: previousData,
+  },
+}: Props) {
+  const number = useNumber();
+  const hasHeader = breakdowns.length > 0;
+  const handleInspectStep = useInspectFunnelStep();
   return (
     <div className={cn('col @container divide-y divide-border card')}>
       {hasHeader && <ChartName breakdowns={breakdowns} className="p-4 py-3" />}
@@ -320,6 +336,150 @@ export function Tables({
   );
 }
 
+export function BreakdownTable({
+  data,
+  hiddenSeries,
+  onHiddenSeriesChange,
+}: {
+  data: RouterOutputs['chart']['funnel'];
+  hiddenSeries: string[];
+  onHiddenSeriesChange: (ids: string[]) => void;
+}) {
+  const number = useNumber();
+  const handleInspectStep = useInspectFunnelStep();
+  const steps = data.current[0]?.steps ?? [];
+
+  return (
+    <div className="overflow-hidden rounded-lg border">
+      <Table aria-label="Funnel breakdown">
+        <TableHeader>
+          <TableRow className="hover:bg-transparent">
+            <TableHead
+              scope="col"
+              className="sticky left-0 z-10 min-w-48 bg-card border-r"
+            >
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  aria-label="Select all breakdowns"
+                  checked={
+                    data.current.every(
+                      (item) => !hiddenSeries.includes(item.id),
+                    )
+                      ? true
+                      : data.current.some(
+                            (item) => !hiddenSeries.includes(item.id),
+                          )
+                        ? 'indeterminate'
+                        : false
+                  }
+                  onCheckedChange={(checked) =>
+                    onHiddenSeriesChange(
+                      checked ? [] : data.current.map((item) => item.id),
+                    )
+                  }
+                />
+                Breakdown
+              </div>
+            </TableHead>
+            {steps.map((step, index) => (
+              <TableHead
+                key={step.event.id}
+                scope="col"
+                className="min-w-44 border-r last:border-r-0 normal-case text-sm"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">{index + 1}.</span>
+                  {step.event.displayName}
+                </div>
+              </TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {data.current.map((funnel, breakdownIndex) => {
+            const previous = data.previous?.find(
+              (item) => item.id === funnel.id,
+            );
+            return (
+              <TableRow key={funnel.id}>
+                <TableHead
+                  scope="row"
+                  className="sticky left-0 z-10 bg-card border-r normal-case text-sm"
+                >
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      aria-label={`Show ${funnel.breakdowns.join(' / ') || 'breakdown'}`}
+                      checked={!hiddenSeries.includes(funnel.id)}
+                      onCheckedChange={(checked) =>
+                        onHiddenSeriesChange(
+                          checked
+                            ? hiddenSeries.filter((id) => id !== funnel.id)
+                            : [...hiddenSeries, funnel.id],
+                        )
+                      }
+                    />
+                    <ColorSquare color={getChartColor(breakdownIndex)} />
+                    <ChartName breakdowns={funnel.breakdowns} />
+                  </div>
+                </TableHead>
+                {steps.map((column, stepIndex) => {
+                  const step = funnel.steps.find(
+                    (item) => item.event.id === column.event.id,
+                  );
+                  const previousStep = previous?.steps.find(
+                    (item) => item.event.id === column.event.id,
+                  );
+                  return (
+                    <TableCell
+                      key={column.event.id}
+                      className="border-r last:border-r-0 py-2"
+                    >
+                      {step ? (
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-baseline gap-2 tabular-nums">
+                            <div className="font-mono font-semibold">
+                              {number.format(step.count)}
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span title="Conversion from the first step">
+                                {number.formatWithUnit(step.percent / 100, '%')}
+                              </span>
+                              {previousStep && (
+                                <PreviousDiffIndicatorPure
+                                  {...getPreviousMetric(
+                                    step.percent,
+                                    previousStep.percent,
+                                  )}
+                                />
+                              )}
+                            </div>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 w-8 shrink-0 p-0"
+                            onClick={() => handleInspectStep(step, stepIndex)}
+                            aria-label={`View users who completed ${step.event.displayName}`}
+                            title="View users who completed this step"
+                          >
+                            <UsersIcon size={16} />
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  );
+                })}
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 type RechartData = {
   name: string;
   [key: `step:percent:${number}`]: number | null;
@@ -347,7 +507,7 @@ const useRechartData = ({
         id: step?.event.id ?? '',
         name: step?.event.displayName ?? '',
         ...current.reduce((acc, item, index) => {
-          const diff = previous?.[index];
+          const diff = previous?.find((previous) => previous.id === item.id);
           return {
             ...acc,
             [`step:percent:${index}`]: item.steps[stepIndex]?.percent ?? null,
@@ -370,7 +530,10 @@ const useRechartData = ({
   );
 };
 
-export function Chart({ data }: { data: RouterOutputs['chart']['funnel'] }) {
+export function Chart({
+  data,
+  hiddenSeries = [],
+}: { data: RouterOutputs['chart']['funnel']; hiddenSeries?: string[] }) {
   const rechartData = useRechartData(data);
   const xAxisProps = useXAxisProps();
   const yAxisProps = useYAxisProps();
@@ -378,7 +541,7 @@ export function Chart({ data }: { data: RouterOutputs['chart']['funnel'] }) {
   const { options, isEditMode } = useReportChartContext();
 
   return (
-    <TooltipProvider data={data.current}>
+    <TooltipProvider data={data.current} hiddenSeries={hiddenSeries}>
       <div
         className={cn(
           'w-full',
@@ -416,29 +579,32 @@ export function Chart({ data }: { data: RouterOutputs['chart']['funnel'] }) {
             />
             <YAxis {...yAxisProps} />
             {hasBreakdowns ? (
-              data.current.map((item, breakdownIndex) => (
-                <Bar
-                  key={`step:percent:${item.id}`}
-                  dataKey={`step:percent:${breakdownIndex}`}
-                  shape={<BarShapeProps />}
-                >
-                  {rechartData.map((item, stepIndex) => (
-                    <Cell
-                      key={`${item.name}-${breakdownIndex}`}
-                      fill={getChartTranslucentColor(breakdownIndex)}
-                      stroke={getChartColor(breakdownIndex)}
-                    />
-                  ))}
-                  <LabelList
-                    dataKey={`step:percent:${breakdownIndex}`}
-                    position="top"
-                    offset={8}
-                    className="fill-foreground"
-                    fontSize={10}
-                    formatter={formatPercentLabel}
-                  />
-                </Bar>
-              ))
+              data.current.map(
+                (item, breakdownIndex) =>
+                  !hiddenSeries.includes(item.id) && (
+                    <Bar
+                      key={`step:percent:${item.id}`}
+                      dataKey={`step:percent:${breakdownIndex}`}
+                      shape={<BarShapeProps />}
+                    >
+                      {rechartData.map((item, stepIndex) => (
+                        <Cell
+                          key={`${item.name}-${breakdownIndex}`}
+                          fill={getChartTranslucentColor(breakdownIndex)}
+                          stroke={getChartColor(breakdownIndex)}
+                        />
+                      ))}
+                      <LabelList
+                        dataKey={`step:percent:${breakdownIndex}`}
+                        position="top"
+                        offset={8}
+                        className="fill-foreground"
+                        fontSize={10}
+                        formatter={formatPercentLabel}
+                      />
+                    </Bar>
+                  ),
+              )
             ) : (
               <Bar
                 data={rechartData}
@@ -474,6 +640,7 @@ const { Tooltip, TooltipProvider } = createChartTooltip<
   RechartData,
   {
     data: RouterOutputs['chart']['funnel']['current'];
+    hiddenSeries: string[];
   }
 >(({ data: dataArray, context, ...props }) => {
   const data = dataArray[0]!;
@@ -494,7 +661,7 @@ const { Tooltip, TooltipProvider } = createChartTooltip<
       {variants.map((key, breakdownIndex) => {
         const variant = data[key];
         const prevVariant = data[`prev_${key}`];
-        if (!variant?.step) {
+        if (!variant?.step || context.hiddenSeries.includes(variant.id)) {
           return null;
         }
         return (

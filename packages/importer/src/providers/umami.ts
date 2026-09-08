@@ -302,6 +302,7 @@ export class UmamiProvider extends BaseImportProvider<UmamiRawEvent> {
       profile_id: profileId,
       project_id: projectId,
       session_id: rawEvent.session_id || '',
+      window_id: '',
       properties,
       created_at: rawEvent.created_at.toISOString(),
       country,

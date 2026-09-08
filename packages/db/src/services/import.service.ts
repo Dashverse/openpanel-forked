@@ -341,6 +341,7 @@ export async function createSessionsStartEndEvents(
         profile_id: session.profile_id,
         project_id: session.project_id,
         session_id: session.session_id,
+        window_id: '',
         path: firstPath,
         origin: firstOrigin,
         referrer: firstReferrer,
@@ -378,6 +379,7 @@ export async function createSessionsStartEndEvents(
         profile_id: session.profile_id,
         project_id: session.project_id,
         session_id: session.session_id,
+        window_id: '',
         path: lastPath, // From last event
         origin: lastOrigin, // From last event
         referrer: firstReferrer, // Same as session_start

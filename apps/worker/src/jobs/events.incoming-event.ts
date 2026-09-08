@@ -230,6 +230,9 @@ async function handleIncomingEvent(
   const payload: IServiceCreateEventPayload = merge(baseEvent, {
     deviceId: sessionEnd?.deviceId ?? currentDeviceId,
     sessionId: usingSessionId,
+    // Per-tab recorder id sent by the web SDK (>=1.4.1). Lets the dashboard
+    // map this event to the exact replay window it happened in.
+    windowId: body.window_id ?? '',
     referrer: sessionEnd?.referrer ?? baseEvent.referrer,
     referrerName: sessionEnd?.referrerName ?? baseEvent.referrerName,
     referrerType: sessionEnd?.referrerType ?? baseEvent.referrerType,

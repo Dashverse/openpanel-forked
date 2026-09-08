@@ -9,12 +9,12 @@ import { ModalHeader } from './Modal/Container';
 
 import { ColorSquare } from '@/components/color-square';
 import { InputWithLabel, WithLabel } from '@/components/forms/input-with-label';
-import { Input } from '@/components/ui/input';
 import { PureFilterItem } from '@/components/report/sidebar/filters/FilterItem';
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
 import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
+import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useEventNames } from '@/hooks/use-event-names';
@@ -141,7 +141,11 @@ export default function AddNotificationRule({
   };
 
   const integrations = integrationsQuery.data ?? [];
-  const reports = (reportsQuery.data ?? []) as { id: string; name: string; chartType: string }[];
+  const reports = (reportsQuery.data ?? []) as {
+    id: string;
+    name: string;
+    chartType: string;
+  }[];
 
   const isAlertType = configType === 'threshold' || configType === 'anomaly';
 
@@ -355,7 +359,10 @@ function ThresholdFields({
   reports: { id: string; name: string; chartType: string }[];
   lockedReportId?: string;
 }) {
-  const selectedReportId = useWatch({ control: form.control, name: 'config.reportId' });
+  const selectedReportId = useWatch({
+    control: form.control,
+    name: 'config.reportId',
+  });
   const selectedReport = reports.find((r) => r.id === selectedReportId);
   const isPercentageChart =
     selectedReport?.chartType === 'conversion' ||
@@ -404,7 +411,11 @@ function ThresholdFields({
         control={form.control}
         name="config.value"
         render={({ field }) => (
-          <WithLabel label={isPercentageChart ? 'Threshold value (%)' : 'Threshold value'}>
+          <WithLabel
+            label={
+              isPercentageChart ? 'Threshold value (%)' : 'Threshold value'
+            }
+          >
             <div className="relative flex items-center">
               <Input
                 type="text"
@@ -618,6 +629,7 @@ function EventField({
             <PureFilterItem
               eventName={eventName}
               filter={filter}
+              onChangeProperty={(next) => filtersArray.update(index, next)}
               onRemove={() => {
                 filtersArray.remove(index);
               }}

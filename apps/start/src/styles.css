@@ -400,3 +400,25 @@ button {
   animation-timeline: scroll();
   animation-range: 0 1px;
 }
+.react-grid-item:has(> [data-dashboard-block]) > .react-resizable-handle.react-resizable-handle-se {
+  right: 2px;
+  bottom: 1px;
+  width: 16px;
+  height: min(16px, calc(100% - 2px));
+  border-radius: 3px;
+  background-color: var(--background);
+  opacity: 0;
+  transition: opacity 150ms ease;
+}
+
+.react-grid-item:has(> [data-dashboard-block]):hover > .react-resizable-handle-se,
+.react-grid-item:has(> [data-dashboard-block]):focus-within > .react-resizable-handle-se,
+.react-grid-item:has(> [data-dashboard-block]).resizing > .react-resizable-handle-se {
+  opacity: 1;
+}
+
+.react-grid-item:has(> [data-dashboard-block]) > .react-resizable-handle-se::after {
+  right: 3px;
+  bottom: 3px;
+  border-color: var(--muted-foreground);
+}

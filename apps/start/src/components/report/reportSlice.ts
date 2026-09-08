@@ -40,6 +40,7 @@ const initialState: InitialState = {
   name: '',
   chartType: 'linear',
   lineType: 'monotone',
+  comparison: 'none',
   interval: 'day',
   breakdowns: [],
   series: [],
@@ -103,6 +104,7 @@ export const reportSlice = createSlice({
       return {
         ...state,
         ...action.payload,
+        comparison: action.payload.comparison ?? 'none',
         // Normalize persisted series so stale hidden config isn't re-applied.
         series: normalizeSeriesForChartType(
           action.payload.series ?? [],
@@ -388,6 +390,11 @@ export const reportSlice = createSlice({
       state.measuring = action.payload;
     },
 
+    changeComparison(state, action: PayloadAction<'none' | 'overall'>) {
+      state.dirty = true;
+      state.comparison = action.payload;
+    },
+
     changeSortOrder(state, action: PayloadAction<'asc' | 'desc'>) {
       state.dirty = true;
       state.sortOrder = action.payload;
@@ -440,6 +447,7 @@ export const {
   changeLimit,
   changeMeasuring,
   changeSortOrder,
+  changeComparison,
   changeTtcAggregation,
   setHiddenSeries,
 } = reportSlice.actions;

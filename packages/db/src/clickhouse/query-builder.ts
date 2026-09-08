@@ -508,10 +508,6 @@ export class Query<T = any> {
   // Execution methods
   async execute(): Promise<T[]> {
     const query = this.buildQuery();
-    console.log(
-      'query',
-      `${query} SETTINGS session_timezone = '${this.timezone}'`,
-    );
 
     const result = await this.client.query({
       query,

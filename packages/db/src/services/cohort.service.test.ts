@@ -30,8 +30,6 @@ vi.mock('../clickhouse/client', () => ({
     cohort_members: 'cohort_members',
     cohort_metadata: 'cohort_metadata',
     profile_event_summary_mv: 'profile_event_summary_mv',
-    profile_event_property_summary_mv: 'profile_event_property_summary_mv',
-    profile_event_property_summary_v2: 'profile_event_property_summary_v2',
     cohort_events_mv: 'cohort_events_mv',
   },
 }));

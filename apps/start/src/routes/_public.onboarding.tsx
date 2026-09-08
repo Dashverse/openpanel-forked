@@ -1,9 +1,15 @@
+import { Or } from '@/components/auth/or';
+import { SignInGithub } from '@/components/auth/sign-in-github';
 import { SignInGoogle } from '@/components/auth/sign-in-google';
+import { SignUpEmailForm } from '@/components/auth/sign-up-email-form';
 import FullPageLoadingState from '@/components/full-page-loading-state';
+import { LogoSquare } from '@/components/logo';
 import { useTRPC } from '@/integrations/trpc/react';
 import { PAGE_TITLES, createEntityTitle } from '@/utils/title';
 import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, redirect } from '@tanstack/react-router';
+import { motion } from 'framer-motion';
+import { MailIcon } from 'lucide-react';
 import { z } from 'zod';
 const validateSearch = z.object({
   inviteId: z.string().optional(),
@@ -55,8 +61,8 @@ function Component() {
           Create an account
         </h1>
         <p className="text-muted-foreground">
-          Continue with your @dashverse.ai Google Workspace account. By creating
-          an account you accept the{' '}
+          Let's start with creating your account. By creating an account you
+          accept the{' '}
           <a
             target="_blank"
             href="https://openpanel.dev/terms"
@@ -101,7 +107,20 @@ function Component() {
         </div>
       )}
 
-      <SignInGoogle type="sign-up" inviteId={inviteId} />
+      <div className="space-y-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <SignInGithub type="sign-up" inviteId={inviteId} />
+          <SignInGoogle type="sign-up" inviteId={inviteId} />
+        </div>
+
+        <Or className="my-6" />
+
+        <div className="flex items-center gap-2 font-semibold mb-4 text-lg">
+          <MailIcon className="size-4" />
+          Sign up with email
+        </div>
+        <SignUpEmailForm inviteId={inviteId} />
+      </div>
     </div>
   );
 }

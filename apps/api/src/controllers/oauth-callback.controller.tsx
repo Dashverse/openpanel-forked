@@ -1,119 +1,216 @@
 import { LogError } from '@/utils/errors';
 import {
   Arctic,
-  GoogleAuthPolicyError,
-  type GoogleIdentity,
   type OAuth2Tokens,
   createSession,
   generateSessionToken,
-  getGoogleAuthConfig,
-  getGoogleOAuthClient,
-  getGoogleWorkspaceVerificationMarker,
-  parseGoogleIdentity,
+  github,
+  google,
   setSessionTokenCookie,
 } from '@openpanel/auth';
-import {
-  Prisma,
-  type User,
-  connectUserToOrganization,
-  db,
-} from '@openpanel/db';
+import { type Account, connectUserToOrganization, db } from '@openpanel/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import {
-  type GoogleAccountRepository,
-  resolveGoogleUserWithConflictRetry,
-} from './oauth-account-linking';
 
-async function fetchGoogleUser(
-  tokens: OAuth2Tokens,
-  allowedDomains: string[],
-): Promise<GoogleIdentity> {
-  const claims = Arctic.decodeIdToken(tokens.idToken());
-  try {
-    return parseGoogleIdentity(claims, allowedDomains);
-  } catch (error) {
-    if (error instanceof GoogleAuthPolicyError) {
-      throw new LogError(error.message);
-    }
-    throw error;
+async function getGithubEmail(githubAccessToken: string) {
+  const emailListRequest = new Request('https://api.github.com/user/emails');
+  emailListRequest.headers.set('Authorization', `Bearer ${githubAccessToken}`);
+  const emailListResponse = await fetch(emailListRequest);
+  const emailListResult: unknown = await emailListResponse.json();
+  if (!Array.isArray(emailListResult) || emailListResult.length < 1) {
+    return null;
   }
+  let email: string | null = null;
+  for (const emailRecord of emailListResult) {
+    const emailParser = z.object({
+      primary: z.boolean(),
+      verified: z.boolean(),
+      email: z.string(),
+    });
+    const emailResult = emailParser.safeParse(emailRecord);
+    if (!emailResult.success) {
+      continue;
+    }
+    if (emailResult.data.primary && emailResult.data.verified) {
+      email = emailResult.data.email;
+    }
+  }
+  return email;
 }
 
-const googleAccountRepository: GoogleAccountRepository<User> = {
-  async findGoogleAccountByProviderId(providerId) {
-    const account = await db.$primary().account.findFirst({
-      where: { provider: 'google', providerId },
-      include: { user: true },
-    });
-    return account ? { accountId: account.id, user: account.user } : null;
-  },
-  async findMigratableGoogleAccountByEmail(email) {
-    const account = await db.$primary().account.findFirst({
-      where: {
-        OR: [
-          {
-            provider: 'google',
-            providerId: null,
-            email: { equals: email, mode: 'insensitive' },
-          },
-          {
-            provider: 'oauth',
-            user: {
-              email: { equals: email, mode: 'insensitive' },
-            },
-          },
-        ],
+// New types and interfaces
+type Provider = 'github' | 'google';
+interface OAuthUser {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName?: string;
+}
+
+// Shared utility functions
+async function handleExistingUser({
+  account,
+  oauthUser,
+  providerName,
+  reply,
+}: {
+  account: Account;
+  oauthUser: OAuthUser;
+  providerName: Provider;
+  reply: FastifyReply;
+}) {
+  const sessionToken = generateSessionToken();
+  const session = await createSession(sessionToken, account.userId);
+
+  await db.account.update({
+    where: { id: account.id },
+    data: {
+      provider: providerName,
+      providerId: oauthUser.id,
+      email: oauthUser.email,
+    },
+  });
+
+  setSessionTokenCookie(
+    (...args) => reply.setCookie(...args),
+    sessionToken,
+    session.expiresAt,
+  );
+  return reply.redirect(
+    process.env.DASHBOARD_URL || process.env.NEXT_PUBLIC_DASHBOARD_URL!,
+  );
+}
+
+async function handleNewUser({
+  oauthUser,
+  providerName,
+  inviteId,
+  reply,
+}: {
+  oauthUser: OAuthUser;
+  providerName: Provider;
+  inviteId: string | undefined | null;
+  reply: FastifyReply;
+}) {
+  const existingUser = await db.user.findFirst({
+    where: { email: oauthUser.email },
+  });
+
+  if (existingUser) {
+    throw new LogError(
+      'Please sign in using your original authentication method',
+      {
+        existingUser,
+        oauthUser,
+        providerName,
       },
-      include: { user: true },
-    });
-    return account ? { accountId: account.id, user: account.user } : null;
-  },
-  findUserByEmail(email) {
-    return db.$primary().user.findFirst({
-      where: { email: { equals: email, mode: 'insensitive' } },
-    });
-  },
-  async updateGoogleAccount(accountId, identity) {
-    await db.account.update({
-      where: { id: accountId },
-      data: {
-        provider: 'google',
-        providerId: identity.id,
-        email: identity.email,
-        scope: getGoogleWorkspaceVerificationMarker(identity.hostedDomain),
-      },
-    });
-  },
-  async linkGoogleAccount(userId, identity) {
-    await db.account.create({
-      data: {
-        userId,
-        provider: 'google',
-        providerId: identity.id,
-        email: identity.email,
-        scope: getGoogleWorkspaceVerificationMarker(identity.hostedDomain),
-      },
-    });
-  },
-  createGoogleUser(identity) {
-    return db.user.create({
-      data: {
-        email: identity.email,
-        firstName: identity.firstName,
-        lastName: identity.lastName,
-        accounts: {
-          create: {
-            provider: 'google',
-            providerId: identity.id,
-            email: identity.email,
-            scope: getGoogleWorkspaceVerificationMarker(identity.hostedDomain),
-          },
+    );
+  }
+
+  const user = await db.user.create({
+    data: {
+      email: oauthUser.email,
+      firstName: oauthUser.firstName,
+      lastName: oauthUser.lastName,
+      accounts: {
+        create: {
+          provider: providerName,
+          providerId: oauthUser.id,
         },
       },
+    },
+  });
+
+  if (inviteId) {
+    try {
+      await connectUserToOrganization({ user, inviteId });
+    } catch (error) {
+      reply.log.error('error connecting user to organization', {
+        error,
+        inviteId,
+        user,
+      });
+    }
+  }
+
+  const sessionToken = generateSessionToken();
+  const session = await createSession(sessionToken, user.id);
+  setSessionTokenCookie(
+    (...args) => reply.setCookie(...args),
+    sessionToken,
+    session.expiresAt,
+  );
+  return reply.redirect(
+    process.env.DASHBOARD_URL || process.env.NEXT_PUBLIC_DASHBOARD_URL!,
+  );
+}
+
+// Provider-specific user fetching
+async function fetchGithubUser(accessToken: string): Promise<OAuthUser> {
+  const email = await getGithubEmail(accessToken);
+  if (!email) {
+    throw new LogError('GitHub email not found or not verified');
+  }
+
+  const userRequest = new Request('https://api.github.com/user');
+  userRequest.headers.set('Authorization', `Bearer ${accessToken}`);
+  const userResponse = await fetch(userRequest);
+
+  const userSchema = z.object({
+    id: z.number(),
+    login: z.string(),
+    name: z
+      .string()
+      .nullish()
+      .transform((val) => val || ''),
+  });
+  const userJson = await userResponse.json();
+
+  const userResult = userSchema.safeParse(userJson);
+  if (!userResult.success) {
+    throw new LogError('Error fetching Github user', {
+      error: userResult.error,
+      githubUser: userJson,
     });
-  },
-};
+  }
+
+  return {
+    id: String(userResult.data.id),
+    email,
+    firstName: userResult.data.name || userResult.data.login || '',
+  };
+}
+
+async function fetchGoogleUser(tokens: OAuth2Tokens): Promise<OAuthUser> {
+  const claims = Arctic.decodeIdToken(tokens.idToken());
+
+  const claimsSchema = z.object({
+    sub: z.string(),
+    email: z.string(),
+    email_verified: z.boolean(),
+    given_name: z.string().optional(),
+    family_name: z.string().optional(),
+  });
+
+  const claimsResult = claimsSchema.safeParse(claims);
+  if (!claimsResult.success) {
+    throw new LogError('Error fetching Google user', {
+      error: claimsResult.error,
+      claims,
+    });
+  }
+
+  if (!claimsResult.data.email_verified) {
+    throw new LogError('Email not verified with Google');
+  }
+
+  return {
+    id: claimsResult.data.sub,
+    email: claimsResult.data.email,
+    firstName: claimsResult.data.given_name || '',
+    lastName: claimsResult.data.family_name || '',
+  };
+}
 
 interface ValidatedOAuthQuery {
   code: string;
@@ -122,6 +219,7 @@ interface ValidatedOAuthQuery {
 
 async function validateOAuthCallback(
   req: FastifyRequest,
+  provider: Provider,
 ): Promise<ValidatedOAuthQuery> {
   const schema = z.object({
     code: z.string(),
@@ -132,80 +230,121 @@ async function validateOAuthCallback(
   if (!query.success) {
     throw new LogError('Invalid callback query params', {
       error: query.error,
-      provider: 'google',
+      query: req.query,
+      provider,
     });
   }
 
   const { code, state } = query.data;
-  const storedState = req.cookies.google_oauth_state ?? null;
-  const codeVerifier = req.cookies.google_code_verifier ?? null;
+  const storedState = req.cookies[`${provider}_oauth_state`] ?? null;
+  const codeVerifier =
+    provider === 'google' ? (req.cookies.google_code_verifier ?? null) : null;
 
   if (
     code === null ||
     state === null ||
     storedState === null ||
-    codeVerifier === null
+    (provider === 'google' && codeVerifier === null)
   ) {
     throw new LogError('Missing oauth parameters', {
       code: code === null,
       state: state === null,
       storedState: storedState === null,
-      codeVerifier: codeVerifier === null,
-      provider: 'google',
+      codeVerifier: provider === 'google' ? codeVerifier === null : undefined,
+      provider,
     });
   }
 
   if (state !== storedState) {
     throw new LogError('OAuth state mismatch', {
-      provider: 'google',
+      state,
+      storedState,
+      provider,
     });
   }
 
   return { code, state };
 }
 
+// Main callback handlers
+export async function githubCallback(req: FastifyRequest, reply: FastifyReply) {
+  try {
+    const { code } = await validateOAuthCallback(req, 'github');
+    const inviteId = req.cookies.inviteId;
+    const tokens = await github.validateAuthorizationCode(code);
+    const githubUser = await fetchGithubUser(tokens.accessToken());
+    const account = await db.account.findFirst({
+      where: {
+        OR: [
+          // To keep
+          { provider: 'github', providerId: githubUser.id },
+          // During migration
+          { provider: 'github', providerId: null, email: githubUser.email },
+          { provider: 'oauth', user: { email: githubUser.email } },
+        ],
+      },
+    });
+
+    reply.clearCookie('github_oauth_state');
+
+    if (account) {
+      return await handleExistingUser({
+        account,
+        oauthUser: githubUser,
+        providerName: 'github',
+        reply,
+      });
+    }
+
+    return await handleNewUser({
+      oauthUser: githubUser,
+      providerName: 'github',
+      inviteId,
+      reply,
+    });
+  } catch (error) {
+    req.log.error(error);
+    return redirectWithError(reply, error);
+  }
+}
+
 export async function googleCallback(req: FastifyRequest, reply: FastifyReply) {
   try {
-    const config = getGoogleAuthConfig();
-    const google = getGoogleOAuthClient();
-    const { code } = await validateOAuthCallback(req);
+    const { code } = await validateOAuthCallback(req, 'google');
     const inviteId = req.cookies.inviteId;
     const codeVerifier = req.cookies.google_code_verifier!;
     const tokens = await google.validateAuthorizationCode(code, codeVerifier);
-    const googleUser = await fetchGoogleUser(tokens, config.allowedDomains);
-    const user = await resolveGoogleUserWithConflictRetry(
-      googleUser,
-      googleAccountRepository,
-      (error) =>
-        error instanceof Prisma.PrismaClientKnownRequestError &&
-        error.code === 'P2002',
-    );
+    const googleUser = await fetchGoogleUser(tokens);
+    const existingUser = await db.account.findFirst({
+      where: {
+        OR: [
+          // To keep
+          { provider: 'google', providerId: googleUser.id },
+          // During migration
+          { provider: 'google', providerId: null, email: googleUser.email },
+          { provider: 'oauth', user: { email: googleUser.email } },
+        ],
+      },
+    });
 
     reply.clearCookie('google_code_verifier');
     reply.clearCookie('google_oauth_state');
 
-    if (inviteId) {
-      try {
-        await connectUserToOrganization({ user, inviteId });
-      } catch (error) {
-        req.log.error('OAuth invite failed', {
-          error,
-          inviteId,
-          userId: user.id,
-        });
-      }
+    if (existingUser) {
+      return await handleExistingUser({
+        account: existingUser,
+        oauthUser: googleUser,
+        providerName: 'google',
+        reply,
+      });
     }
 
-    const sessionToken = generateSessionToken();
-    const session = await createSession(sessionToken, user.id);
-    setSessionTokenCookie(
-      (...args) => reply.setCookie(...args),
-      sessionToken,
-      session.expiresAt,
-    );
-    return reply.redirect(
-      process.env.DASHBOARD_URL || process.env.NEXT_PUBLIC_DASHBOARD_URL!,
-    );
+    return await handleNewUser({
+      oauthUser: googleUser,
+      providerName: 'google',
+      inviteId,
+      reply,
+    });
   } catch (error) {
     req.log.error(error);
     return redirectWithError(reply, error);
