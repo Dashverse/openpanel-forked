@@ -49,13 +49,59 @@ const MAX_BUFFER_PER_PARTITION = Number.parseInt(
   process.env.EVENTHUB_MAX_BUFFER_PER_PARTITION || '10000',
   10,
 );
-// Fail-fast: bound both the enqueue backpressure wait and the send-ack wait so a
-// broker outage returns a non-2xx quickly (client retries) instead of parking
-// the HTTP request and saturating the LB — same intent as the kafkajs knobs.
+// Per-attempt send-ack (and enqueue-backpressure) timeout. Sized from the
+// measured /track p99 (~0.2s normal, ~1.8s worst legit spike) — NOT the ack
+// stall. A normal send acks in ~200ms, so 3s is ~1.7× above the worst legit p99
+// and never trips healthy traffic, while a real Event Hubs ack stall (the
+// azure-sdk#17588 ~2-min bursts, which run 8-14s+) fails at 3s instead of 15s —
+// 5× less time parked per request. EACH attempt gets this full budget (see the
+// retry loop in produceViaEventHub): the timeout is per-attempt, not a shared
+// deadline, so a retry can actually run.
 const SEND_TIMEOUT_MS = Number.parseInt(
-  process.env.EVENTHUB_SEND_TIMEOUT_MS || '15000',
+  process.env.EVENTHUB_SEND_TIMEOUT_MS || '3000',
   10,
 );
+// Extra send attempts on a transient (timeout / backpressure) failure. Each
+// retry gets a FRESH SEND_TIMEOUT_MS, so worst-case hold ≈ (SEND_RETRIES+1) *
+// SEND_TIMEOUT_MS + backoff. Safe because the consumer dedups a re-sent event on
+// its __jobId / $insert_id (a slow-but-delivered send that we cut short and
+// retried collapses to one row). NOTE: retries only recover a brief blip — a
+// sustained stall outlasts the whole budget and still fails; the durable async
+// re-produce (follow-up) is what recovers those. The concurrency cap below is
+// what keeps the longer hold from piling up to an OOM at peak.
+const parsedSendRetries = Number.parseInt(
+  process.env.EVENTHUB_SEND_RETRIES || '3',
+  10,
+);
+// Guard a malformed env: a NaN here must NOT collapse the attempt count to zero
+// and silently stop publishing. Fall back to 3 extra attempts.
+const SEND_RETRIES =
+  Number.isFinite(parsedSendRetries) && parsedSendRetries >= 0
+    ? parsedSendRetries
+    : 3;
+// Base for the exponential backoff BETWEEN in-request retries: wait ≈
+// base * 2^attempt, with 50-100% jitter so a stall (which fails every in-flight
+// request at once) doesn't make them all retry in lockstep — a thundering herd
+// against an already-struggling broker. Kept small (100ms) on purpose: this is
+// an in-REQUEST wait, so it adds directly to how long /track is held; the long
+// (seconds-to-minutes) backoff belongs on the async re-produce, not here.
+const SEND_RETRY_BACKOFF_MS = Number.parseInt(
+  process.env.EVENTHUB_SEND_RETRY_BACKOFF_MS || '100',
+  10,
+);
+// Load-shed valve. Worst-case in-flight ≈ offered_rate * hold, and hold grows
+// with retries; at peak (~15k/s) a multi-second hold would blow past the ~75k
+// in-memory events that OOM'd the old kafkajs path. Cap concurrent produces per
+// pod and fail FAST past it (a quick non-2xx the client can retry) rather than
+// letting the pile-up march the pod into an OOM. ~5k/pod * ~10 pods ≈ 50k < 75k.
+const parsedMaxInflight = Number.parseInt(
+  process.env.EVENTHUB_MAX_INFLIGHT_PRODUCES || '5000',
+  10,
+);
+const MAX_INFLIGHT_PRODUCES =
+  Number.isFinite(parsedMaxInflight) && parsedMaxInflight > 0
+    ? parsedMaxInflight
+    : 5000;
 
 export const isEventHubProducerEnabled = (): boolean =>
   Boolean(CONNECTION_STRING);
@@ -70,6 +116,14 @@ type Pending = {
 // in-flight requests; entries are always removed (success, error, or timeout).
 const pending = new Map<string, Pending>();
 let seq = 0;
+
+// Concurrent produceViaEventHub calls currently in flight in this pod, for the
+// load-shed cap (MAX_INFLIGHT_PRODUCES). Incremented on entry, always
+// decremented in a finally.
+let inflightProduces = 0;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 const settle = (
   events: OnSendEventsSuccessContext['events'],
@@ -139,11 +193,15 @@ const getClient = (): EventHubBufferedProducerClient => {
   return client;
 };
 
-export const produceViaEventHub = async (
+// One send attempt: enqueue the event and resolve when the broker acks it (or
+// reject on the given per-attempt timeout).
+const attemptProduce = (
+  producer: EventHubBufferedProducerClient,
   payload: EventsQueuePayloadIncomingEvent['payload'],
   partitionKey: string,
+  jobId: string | undefined,
+  timeoutMs: number,
 ): Promise<void> => {
-  const producer = getClient();
   const cid = `${Date.now().toString(36)}-${(seq++).toString(36)}`;
 
   // Register the pending ack BEFORE enqueue so the send callback — which can
@@ -152,10 +210,8 @@ export const produceViaEventHub = async (
   const ack = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(cid);
-      reject(
-        new Error(`eventhub send ack timed out after ${SEND_TIMEOUT_MS}ms`),
-      );
-    }, SEND_TIMEOUT_MS);
+      reject(new Error(`eventhub send ack timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
     pending.set(cid, { resolve, reject, timer });
   });
 
@@ -166,46 +222,130 @@ export const produceViaEventHub = async (
     () =>
       ac.abort(
         new Error(
-          `eventhub enqueue backpressure timed out after ${SEND_TIMEOUT_MS}ms`,
+          `eventhub enqueue backpressure timed out after ${timeoutMs}ms`,
         ),
       ),
-    SEND_TIMEOUT_MS,
+    timeoutMs,
   );
-  try {
-    await producer.enqueueEvent(
-      {
-        // Body MUST be the raw object. The kafkajs consumer reads message.value
-        // and JSON.parses it once; a pre-stringified string double-encodes and
-        // the consumer gets a string instead of the payload (round-trip verified
-        // on the prod topic). Never JSON.stringify here.
-        //
-        // __groupId carries the routing key INSIDE the body on purpose: Event
-        // Hubs uses the AMQP partitionKey (below) only for partition routing —
-        // it does NOT surface as the Kafka record key on the consumer, so the
-        // consumer can't group by m.key to serialize a device's events. The
-        // body round-trips reliably, so the consumer groups by __groupId instead
-        // (incident 2026-08-14: keyless messages raced the session buffer).
-        body: { ...payload, __groupId: partitionKey },
-        properties: { __cid: cid },
-      },
-      // partitionKey keeps a device's events on one partition (ordering);
-      // abortSignal bounds the buffer-full backpressure wait.
-      { partitionKey, abortSignal: ac.signal },
-    );
-  } catch (err) {
-    const p = pending.get(cid);
-    if (p) {
-      pending.delete(cid);
-      clearTimeout(p.timer);
+  return (async () => {
+    try {
+      await producer.enqueueEvent(
+        {
+          // Body MUST be the raw object. The kafkajs consumer reads message.value
+          // and JSON.parses it once; a pre-stringified string double-encodes and
+          // the consumer gets a string instead of the payload (round-trip verified
+          // on the prod topic). Never JSON.stringify here.
+          //
+          // __groupId carries the routing key INSIDE the body on purpose: Event
+          // Hubs uses the AMQP partitionKey (below) only for partition routing —
+          // it does NOT surface as the Kafka record key on the consumer, so the
+          // consumer can't group by m.key to serialize a device's events. The
+          // body round-trips reliably, so the consumer groups by __groupId instead
+          // (incident 2026-08-14: keyless messages raced the session buffer).
+          //
+          // __jobId is the server-side dedup key. A retried produce (below, or an
+          // SDK retry after a 5xx) re-sends the SAME __jobId, so the consumer
+          // skips the duplicate instead of writing a second row.
+          body: {
+            ...payload,
+            __groupId: partitionKey,
+            ...(jobId ? { __jobId: jobId } : {}),
+          },
+          properties: { __cid: cid },
+        },
+        // partitionKey keeps a device's events on one partition (ordering);
+        // abortSignal bounds the buffer-full backpressure wait.
+        { partitionKey, abortSignal: ac.signal },
+      );
+    } catch (err) {
+      const p = pending.get(cid);
+      if (p) {
+        pending.delete(cid);
+        clearTimeout(p.timer);
+      }
+      clearTimeout(enqueueTimer);
+      throw err;
     }
-    throw err;
-  } finally {
-    clearTimeout(enqueueTimer);
+    // Resolve only once the batch containing this event is acked by the broker —
+    // that's the durability guarantee that lets /track return 200 safely.
+    try {
+      return await ack;
+    } finally {
+      clearTimeout(enqueueTimer);
+    }
+  })();
+};
+
+export const produceViaEventHub = async (
+  payload: EventsQueuePayloadIncomingEvent['payload'],
+  partitionKey: string,
+  jobId?: string,
+): Promise<void> => {
+  // Load-shed FIRST: if too many produces are already parked (a stall piling up
+  // in-flight requests), reject fast so the pod sheds load instead of marching
+  // toward an OOM (the old kafkajs path died at ~75k in-memory events). The
+  // caller turns this into a quick non-2xx the client can retry later.
+  if (inflightProduces >= MAX_INFLIGHT_PRODUCES) {
+    logger.warn('eventhub produce shed (in-flight cap reached)', {
+      inflight: inflightProduces,
+      cap: MAX_INFLIGHT_PRODUCES,
+    });
+    throw new Error(
+      `eventhub produce shed: ${inflightProduces} in-flight >= cap ${MAX_INFLIGHT_PRODUCES}`,
+    );
   }
 
-  // Resolve only once the batch containing this event is acked by the broker —
-  // that's the durability guarantee that lets /track return 200 safely.
-  return ack;
+  const producer = getClient();
+  inflightProduces++;
+  try {
+    // Retry a transient (timeout / backpressure) send failure. Each attempt gets
+    // a FRESH SEND_TIMEOUT_MS — the timeout is per-ATTEMPT, not a shared deadline,
+    // so a retry can actually run. (The earlier shared-deadline design could
+    // never reach attempt 1: a timeout consumed the whole budget, so `remaining`
+    // was 0 and the loop broke — the retry knob was dead.) Retries are safe
+    // because the consumer dedups a re-sent event on its __jobId / $insert_id, so
+    // a slow-but-delivered send we cut short and retried collapses to one row.
+    // Worst-case hold ≈ (SEND_RETRIES+1) * SEND_TIMEOUT_MS + backoff, bounded by
+    // the in-flight cap above. NOTE: these in-request retries only recover a
+    // brief blip; a sustained stall outlasts the budget and still fails — the
+    // durable async re-produce (follow-up) is what recovers those.
+    const attempts = Math.max(1, SEND_RETRIES + 1);
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await attemptProduce(
+          producer,
+          payload,
+          partitionKey,
+          jobId,
+          SEND_TIMEOUT_MS,
+        );
+      } catch (err) {
+        lastErr = err;
+        // Only retry transient timeouts / backpressure (both carry "timed out").
+        // A non-transient error (auth, message-too-large, …) will just fail
+        // again — fail fast instead of burning attempts on it.
+        if (!(err instanceof Error && /timed out/i.test(err.message))) {
+          throw err;
+        }
+        // Exponential backoff with 50-100% jitter before the next attempt (never
+        // after the last). Jitter de-syncs the retry wave when a stall fails
+        // every in-flight request at the same instant (thundering herd). Base is
+        // small on purpose — this wait is IN-request, so it adds to the hold.
+        if (i < attempts - 1) {
+          const backoff = SEND_RETRY_BACKOFF_MS * 2 ** i;
+          await sleep(backoff * (0.5 + Math.random() * 0.5));
+        }
+      }
+    }
+    logger.warn('eventhub produce failed after all retries', {
+      attempts,
+      err: lastErr instanceof Error ? lastErr.message : String(lastErr),
+    });
+    throw lastErr ?? new Error('eventhub produce failed');
+  } finally {
+    inflightProduces--;
+  }
 };
 
 export const disconnectEventHubProducer = async (): Promise<void> => {

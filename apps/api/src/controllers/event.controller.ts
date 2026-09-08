@@ -1,3 +1,4 @@
+import fastJsonStableHash from 'fast-json-stable-hash';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
@@ -76,12 +77,17 @@ export async function postEvent(
       ? `${projectId}:${request.body?.profileId}`
       : `${projectId}:${generateId()}`
     : currentDeviceId;
+  // Content hash disambiguates two genuinely-distinct events sharing name +
+  // timestamp + device (otherwise they'd collapse to one jobId and the consumer
+  // would drop the second as a false duplicate); a retry re-sends identical
+  // properties → same hash → same jobId, so real retries still dedup.
   const jobId = buildEventJobId([
     slug(request.body.name),
     timestamp,
     projectId,
     currentDeviceId,
     groupId,
+    fastJsonStableHash.hash(request.body.properties ?? {}, 'md5'),
   ]);
   // Stamp the CURRENT W3C traceparent so the worker consumer (different
   // process / pod) can bind its span as a child of THIS request's trace.
@@ -104,7 +110,7 @@ export async function postEvent(
   const partitionKey = groupId || generateId();
 
   if (shouldUseKafka(projectId)) {
-    await produceIncomingEvent(queueData, partitionKey);
+    await produceIncomingEvent(queueData, partitionKey, jobId);
   } else {
     await getEventsGroupQueueShard(partitionKey).add({
       orderMs: new Date(timestamp).getTime(),

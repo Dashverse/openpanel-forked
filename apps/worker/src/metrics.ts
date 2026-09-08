@@ -110,8 +110,17 @@ export const kafkaConsumeErrorsTotal = new client.Counter({
   labelNames: ['partition'],
 });
 
+// A Kafka message skipped because its dedup key ($insert_id / __jobId) was
+// already seen within the window — i.e. a producer/SDK retry we deduplicated.
+export const kafkaDedupSkippedTotal = new client.Counter({
+  name: 'kafka_dedup_skipped_total',
+  help: 'Kafka events skipped as duplicates (retry dedup on $insert_id / jobId)',
+  labelNames: ['partition'],
+});
+
 register.registerMetric(kafkaEventsConsumedTotal);
 register.registerMetric(kafkaConsumeErrorsTotal);
+register.registerMetric(kafkaDedupSkippedTotal);
 
 // Consumer lag per partition = broker high-watermark − last committed offset.
 // Azure Event Hubs exposes NO native consumer-lag metric, so we compute it in
