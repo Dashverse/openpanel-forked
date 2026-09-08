@@ -49,28 +49,59 @@ const MAX_BUFFER_PER_PARTITION = Number.parseInt(
   process.env.EVENTHUB_MAX_BUFFER_PER_PARTITION || '10000',
   10,
 );
-// Fail-fast: bound both the enqueue backpressure wait and the send-ack wait so a
-// broker outage returns a non-2xx quickly (client retries) instead of parking
-// the HTTP request and saturating the LB — same intent as the kafkajs knobs.
+// Per-attempt send-ack (and enqueue-backpressure) timeout. Sized from the
+// measured /track p99 (~0.2s normal, ~1.8s worst legit spike) — NOT the ack
+// stall. A normal send acks in ~200ms, so 3s is ~1.7× above the worst legit p99
+// and never trips healthy traffic, while a real Event Hubs ack stall (the
+// azure-sdk#17588 ~2-min bursts, which run 8-14s+) fails at 3s instead of 15s —
+// 5× less time parked per request. EACH attempt gets this full budget (see the
+// retry loop in produceViaEventHub): the timeout is per-attempt, not a shared
+// deadline, so a retry can actually run.
 const SEND_TIMEOUT_MS = Number.parseInt(
-  process.env.EVENTHUB_SEND_TIMEOUT_MS || '15000',
+  process.env.EVENTHUB_SEND_TIMEOUT_MS || '3000',
   10,
 );
-// Extra send attempts on a transient failure. Retries run WITHIN the
-// SEND_TIMEOUT_MS budget (see produceViaEventHub) so they never extend how long
-// /track holds a request. Safe because the consumer dedups a re-sent event on
-// its __jobId / $insert_id. Keep low — retries amplify produce load under a
-// stall.
+// Extra send attempts on a transient (timeout / backpressure) failure. Each
+// retry gets a FRESH SEND_TIMEOUT_MS, so worst-case hold ≈ (SEND_RETRIES+1) *
+// SEND_TIMEOUT_MS + backoff. Safe because the consumer dedups a re-sent event on
+// its __jobId / $insert_id (a slow-but-delivered send that we cut short and
+// retried collapses to one row). NOTE: retries only recover a brief blip — a
+// sustained stall outlasts the whole budget and still fails; the durable async
+// re-produce (follow-up) is what recovers those. The concurrency cap below is
+// what keeps the longer hold from piling up to an OOM at peak.
 const parsedSendRetries = Number.parseInt(
-  process.env.EVENTHUB_SEND_RETRIES || '1',
+  process.env.EVENTHUB_SEND_RETRIES || '3',
   10,
 );
 // Guard a malformed env: a NaN here must NOT collapse the attempt count to zero
-// and silently stop publishing. Fall back to 1 extra attempt.
+// and silently stop publishing. Fall back to 3 extra attempts.
 const SEND_RETRIES =
   Number.isFinite(parsedSendRetries) && parsedSendRetries >= 0
     ? parsedSendRetries
-    : 1;
+    : 3;
+// Base for the exponential backoff BETWEEN in-request retries: wait ≈
+// base * 2^attempt, with 50-100% jitter so a stall (which fails every in-flight
+// request at once) doesn't make them all retry in lockstep — a thundering herd
+// against an already-struggling broker. Kept small (100ms) on purpose: this is
+// an in-REQUEST wait, so it adds directly to how long /track is held; the long
+// (seconds-to-minutes) backoff belongs on the async re-produce, not here.
+const SEND_RETRY_BACKOFF_MS = Number.parseInt(
+  process.env.EVENTHUB_SEND_RETRY_BACKOFF_MS || '100',
+  10,
+);
+// Load-shed valve. Worst-case in-flight ≈ offered_rate * hold, and hold grows
+// with retries; at peak (~15k/s) a multi-second hold would blow past the ~75k
+// in-memory events that OOM'd the old kafkajs path. Cap concurrent produces per
+// pod and fail FAST past it (a quick non-2xx the client can retry) rather than
+// letting the pile-up march the pod into an OOM. ~5k/pod * ~10 pods ≈ 50k < 75k.
+const parsedMaxInflight = Number.parseInt(
+  process.env.EVENTHUB_MAX_INFLIGHT_PRODUCES || '5000',
+  10,
+);
+const MAX_INFLIGHT_PRODUCES =
+  Number.isFinite(parsedMaxInflight) && parsedMaxInflight > 0
+    ? parsedMaxInflight
+    : 5000;
 
 export const isEventHubProducerEnabled = (): boolean =>
   Boolean(CONNECTION_STRING);
@@ -85,6 +116,14 @@ type Pending = {
 // in-flight requests; entries are always removed (success, error, or timeout).
 const pending = new Map<string, Pending>();
 let seq = 0;
+
+// Concurrent produceViaEventHub calls currently in flight in this pod, for the
+// load-shed cap (MAX_INFLIGHT_PRODUCES). Incremented on entry, always
+// decremented in a finally.
+let inflightProduces = 0;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 const settle = (
   events: OnSendEventsSuccessContext['events'],
@@ -242,46 +281,71 @@ export const produceViaEventHub = async (
   partitionKey: string,
   jobId?: string,
 ): Promise<void> => {
-  const producer = getClient();
+  // Load-shed FIRST: if too many produces are already parked (a stall piling up
+  // in-flight requests), reject fast so the pod sheds load instead of marching
+  // toward an OOM (the old kafkajs path died at ~75k in-memory events). The
+  // caller turns this into a quick non-2xx the client can retry later.
+  if (inflightProduces >= MAX_INFLIGHT_PRODUCES) {
+    logger.warn('eventhub produce shed (in-flight cap reached)', {
+      inflight: inflightProduces,
+      cap: MAX_INFLIGHT_PRODUCES,
+    });
+    throw new Error(
+      `eventhub produce shed: ${inflightProduces} in-flight >= cap ${MAX_INFLIGHT_PRODUCES}`,
+    );
+  }
 
-  // Retry a transient send failure within a FIXED total budget capped at
-  // SEND_TIMEOUT_MS, so retries never extend how long /track holds the request
-  // (avoids piling up in-flight requests under a stall). Retries are safe
-  // because the consumer dedups a re-sent event on its __jobId / $insert_id.
-  //
-  // Attempt 0 gets the FULL budget so a send that would have acked at 8-14s
-  // isn't cut short into a needless retry (which would double Event Hubs writes
-  // during the very stall we are trying to survive). A retry therefore only
-  // runs when attempt 0 failed FAST and left budget on the clock — i.e. a quick
-  // transient error, not a timeout.
-  const deadline = Date.now() + SEND_TIMEOUT_MS;
-  const attempts = Math.max(1, SEND_RETRIES + 1);
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      break;
-    }
-    const perAttempt = i === 0 ? SEND_TIMEOUT_MS : remaining;
-    try {
-      return await attemptProduce(
-        producer,
-        payload,
-        partitionKey,
-        jobId,
-        perAttempt,
-      );
-    } catch (err) {
-      lastErr = err;
-      // Only retry our transient timeouts. A non-transient error (auth,
-      // message-too-large, …) will fail again — fail fast instead of burning
-      // the remaining budget on hopeless attempts.
-      if (!(err instanceof Error && /timed out/i.test(err.message))) {
-        throw err;
+  const producer = getClient();
+  inflightProduces++;
+  try {
+    // Retry a transient (timeout / backpressure) send failure. Each attempt gets
+    // a FRESH SEND_TIMEOUT_MS — the timeout is per-ATTEMPT, not a shared deadline,
+    // so a retry can actually run. (The earlier shared-deadline design could
+    // never reach attempt 1: a timeout consumed the whole budget, so `remaining`
+    // was 0 and the loop broke — the retry knob was dead.) Retries are safe
+    // because the consumer dedups a re-sent event on its __jobId / $insert_id, so
+    // a slow-but-delivered send we cut short and retried collapses to one row.
+    // Worst-case hold ≈ (SEND_RETRIES+1) * SEND_TIMEOUT_MS + backoff, bounded by
+    // the in-flight cap above. NOTE: these in-request retries only recover a
+    // brief blip; a sustained stall outlasts the budget and still fails — the
+    // durable async re-produce (follow-up) is what recovers those.
+    const attempts = Math.max(1, SEND_RETRIES + 1);
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await attemptProduce(
+          producer,
+          payload,
+          partitionKey,
+          jobId,
+          SEND_TIMEOUT_MS,
+        );
+      } catch (err) {
+        lastErr = err;
+        // Only retry transient timeouts / backpressure (both carry "timed out").
+        // A non-transient error (auth, message-too-large, …) will just fail
+        // again — fail fast instead of burning attempts on it.
+        if (!(err instanceof Error && /timed out/i.test(err.message))) {
+          throw err;
+        }
+        // Exponential backoff with 50-100% jitter before the next attempt (never
+        // after the last). Jitter de-syncs the retry wave when a stall fails
+        // every in-flight request at the same instant (thundering herd). Base is
+        // small on purpose — this wait is IN-request, so it adds to the hold.
+        if (i < attempts - 1) {
+          const backoff = SEND_RETRY_BACKOFF_MS * 2 ** i;
+          await sleep(backoff * (0.5 + Math.random() * 0.5));
+        }
       }
     }
+    logger.warn('eventhub produce failed after all retries', {
+      attempts,
+      err: lastErr instanceof Error ? lastErr.message : String(lastErr),
+    });
+    throw lastErr ?? new Error('eventhub produce failed');
+  } finally {
+    inflightProduces--;
   }
-  throw lastErr ?? new Error('eventhub produce failed');
 };
 
 export const disconnectEventHubProducer = async (): Promise<void> => {
