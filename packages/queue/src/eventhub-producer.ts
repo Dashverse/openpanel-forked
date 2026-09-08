@@ -214,6 +214,12 @@ const attemptProduce = (
     }, timeoutMs);
     pending.set(cid, { resolve, reject, timer });
   });
+  // The real handler is the `await ack` below, but it isn't attached until after
+  // the `enqueueEvent` await. With a very low SEND_TIMEOUT_MS the ack can reject
+  // during that gap, tripping an UnhandledPromiseRejection warning for the tick
+  // before we await it. This no-op keeps a handler on it at all times; the
+  // `await ack` still observes and rethrows the rejection.
+  ack.catch(() => {});
 
   // Bound the enqueue wait too: under buffer-full backpressure enqueueEvent
   // blocks, so abort it on the same deadline rather than parking the request.

@@ -13,7 +13,13 @@
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const DEFAULT_DEDUP_TTL_SECONDS = 21600; // 6h
+// 10 minutes. The dedup window only needs to outlast a duplicate's arrival delay,
+// and every realistic source lands fast: a producer in-request retry is seconds,
+// and consumer rebalance redelivery is seconds-to-minutes (from the last committed
+// offset). 10 min covers those with headroom while keeping Redis ~72× smaller than
+// the earlier 6h. Tunable via KAFKA_DEDUP_TTL_SECONDS. (Tradeoff: a very-delayed
+// offline-SDK retry arriving >10 min later won't dedup — rare, and worth the memory.)
+export const DEFAULT_DEDUP_TTL_SECONDS = 600;
 
 /**
  * Whether a client-supplied `$insert_id` is trustworthy enough to dedup on.

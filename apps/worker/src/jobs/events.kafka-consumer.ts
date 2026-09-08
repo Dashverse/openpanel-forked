@@ -22,11 +22,11 @@ import { logger } from '../utils/logger';
 import { incomingEvent } from './events.incoming-event';
 
 // How long we remember a processed event's dedup key. A producer/SDK retry
-// lands within seconds, so this only needs to outlast the retry window; 6h is
-// generous headroom. Keys auto-expire and live on the dedicated EVENT Redis
-// (getRedisEvent, not the shared cache), so they can never evict the
-// event/session buffers. Tunable via KAFKA_DEDUP_TTL_SECONDS (parse rules in
-// parseDedupTtlSeconds).
+// lands within seconds, so this only needs to outlast the retry window; 10 min
+// (the default) is generous headroom. Keys auto-expire and live on the dedicated
+// EVENT Redis (getRedisEvent, not the shared cache), so they can never evict the
+// event/session buffers. Tunable via KAFKA_DEDUP_TTL_SECONDS (default + parse
+// rules in parseDedupTtlSeconds).
 const DEDUP_TTL_SECONDS = parseDedupTtlSeconds(
   process.env.KAFKA_DEDUP_TTL_SECONDS,
 );
