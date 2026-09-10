@@ -20,6 +20,7 @@ import {
   ChevronsUpDown,
   GanttChartIcon,
   Loader2,
+  PlusIcon,
   RefreshCwIcon,
 } from 'lucide-react';
 import VirtualList from 'rc-virtual-list';
@@ -110,6 +111,43 @@ export function ComboboxEvents<
     selectedValues.length > 0 && selectedValues[0]
       ? find(selectedValues[0])
       : null;
+
+  const trimmedSearch = search.trim();
+
+  const filteredItems = React.useMemo(() => {
+    if (search === '') return items;
+    return items.filter((item) =>
+      item.name.toLowerCase().includes(search.toLowerCase()),
+    );
+  }, [items, search]);
+
+  // Forward-declared event: when the user typed a name that doesn't match any
+  // known event exactly, offer a synthetic "Create" item so not-yet-fired
+  // events can still be added to charts/funnels (mirrors ComboboxAdvanced).
+  const hasExactMatch = React.useMemo(
+    () =>
+      items.some(
+        (item) => item.name.toLowerCase() === trimmedSearch.toLowerCase(),
+      ),
+    [items, trimmedSearch],
+  );
+
+  const showCreateItem = trimmedSearch !== '' && !hasExactMatch;
+
+  type ListItem = (typeof items)[number] & { __create?: boolean };
+
+  const data = React.useMemo<ListItem[]>(() => {
+    const base = filteredItems as ListItem[];
+    if (!showCreateItem) return base;
+    const createItem: ListItem = {
+      name: trimmedSearch,
+      count: 0,
+      meta: undefined,
+      isCustom: false,
+      __create: true,
+    };
+    return [createItem, ...base];
+  }, [filteredItems, showCreateItem, trimmedSearch]);
 
   const handleSelection = (selectedValue: string) => {
     if (multiple) {
@@ -213,17 +251,32 @@ export function ComboboxEvents<
                 <CommandEmpty>Nothing selected</CommandEmpty>
                 <VirtualList
                   height={400}
-                  data={items.filter((item) => {
-                    if (search === '') return true;
-                    return item.name
-                      .toLowerCase()
-                      .includes(search.toLowerCase());
-                  })}
+                  data={data}
                   itemHeight={32}
-                  itemKey="value"
+                  itemKey="name"
                   className="w-[26em] max-sm:max-w-[100vw]"
                 >
                   {(item) => {
+                    if (item.__create) {
+                      return (
+                        <CommandItem
+                          className="p-4 py-2.5 gap-4"
+                          key={`__create__${item.name}`}
+                          value={item.name}
+                          onSelect={() => {
+                            handleSelection(item.name);
+                          }}
+                        >
+                          <PlusIcon className="h-4 w-4 flex-shrink-0" />
+                          <span className="font-medium flex-1 truncate">
+                            Create "{item.name}"
+                          </span>
+                          <span className="text-muted-foreground text-xs">
+                            not seen yet
+                          </span>
+                        </CommandItem>
+                      );
+                    }
                     return (
                       <CommandItem
                         className={cn(
