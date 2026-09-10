@@ -5,8 +5,15 @@ import {
 } from '@/components/dashboard/dashboard-block';
 import { EditDashboardName } from '@/components/dashboard/edit-dashboard-name';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
+import { DashboardFilters } from '@/components/dashboard/DashboardFilters';
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
 import { ReportChart } from '@/components/report-chart';
+import {
+  dashboardFiltersEqual,
+  mergeDashboardFilters,
+  parseSavedDashboardFilters,
+} from '@/utils/merge-dashboard-filters';
+import type { IChartEventFilter } from '@openpanel/validation';
 import { Button, LinkButton } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -49,7 +56,7 @@ import { handleErrorToastOptions, useTRPC } from '@/integrations/trpc/react';
 import { showConfirm } from '@/modals';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Responsive, WidthProvider } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -138,6 +145,7 @@ function ReportItem({
   startDate,
   endDate,
   interval,
+  dashboardFilters,
   reloadKey,
   onDelete,
   onDuplicate,
@@ -149,11 +157,17 @@ function ReportItem({
   startDate: any;
   endDate: any;
   interval: any;
+  dashboardFilters: IChartEventFilter[];
   reloadKey: number;
   onDelete: (reportId: string) => void;
   onDuplicate: (reportId: string) => void;
 }) {
   const router = useRouter();
+
+  // Retention (cohort) charts ignore `globalFilters` in the query engine, so a
+  // dashboard filter cannot apply to them. Flag it so the tile can say so.
+  const ignoresDashboardFilters =
+    report.chartType === 'retention' && dashboardFilters.length > 0;
 
   return (
     <div className="card h-full flex flex-col">
@@ -239,6 +253,11 @@ function ReportItem({
           </DropdownMenu>
         </div>
       </div>
+      {ignoresDashboardFilters && (
+        <div className="px-3 py-1 text-xs text-muted-foreground border-b border-border">
+          Dashboard filter not applied to retention
+        </div>
+      )}
       <div
         className={cn(
           'p-4 overflow-auto flex-1',
@@ -259,6 +278,10 @@ function ReportItem({
               startDate: startDate ?? null,
               endDate: endDate ?? null,
               interval: interval ?? report.interval,
+              globalFilters: mergeDashboardFilters(
+                report.globalFilters ?? [],
+                dashboardFilters,
+              ),
             } as any
           }
         />
@@ -279,6 +302,36 @@ function Component() {
       projectId,
     }),
   );
+
+  // Saved dashboard-level filters persisted on the row (the shared default).
+  const savedDashboardFilters = useMemo(
+    () => parseSavedDashboardFilters(dashboardQuery.data?.filters),
+    [dashboardQuery.data?.filters],
+  );
+
+  // ACTIVE dashboard filters live in LOCAL state (the Mixpanel model: transient
+  // edits in memory, persisted on Save). Seeding from the saved column and using
+  // local state — rather than the URL — is what lets a filter actually be
+  // DELETED: the filter bar just hands us an empty array and it stays empty,
+  // instead of the old URL approach where clearing the last param fell back to
+  // the saved set and the removed filter reappeared.
+  const [dashboardFilters, setDashboardFilters] = useState<IChartEventFilter[]>(
+    savedDashboardFilters,
+  );
+
+  // Resync local state to the saved filters when (and only when) the SAVED set
+  // actually changes server-side — initial `byId` load and the refetch after a
+  // successful Save. We key off a stable value-hash of the saved set and only
+  // overwrite local state when that hash moves; comparing against the PREVIOUS
+  // saved value (not the current local edits) means an in-progress edit isn't
+  // clobbered just because `byId` re-ran and handed back an equal-but-new array.
+  const lastSavedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const savedKey = JSON.stringify(savedDashboardFilters);
+    if (lastSavedKeyRef.current === savedKey) return;
+    lastSavedKeyRef.current = savedKey;
+    setDashboardFilters(savedDashboardFilters);
+  }, [savedDashboardFilters]);
 
   const reportsQuery = useQuery(
     trpc.report.list.queryOptions({
@@ -357,7 +410,15 @@ function Component() {
         )
         .filter((ts): ts is number => typeof ts === 'number');
       if (stamps.length > 0) {
-        setLastUpdatedAt(Math.min(...stamps));
+        const next = Math.min(...stamps);
+        // The cache notifies subscribers synchronously, which can fire while a
+        // child (e.g. FilterRow) is mounting its `chart.values` query DURING
+        // render. Calling setState there triggers "Cannot update a component
+        // while rendering a different component". Defer out of the render phase
+        // so the "last updated" behavior stays intact without the warning.
+        queueMicrotask(() => {
+          setLastUpdatedAt((prev) => (prev === next ? prev : next));
+        });
       }
     };
     sync();
@@ -649,8 +710,14 @@ function Component() {
       <div className="row mb-4 flex-wrap items-center gap-2">
         {allReports.length > 0 && (
           <>
-            <OverviewRange />
-            <OverviewInterval />
+            <OverviewRange className="h-8 rounded-md" />
+            <OverviewInterval className="h-8 rounded-md" />
+            <DashboardFilters
+              filters={dashboardFilters}
+              onChange={setDashboardFilters}
+              savedFilters={savedDashboardFilters}
+              dashboardId={dashboardId}
+            />
           </>
         )}
         <div className="row ml-auto gap-2">
@@ -780,6 +847,7 @@ function Component() {
                   startDate={startDate}
                   endDate={endDate}
                   interval={interval}
+                  dashboardFilters={dashboardFilters}
                   reloadKey={reloadKey}
                   onDelete={(reportId) => {
                     reportDeletion.mutate({ reportId });

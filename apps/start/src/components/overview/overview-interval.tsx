@@ -1,18 +1,13 @@
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
-import {
-  isHourIntervalEnabledByRange,
-  isMinuteIntervalEnabledByRange,
-} from '@openpanel/constants';
-import { ClockIcon } from 'lucide-react';
 import { ReportInterval } from '../report/ReportInterval';
-import { Combobox } from '../ui/combobox';
 
-export function OverviewInterval() {
+export function OverviewInterval({ className }: { className?: string }) {
   const { interval, setInterval, range, startDate, endDate } =
     useOverviewOptions();
 
   return (
     <ReportInterval
+      className={className}
       interval={interval}
       onChange={setInterval}
       range={range}

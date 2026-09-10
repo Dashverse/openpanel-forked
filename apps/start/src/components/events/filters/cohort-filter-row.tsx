@@ -2,6 +2,7 @@ import { FilterPropertyPicker } from '@/components/filter-property-picker';
 import { Button } from '@/components/ui/button';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
 import { useCohorts } from '@/hooks/use-cohorts';
+import { cn } from '@/utils/cn';
 import type {
   IChartEventFilter,
   IChartEventFilterOperator,
@@ -16,6 +17,8 @@ interface CohortFilterRowProps {
   onRemove: () => void;
   onChangeProperty: (filter: IChartEventFilter) => void;
   exclude?: string[];
+  /** Extra classes for the row container (defaults to `gap-1.5`). */
+  className?: string;
 }
 
 export function CohortFilterRow({
@@ -26,6 +29,7 @@ export function CohortFilterRow({
   onRemove,
   onChangeProperty,
   exclude,
+  className,
 }: CohortFilterRowProps) {
   const { items: cohorts } = useCohorts({ projectId, includeCount: false });
 
@@ -34,7 +38,7 @@ export function CohortFilterRow({
   const isNotIn = filter.operator === 'notInCohort';
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div className={cn('flex flex-wrap items-center gap-1.5', className)}>
       <DropdownMenuComposed
         onChange={onChangeOperator}
         items={[
