@@ -78,7 +78,15 @@ export function getRedisCache() {
 let redisSub: ExtendedRedis;
 export function getRedisSub() {
   if (!redisSub) {
-    redisSub = createRedisClient(REDIS_URL, options);
+    // A subscriber connection must NOT run the readyCheck `INFO` command: once
+    // the socket enters subscriber mode only (P|S)SUBSCRIBE/UNSUBSCRIBE/PING/QUIT
+    // are allowed, so the readyCheck INFO on (re)connect throws
+    // "ERR Can't execute 'info' ... in this context" and crashes the process.
+    // Disable readyCheck for the subscriber (same as the queue clients below).
+    redisSub = createRedisClient(REDIS_URL, {
+      ...options,
+      enableReadyCheck: false,
+    });
   }
 
   return redisSub;
