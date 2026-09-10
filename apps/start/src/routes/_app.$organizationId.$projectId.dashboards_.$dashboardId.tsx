@@ -40,6 +40,7 @@ import {
   PlusIcon,
   RefreshCw,
   RotateCcw,
+  SaveIcon,
   SearchIcon,
   Trash,
   TrashIcon,
@@ -332,6 +333,25 @@ function Component() {
     lastSavedKeyRef.current = savedKey;
     setDashboardFilters(savedDashboardFilters);
   }, [savedDashboardFilters]);
+
+  // Persist the current dashboard filters as the shared default. The Save
+  // control lives at the end of the header row (not inside the filter bar), so
+  // the mutation is owned here.
+  const dashboardFiltersDirty = !dashboardFiltersEqual(
+    dashboardFilters,
+    savedDashboardFilters,
+  );
+  const saveDashboardFilters = useMutation(
+    trpc.dashboard.update.mutationOptions({
+      onError: handleErrorToastOptions({}),
+      onSuccess() {
+        queryClient.invalidateQueries(
+          trpc.dashboard.byId.queryFilter({ id: dashboardId, projectId }),
+        );
+        toast.success('Dashboard filters saved');
+      },
+    }),
+  );
 
   const reportsQuery = useQuery(
     trpc.report.list.queryOptions({
@@ -715,12 +735,26 @@ function Component() {
             <DashboardFilters
               filters={dashboardFilters}
               onChange={setDashboardFilters}
-              savedFilters={savedDashboardFilters}
-              dashboardId={dashboardId}
             />
           </>
         )}
         <div className="row ml-auto gap-2">
+          {allReports.length > 0 && dashboardFiltersDirty && (
+            <Button
+              variant="default"
+              size="sm"
+              icon={SaveIcon}
+              disabled={saveDashboardFilters.isPending}
+              onClick={() =>
+                saveDashboardFilters.mutate({
+                  id: dashboardId,
+                  filters: dashboardFilters,
+                })
+              }
+            >
+              Save
+            </Button>
+          )}
           <div className="relative flex items-center">
             <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
             <Input

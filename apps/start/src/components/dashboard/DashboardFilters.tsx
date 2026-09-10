@@ -3,16 +3,12 @@ import { FilterRow } from '@/components/events/filters/filter-row';
 import { PropertyPicker } from '@/components/property-picker';
 import { Button } from '@/components/ui/button';
 import { useAppParams } from '@/hooks/use-app-params';
-import { handleErrorToastOptions, useTRPC } from '@/integrations/trpc/react';
-import { dashboardFiltersEqual } from '@/utils/merge-dashboard-filters';
 import type {
   IChartEventFilter,
   IChartEventFilterOperator,
   IChartEventFilterValue,
 } from '@openpanel/validation';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { FilterIcon, SaveIcon } from 'lucide-react';
-import { toast } from 'sonner';
+import { FilterIcon } from 'lucide-react';
 
 // Narrower value control for the dashboard bar: the Events page keeps its fixed
 // `w-[220px]`, but on the dashboard short values looked oversized, so size to
@@ -35,43 +31,25 @@ const MULTI_VALUE_OPERATORS: IChartEventFilterOperator[] = ['is', 'isNot'];
  * operation that calls `onChange` with the next set; removing the last filter
  * just yields an empty array, so a deleted filter can't reappear.
  *
- * The Save control persists the current filters onto the dashboard as the
- * shared default (empty clears it). It only appears when the current filters
- * differ from what's saved.
+ * The Save control is owned by the dashboard route (rendered at the end of the
+ * header row), not here.
  */
 export function DashboardFilters({
   filters,
   onChange,
-  savedFilters,
-  dashboardId,
 }: {
   filters: IChartEventFilter[];
   onChange: (next: IChartEventFilter[]) => void;
-  savedFilters: IChartEventFilter[];
-  dashboardId: string;
 }) {
   const { projectId } = useAppParams();
-  const trpc = useTRPC();
-  const queryClient = useQueryClient();
-
-  const saveMutation = useMutation(
-    trpc.dashboard.update.mutationOptions({
-      onError: handleErrorToastOptions({}),
-      onSuccess() {
-        queryClient.invalidateQueries(
-          trpc.dashboard.byId.queryFilter({ id: dashboardId, projectId }),
-        );
-        toast.success('Dashboard filters saved');
-      },
-    }),
-  );
-
-  const hasUnsavedChanges = !dashboardFiltersEqual(filters, savedFilters);
 
   const removeFilter = (id: string | undefined) =>
     onChange(filters.filter((filter) => filter.id !== id));
 
-  const changeOperator = (id: string | undefined, operator: IChartEventFilterOperator) =>
+  const changeOperator = (
+    id: string | undefined,
+    operator: IChartEventFilterOperator,
+  ) =>
     onChange(
       filters.map((filter) =>
         filter.id === id
@@ -86,7 +64,10 @@ export function DashboardFilters({
       ),
     );
 
-  const changeValue = (id: string | undefined, value: IChartEventFilterValue[]) =>
+  const changeValue = (
+    id: string | undefined,
+    value: IChartEventFilterValue[],
+  ) =>
     onChange(
       filters.map((filter) =>
         filter.id === id ? { ...filter, value } : filter,
@@ -122,7 +103,9 @@ export function DashboardFilters({
               className="gap-2"
               exclude={exclude}
               onChangeProperty={(next) => changeProperty(filter.id, next)}
-              onChangeOperator={(operator) => changeOperator(filter.id, operator)}
+              onChangeOperator={(operator) =>
+                changeOperator(filter.id, operator)
+              }
               onRemove={() => removeFilter(filter.id)}
             />
           );
@@ -169,18 +152,6 @@ export function DashboardFilters({
           Add filter
         </Button>
       </PropertyPicker>
-
-      {hasUnsavedChanges && (
-        <Button
-          variant="default"
-          size="sm"
-          icon={SaveIcon}
-          disabled={saveMutation.isPending}
-          onClick={() => saveMutation.mutate({ id: dashboardId, filters })}
-        >
-          Save
-        </Button>
-      )}
     </div>
   );
 }
