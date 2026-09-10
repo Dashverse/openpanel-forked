@@ -63,7 +63,11 @@ async function start() {
         res.end(metrics);
       })
       .catch((error) => {
-        res.status(500).end(error);
+        // Must stringify: res.end() only accepts string/Buffer. Passing a raw
+        // error object (e.g. an ioredis ReplyError during a Redis Cluster
+        // MOVED/failover, when a metric collector queries Redis) throws an
+        // uncaught TypeError inside this catch and crashes the whole worker.
+        res.status(500).end(String(error?.message ?? error));
       });
   });
 
