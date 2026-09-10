@@ -125,6 +125,15 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
     for (const prev of ownedPartitions) {
       if (!assignedNow.has(prev)) {
         kafkaPartitionOwner.remove(String(prev), POD);
+        // Also clear the per-partition VALUE gauges for partitions we no longer
+        // own. Unlike the 0-seeded counters above, these hold a large last value
+        // (e.g. lag ~130k); if left behind, a partition reassigned during a
+        // rebalance keeps being reported by every ex-owner, so summing across
+        // pods multiplies the lag (6 pods × 130k looked like ~800k for one
+        // partition). Removing the series makes the owning pod the only reporter.
+        kafkaConsumerLag.remove(String(prev));
+        kafkaCommittedOffset.remove(String(prev));
+        kafkaHighWatermark.remove(String(prev));
       }
     }
     for (const partition of assignedNow) {
