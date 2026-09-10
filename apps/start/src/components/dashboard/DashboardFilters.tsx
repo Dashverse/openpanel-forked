@@ -139,7 +139,11 @@ export function DashboardFilters({
           onChange([
             ...filters,
             {
-              id: action.value,
+              // Stable, name-independent id: keying by property name would collide
+              // if a filter is renamed (country→platform) and then `country` is
+              // re-added — two rows with id "country" → duplicate React keys and
+              // edits/removals hitting both. changeProperty preserves this id.
+              id: crypto.randomUUID(),
               name: action.value,
               operator: action.cohortId ? 'inCohort' : 'is',
               value: [],

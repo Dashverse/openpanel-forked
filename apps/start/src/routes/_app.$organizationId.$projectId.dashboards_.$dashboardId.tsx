@@ -328,11 +328,15 @@ function Component() {
   // clobbered just because `byId` re-ran and handed back an equal-but-new array.
   const lastSavedKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    const savedKey = JSON.stringify(savedDashboardFilters);
+    // Key on dashboardId too: navigating between dashboards can preserve this
+    // component, and two dashboards with identical saved filters (e.g. both
+    // empty) would otherwise skip the resync — carrying the previous dashboard's
+    // unsaved edits over and risking a Save onto the wrong dashboard.
+    const savedKey = `${dashboardId}:${JSON.stringify(savedDashboardFilters)}`;
     if (lastSavedKeyRef.current === savedKey) return;
     lastSavedKeyRef.current = savedKey;
     setDashboardFilters(savedDashboardFilters);
-  }, [savedDashboardFilters]);
+  }, [dashboardId, savedDashboardFilters]);
 
   // Persist the current dashboard filters as the shared default. The Save
   // control lives at the end of the header row (not inside the filter bar), so

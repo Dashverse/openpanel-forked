@@ -72,6 +72,14 @@ describe('parseSavedDashboardFilters', () => {
     expect(out[0]!.cohortId).toBe('abc');
     expect(out[0]!.value).toEqual([]);
   });
+
+  it('drops filters with an unsupported operator (would return unfiltered rows)', () => {
+    const out = parseSavedDashboardFilters([
+      { name: 'country', operator: 'bogus', value: ['US'] },
+      { name: 'platform', operator: 'is', value: ['web'] },
+    ]);
+    expect(out.map((x) => x.name)).toEqual(['platform']);
+  });
 });
 
 describe('dashboardFiltersEqual (Save dirty-detection)', () => {
@@ -96,6 +104,10 @@ describe('dashboardFiltersEqual (Save dirty-detection)', () => {
     expect(
       dashboardFiltersEqual([f('country', ['US'])], [f('country', ['IN'])]),
     ).toBe(false);
+  });
+
+  it('treats a numeric value as different from its string form', () => {
+    expect(dashboardFiltersEqual([f('n', [5])], [f('n', ['5'])])).toBe(false);
   });
 
   it('detects removal (Save shows so the deletion can be persisted)', () => {

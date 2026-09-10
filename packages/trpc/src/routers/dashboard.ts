@@ -215,6 +215,8 @@ export const dashboardRouter = createTRPCRouter({
             name: `Copy of ${dashboard.name}`,
             projectId: dashboard.projectId,
             organizationId: dashboard.organizationId,
+            // Carry the saved dashboard-level filters to the copy.
+            filters: dashboard.filters as Prisma.InputJsonValue,
           },
         });
 

@@ -1,4 +1,4 @@
-import type { IChartEventFilter } from '@openpanel/validation';
+import { type IChartEventFilter, zChartEventFilter } from '@openpanel/validation';
 
 /**
  * Merge dashboard-level filters into a report's own `globalFilters`.
@@ -46,24 +46,27 @@ export function parseSavedDashboardFilters(raw: unknown): IChartEventFilter[] {
       return [];
     }
     const filter = item as Record<string, unknown>;
-    if (typeof filter.name !== 'string' || typeof filter.operator !== 'string') {
+    if (typeof filter.name !== 'string') {
       return [];
     }
-    const value = Array.isArray(filter.value) ? filter.value : [];
-    return [
-      {
-        id:
-          typeof filter.id === 'string' && filter.id.length > 0
-            ? filter.id
-            : filter.name,
-        name: filter.name,
-        operator: filter.operator,
-        value,
-        ...(typeof filter.cohortId === 'string'
-          ? { cohortId: filter.cohortId }
-          : {}),
-      } as IChartEventFilter,
-    ];
+    // Normalize legacy shapes first (default id, coerce value to an array), then
+    // validate against the real filter schema. An unsupported operator would
+    // otherwise slip through — `getEventFiltersWhereClause` has no branch for it,
+    // so the chart query silently omits the clause and returns UNFILTERED rows.
+    const normalized = {
+      id:
+        typeof filter.id === 'string' && filter.id.length > 0
+          ? filter.id
+          : filter.name,
+      name: filter.name,
+      operator: filter.operator,
+      value: Array.isArray(filter.value) ? filter.value : [],
+      ...(typeof filter.cohortId === 'string'
+        ? { cohortId: filter.cohortId }
+        : {}),
+    };
+    const parsed = zChartEventFilter.safeParse(normalized);
+    return parsed.success ? [parsed.data as IChartEventFilter] : [];
   });
 }
 
@@ -83,7 +86,10 @@ export function dashboardFiltersEqual(
         name: filter.name,
         operator: filter.operator,
         cohortId: filter.cohortId ?? null,
-        value: filter.value.map((v) => String(v)).sort(),
+        // Encode the value's TYPE alongside its string form so a saved numeric/
+        // boolean (e.g. 5 / true) isn't treated as equal to an edited string
+        // ("5" / "true") — otherwise the Save control would wrongly stay hidden.
+        value: filter.value.map((v) => `${typeof v}:${String(v)}`).sort(),
       }))
       .sort((x, y) =>
         `${x.name}|${x.operator}`.localeCompare(`${y.name}|${y.operator}`),
