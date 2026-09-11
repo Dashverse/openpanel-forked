@@ -4,6 +4,7 @@ import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
 import { InputEnter } from '@/components/ui/input-enter';
 import { usePropertyValues } from '@/hooks/use-property-values';
+import { cn } from '@/utils/cn';
 import { operators } from '@openpanel/constants';
 import type {
   IChartEventFilter,
@@ -22,6 +23,24 @@ interface FilterRowProps {
   onRemove: () => void;
   onChangeProperty: (filter: IChartEventFilter) => void;
   exclude?: string[];
+  /**
+   * Width classes for the value control. Defaults to the fixed `w-[220px]` the
+   * Events page uses; pass a size-to-content variant (e.g.
+   * `min-w-[8rem] max-w-[16rem] w-auto`) on the dashboard filter bar.
+   */
+  valueClassName?: string;
+  /**
+   * Extra classes for the row container. Defaults to the Events-page grouping
+   * gap (`gap-1.5`); the dashboard filter bar passes `gap-2` so the filter
+   * controls read as one strip with the date/interval controls.
+   */
+  className?: string;
+  /**
+   * Collapse the multi-value control to the first N chips + "+X more" on one
+   * line (Mixpanel-style) instead of wrapping every selected value. Omit for
+   * the Events-page default (wrap all chips).
+   */
+  valueMaxVisibleChips?: number;
 }
 
 export function FilterRow({
@@ -33,6 +52,9 @@ export function FilterRow({
   onRemove,
   onChangeProperty,
   exclude,
+  valueClassName = 'w-[220px]',
+  className,
+  valueMaxVisibleChips,
 }: FilterRowProps) {
   const potentialValues = usePropertyValues({
     event,
@@ -50,7 +72,7 @@ export function FilterRow({
     filter.operator === 'isNull' || filter.operator === 'isNotNull';
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div className={cn('flex flex-wrap items-center gap-1.5', className)}>
       <FilterPropertyPicker
         projectId={projectId}
         filter={filter}
@@ -77,13 +99,14 @@ export function FilterRow({
           key={filter.name}
           items={valuesCombobox}
           value={filter.value}
-          className="w-[220px]"
+          className={valueClassName}
           size="sm"
           onChange={onChangeValue}
           placeholder="Select..."
+          maxVisibleChips={valueMaxVisibleChips}
         />
       ) : (
-        <div className="w-[220px]">
+        <div className={valueClassName}>
           <InputEnter
             key={filter.name}
             className="h-8"

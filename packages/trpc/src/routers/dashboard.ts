@@ -1,4 +1,4 @@
-import { parseDashboardBlock } from '@openpanel/validation';
+import { parseDashboardBlock, zChartEventFilter } from '@openpanel/validation';
 import { PrismaError } from 'prisma-error-enum';
 import { z } from 'zod';
 
@@ -88,7 +88,10 @@ export const dashboardRouter = createTRPCRouter({
     .input(
       z.object({
         id: z.string(),
-        name: z.string(),
+        name: z.string().optional(),
+        // Saved dashboard-level filters (IChartEventFilter[]) stored as JSON on
+        // the dashboard; applied to every report as a shared default.
+        filters: z.array(zChartEventFilter).optional(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
@@ -107,13 +110,19 @@ export const dashboardRouter = createTRPCRouter({
         throw TRPCAccessError('You do not have access to this dashboard');
       }
 
+      const data: Prisma.DashboardUpdateInput = {};
+      if (input.name !== undefined) {
+        data.name = input.name;
+      }
+      if (input.filters !== undefined) {
+        data.filters = input.filters as Prisma.InputJsonValue;
+      }
+
       return db.dashboard.update({
         where: {
           id: input.id,
         },
-        data: {
-          name: input.name,
-        },
+        data,
       });
     }),
   delete: protectedProcedure
@@ -206,6 +215,8 @@ export const dashboardRouter = createTRPCRouter({
             name: `Copy of ${dashboard.name}`,
             projectId: dashboard.projectId,
             organizationId: dashboard.organizationId,
+            // Carry the saved dashboard-level filters to the copy.
+            filters: dashboard.filters as Prisma.InputJsonValue,
           },
         });
 

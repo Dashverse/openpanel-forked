@@ -5,8 +5,15 @@ import {
 } from '@/components/dashboard/dashboard-block';
 import { EditDashboardName } from '@/components/dashboard/edit-dashboard-name';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
+import { DashboardFilters } from '@/components/dashboard/DashboardFilters';
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
 import { ReportChart } from '@/components/report-chart';
+import {
+  dashboardFiltersEqual,
+  mergeDashboardFilters,
+  parseSavedDashboardFilters,
+} from '@/utils/merge-dashboard-filters';
+import type { IChartEventFilter } from '@openpanel/validation';
 import { Button, LinkButton } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -33,6 +40,7 @@ import {
   PlusIcon,
   RefreshCw,
   RotateCcw,
+  SaveIcon,
   SearchIcon,
   Trash,
   TrashIcon,
@@ -49,7 +57,7 @@ import { handleErrorToastOptions, useTRPC } from '@/integrations/trpc/react';
 import { showConfirm } from '@/modals';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, createFileRoute, useRouter } from '@tanstack/react-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Responsive, WidthProvider } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -138,6 +146,7 @@ function ReportItem({
   startDate,
   endDate,
   interval,
+  dashboardFilters,
   reloadKey,
   onDelete,
   onDuplicate,
@@ -149,11 +158,17 @@ function ReportItem({
   startDate: any;
   endDate: any;
   interval: any;
+  dashboardFilters: IChartEventFilter[];
   reloadKey: number;
   onDelete: (reportId: string) => void;
   onDuplicate: (reportId: string) => void;
 }) {
   const router = useRouter();
+
+  // Retention (cohort) charts ignore `globalFilters` in the query engine, so a
+  // dashboard filter cannot apply to them. Flag it so the tile can say so.
+  const ignoresDashboardFilters =
+    report.chartType === 'retention' && dashboardFilters.length > 0;
 
   return (
     <div className="card h-full flex flex-col">
@@ -239,6 +254,11 @@ function ReportItem({
           </DropdownMenu>
         </div>
       </div>
+      {ignoresDashboardFilters && (
+        <div className="px-3 py-1 text-xs text-muted-foreground border-b border-border">
+          Dashboard filter not applied to retention
+        </div>
+      )}
       <div
         className={cn(
           'p-4 overflow-auto flex-1',
@@ -259,6 +279,10 @@ function ReportItem({
               startDate: startDate ?? null,
               endDate: endDate ?? null,
               interval: interval ?? report.interval,
+              globalFilters: mergeDashboardFilters(
+                report.globalFilters ?? [],
+                dashboardFilters,
+              ),
             } as any
           }
         />
@@ -277,6 +301,75 @@ function Component() {
     trpc.dashboard.byId.queryOptions({
       id: dashboardId,
       projectId,
+    }),
+  );
+
+  // Saved dashboard-level filters persisted on the row (the shared default).
+  const savedDashboardFilters = useMemo(
+    () => parseSavedDashboardFilters(dashboardQuery.data?.filters),
+    [dashboardQuery.data?.filters],
+  );
+
+  // ACTIVE dashboard filters live in LOCAL state (the Mixpanel model: transient
+  // edits in memory, persisted on Save). Seeding from the saved column and using
+  // local state — rather than the URL — is what lets a filter actually be
+  // DELETED: the filter bar just hands us an empty array and it stays empty,
+  // instead of the old URL approach where clearing the last param fell back to
+  // the saved set and the removed filter reappeared.
+  const [dashboardFilters, setDashboardFilters] = useState<IChartEventFilter[]>(
+    savedDashboardFilters,
+  );
+
+  // Resync local state to the saved filters when (and only when) it's safe to
+  // adopt the server value. We remember the PREVIOUS dashboardId and the
+  // PREVIOUS saved snapshot, then only overwrite local state if:
+  //   • the dashboardId changed (navigation preserved the component — always
+  //     reset so the previous dashboard's unsaved edits can't leak over / be
+  //     saved onto the wrong dashboard), OR
+  //   • local state still equals the previous saved snapshot (the user has no
+  //     unsaved divergent edit, so adopting the fresh server value is lossless).
+  // If the saved set moved while the user has a divergent local edit — e.g. they
+  // edited again after Save started and the invalidated `byId` refetch returned
+  // the just-submitted snapshot — we preserve the newer local edit instead of
+  // clobbering it.
+  const prevDashboardIdRef = useRef(dashboardId);
+  const prevSavedRef = useRef<IChartEventFilter[]>(savedDashboardFilters);
+  useEffect(() => {
+    const dashboardChanged = prevDashboardIdRef.current !== dashboardId;
+    const savedChanged = !dashboardFiltersEqual(
+      prevSavedRef.current,
+      savedDashboardFilters,
+    );
+    if (!dashboardChanged && !savedChanged) return;
+
+    const localMatchesPrevSaved = dashboardFiltersEqual(
+      dashboardFilters,
+      prevSavedRef.current,
+    );
+    if (dashboardChanged || localMatchesPrevSaved) {
+      setDashboardFilters(savedDashboardFilters);
+    }
+
+    prevDashboardIdRef.current = dashboardId;
+    prevSavedRef.current = savedDashboardFilters;
+  }, [dashboardId, savedDashboardFilters, dashboardFilters]);
+
+  // Persist the current dashboard filters as the shared default. The Save
+  // control lives at the end of the header row (not inside the filter bar), so
+  // the mutation is owned here.
+  const dashboardFiltersDirty = !dashboardFiltersEqual(
+    dashboardFilters,
+    savedDashboardFilters,
+  );
+  const saveDashboardFilters = useMutation(
+    trpc.dashboard.update.mutationOptions({
+      onError: handleErrorToastOptions({}),
+      onSuccess() {
+        queryClient.invalidateQueries(
+          trpc.dashboard.byId.queryFilter({ id: dashboardId, projectId }),
+        );
+        toast.success('Dashboard filters saved');
+      },
     }),
   );
 
@@ -357,7 +450,15 @@ function Component() {
         )
         .filter((ts): ts is number => typeof ts === 'number');
       if (stamps.length > 0) {
-        setLastUpdatedAt(Math.min(...stamps));
+        const next = Math.min(...stamps);
+        // The cache notifies subscribers synchronously, which can fire while a
+        // child (e.g. FilterRow) is mounting its `chart.values` query DURING
+        // render. Calling setState there triggers "Cannot update a component
+        // while rendering a different component". Defer out of the render phase
+        // so the "last updated" behavior stays intact without the warning.
+        queueMicrotask(() => {
+          setLastUpdatedAt((prev) => (prev === next ? prev : next));
+        });
       }
     };
     sync();
@@ -646,46 +747,78 @@ function Component() {
           </>
         }
       />
-      <div className="row mb-4 flex-wrap items-center gap-2">
-        {allReports.length > 0 && (
-          <>
-            <OverviewRange />
-            <OverviewInterval />
-          </>
-        )}
-        <div className="row ml-auto gap-2">
-          <div className="relative flex items-center">
-            <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
-            <Input
-              placeholder="Search dashboard..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-48"
-              style={{ paddingLeft: '2rem' }}
-            />
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={RefreshCw}
-            onClick={handleReload}
-            title={
-              lastUpdatedAt
-                ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
-                : 'Reload reports with fresh data'
-            }
-            className="text-muted-foreground"
-          >
-            <span className="max-md:hidden">
-              {lastUpdatedAt
-                ? new Date(lastUpdatedAt).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
+      <div className="mb-4 flex flex-col gap-2">
+        {/* Controls + actions: kept on one line so Save/Search/Reload stay put
+            even as filters grow. The filter bar gets its own strip below. */}
+        <div className="row flex-wrap items-center gap-2">
+          {allReports.length > 0 && (
+            <>
+              <OverviewRange className="h-8 rounded-md" />
+              <OverviewInterval className="h-8 rounded-md" />
+              <DashboardFilters
+                section="trigger"
+                filters={dashboardFilters}
+                onChange={setDashboardFilters}
+              />
+            </>
+          )}
+          <div className="row ml-auto gap-2">
+            {allReports.length > 0 && dashboardFiltersDirty && (
+              <Button
+                variant="default"
+                size="sm"
+                icon={SaveIcon}
+                disabled={saveDashboardFilters.isPending}
+                onClick={() =>
+                  saveDashboardFilters.mutate({
+                    id: dashboardId,
+                    filters: dashboardFilters,
                   })
-                : 'Reload'}
-            </span>
-          </Button>
+                }
+              >
+                Save
+              </Button>
+            )}
+            <div className="relative flex items-center">
+              <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
+              <Input
+                placeholder="Search dashboard..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-48"
+                style={{ paddingLeft: '2rem' }}
+              />
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={RefreshCw}
+              onClick={handleReload}
+              title={
+                lastUpdatedAt
+                  ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
+                  : 'Reload reports with fresh data'
+              }
+              className="text-muted-foreground"
+            >
+              <span className="max-md:hidden">
+                {lastUpdatedAt
+                  ? new Date(lastUpdatedAt).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })
+                  : 'Reload'}
+              </span>
+            </Button>
+          </div>
         </div>
+        {allReports.length > 0 && (
+          <DashboardFilters
+            section="rows"
+            filters={dashboardFilters}
+            onChange={setDashboardFilters}
+          />
+        )}
       </div>
 
       {reportsQuery.isError || blocksQuery.isError || layoutQuery.isError ? (
@@ -780,6 +913,7 @@ function Component() {
                   startDate={startDate}
                   endDate={endDate}
                   interval={interval}
+                  dashboardFilters={dashboardFilters}
                   reloadKey={reloadKey}
                   onDelete={(reportId) => {
                     reportDeletion.mutate({ reportId });

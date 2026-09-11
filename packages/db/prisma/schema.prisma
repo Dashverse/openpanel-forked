@@ -294,6 +294,11 @@ model Dashboard {
   reports        Report[]
   blocks         DashboardBlock[]
 
+  // Saved dashboard-level filters (IChartEventFilter[]), applied to every
+  // report on the dashboard. Empty = no saved filter; a URL `dfilters` param
+  // overrides this per-view.
+  filters Json @default("[]")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
