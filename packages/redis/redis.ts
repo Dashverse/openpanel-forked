@@ -6,6 +6,30 @@ const options: RedisOptions = {
   connectTimeout: 10000,
 };
 
+// Bound how long a SINGLE Redis command may hang on the HOT PATH — the
+// event/session/cache clients the Kafka consumer + buffers hit per event.
+// Without this, an ioredis command on a live-but-slow socket waits forever:
+// `maxRetriesPerRequest` only bounds retries while DISCONNECTED, not a command
+// already sent on a healthy connection to a slow server. One stalled GET/SET/
+// EXISTS then wedges the consumer's per-batch `Promise.all`, so the partition
+// never commits and freezes until the pod is killed (offsets only resolve after
+// the whole batch settles). A few-second cap turns that permanent freeze into a
+// caught rejection — dedup fails OPEN, incomingEvent errors are logged + acked —
+// so the partition keeps moving. Deliberately NOT applied to the queue /
+// groupqueue / subscriber clients below: BullMQ & GroupMQ issue intentionally
+// blocking commands (BRPOPLPUSH / BZPOPMIN) and the subscriber connection blocks
+// by design, so a command timeout there would break them. Default 10s sits well
+// above observed worst-case hot-path latency (~2–5s at peak) while still
+// catching a true stall; set REDIS_COMMAND_TIMEOUT_MS=0 to disable.
+const REDIS_COMMAND_TIMEOUT_MS = Number.parseInt(
+  process.env.REDIS_COMMAND_TIMEOUT_MS ?? '10000',
+  10,
+);
+const hotPathOptions: RedisOptions =
+  Number.isFinite(REDIS_COMMAND_TIMEOUT_MS) && REDIS_COMMAND_TIMEOUT_MS > 0
+    ? { ...options, commandTimeout: REDIS_COMMAND_TIMEOUT_MS }
+    : options;
+
 export { Redis };
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
@@ -69,7 +93,7 @@ const createRedisClient = (
 let redisCache: ExtendedRedis;
 export function getRedisCache() {
   if (!redisCache) {
-    redisCache = createRedisClient(REDIS_URL, options);
+    redisCache = createRedisClient(REDIS_URL, hotPathOptions);
   }
 
   return redisCache;
@@ -127,7 +151,7 @@ export function getRedisGroupQueue() {
 let redisSession: ExtendedRedis;
 export function getRedisSession() {
   if (!redisSession) {
-    redisSession = createRedisClient(REDIS_SESSION_URL, options);
+    redisSession = createRedisClient(REDIS_SESSION_URL, hotPathOptions);
   }
   return redisSession;
 }
@@ -135,7 +159,7 @@ export function getRedisSession() {
 let redisEvent: ExtendedRedis;
 export function getRedisEvent() {
   if (!redisEvent) {
-    redisEvent = createRedisClient(REDIS_EVENT_URL, options);
+    redisEvent = createRedisClient(REDIS_EVENT_URL, hotPathOptions);
   }
   return redisEvent;
 }
