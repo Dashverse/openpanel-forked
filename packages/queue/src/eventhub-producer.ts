@@ -3,6 +3,7 @@ import {
   EventHubBufferedProducerClient,
   type EventHubBufferedProducerClientOptions,
   type OnSendEventsSuccessContext,
+  RetryMode,
 } from '@azure/event-hubs';
 import { createLogger } from '@openpanel/logger';
 import type { EventsQueuePayloadIncomingEvent } from './queues';
@@ -103,6 +104,32 @@ const MAX_INFLIGHT_PRODUCES =
     ? parsedMaxInflight
     : 5000;
 
+// SDK-level retry policy for the buffered producer's OWN background delivery —
+// distinct from the in-request retry above. The buffered producer keeps trying
+// to deliver an enqueued batch across this window and fires onSendEventsError
+// only after it gives up; it can (and does) deliver LATE, after our short
+// per-request ack timeout has already returned a 500. So a generous policy here
+// means more batches that "timed out" from the request's view still land in the
+// background — the event is delivered (no loss), just late — instead of being
+// dropped when the SDK exhausts its retries. This is exactly Azure's documented
+// guidance for EventHubBufferedProducerClient ("set a generous number of retries
+// and try-timeout in RetryOptions"). It costs nothing on the hot path: /track
+// still returns on the 3s ack timeout; only the background delivery is hardier.
+const intEnv = (name: string, def: number): number => {
+  const n = Number.parseInt(process.env[name] || '', 10);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+};
+// The SDK's per-attempt timeout (`timeoutInMs`) has a hard 60_000ms FLOOR — any
+// smaller value is clamped up to 60s — so total time the SDK keeps trying a
+// batch ≈ (maxRetries + 1) × ~60s + exponential backoff. maxRetries=5 → ~6 min,
+// which comfortably spans an azure-sdk#17588 ~2-min stall: a batch enqueued just
+// before a stall keeps being retried in the background and lands once the broker
+// recovers. `mode` must be set explicitly — the SDK default is Fixed, not
+// Exponential. retryDelayInMs is the exponential base; maxRetryDelayInMs caps it.
+const RETRY_MAX_RETRIES = intEnv('EVENTHUB_RETRY_MAX_RETRIES', 5);
+const RETRY_DELAY_MS = intEnv('EVENTHUB_RETRY_DELAY_MS', 1000);
+const RETRY_MAX_DELAY_MS = intEnv('EVENTHUB_RETRY_MAX_DELAY_MS', 30000);
+
 export const isEventHubProducerEnabled = (): boolean =>
   Boolean(CONNECTION_STRING);
 
@@ -165,6 +192,16 @@ const getClient = (): EventHubBufferedProducerClient => {
   const options: EventHubBufferedProducerClientOptions = {
     maxWaitTimeInMs: MAX_WAIT_MS,
     maxEventBufferLengthPerPartition: MAX_BUFFER_PER_PARTITION,
+    // Generous background retry so a transient send-ack stall is ridden out by
+    // the SDK's own delivery (late but landed) rather than dropped. mode is set
+    // to Exponential explicitly (SDK default is Fixed). timeoutInMs is left at
+    // its 60s floor. See RETRY_* notes above.
+    retryOptions: {
+      mode: RetryMode.Exponential,
+      maxRetries: RETRY_MAX_RETRIES,
+      retryDelayInMs: RETRY_DELAY_MS,
+      maxRetryDelayInMs: RETRY_MAX_DELAY_MS,
+    },
     onSendEventsSuccessHandler: (ctx) => settle(ctx.events, undefined),
     onSendEventsErrorHandler: (ctx) => {
       logger.warn('eventhub batch send failed', {
