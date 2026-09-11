@@ -34,6 +34,14 @@ interface ComboboxAdvancedProps {
   className?: string;
   size?: ButtonProps['size'];
   keepSearchOnSelect?: boolean;
+  /**
+   * When set, the trigger collapses to the first N selected chips plus a
+   * "+X more" badge on a single line, instead of wrapping every chip (which
+   * balloons the control vertically). Used by the dashboard filter bar so many
+   * selected values stay on one clean strip. Omit for the Events-page default
+   * (wrap all chips).
+   */
+  maxVisibleChips?: number;
 }
 
 export function ComboboxAdvanced({
@@ -44,6 +52,7 @@ export function ComboboxAdvanced({
   className,
   size,
   keepSearchOnSelect,
+  maxVisibleChips,
 }: ComboboxAdvancedProps) {
   const [open, setOpen] = React.useState(false);
   const [inputValue, setInputValue] = React.useState('');
@@ -123,19 +132,40 @@ export function ComboboxAdvanced({
           size={size}
           autoHeight
         >
-          <div className="flex w-full flex-wrap gap-1">
+          <div
+            className={cn(
+              'flex w-full min-w-0 gap-1',
+              maxVisibleChips
+                ? 'flex-nowrap items-center overflow-hidden'
+                : 'flex-wrap',
+            )}
+          >
             {value.length === 0 && placeholder}
-            {value.map((value) => {
+            {(maxVisibleChips && value.length > maxVisibleChips
+              ? value.slice(0, maxVisibleChips)
+              : value
+            ).map((value) => {
               const item = items.find((item) => item.value === value) ?? {
                 value,
                 label: value,
               };
               return (
-                <Badge variant="secondary" key={String(item.value)}>
-                  {item.label}
+                <Badge
+                  variant="secondary"
+                  key={String(item.value)}
+                  className={maxVisibleChips ? 'max-w-[8rem] shrink-0' : ''}
+                >
+                  <span className={maxVisibleChips ? 'truncate' : ''}>
+                    {item.label}
+                  </span>
                 </Badge>
               );
             })}
+            {maxVisibleChips && value.length > maxVisibleChips && (
+              <Badge variant="secondary" className="shrink-0 whitespace-nowrap">
+                +{value.length - maxVisibleChips} more
+              </Badge>
+            )}
           </div>
           <ChevronsUpDownIcon className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>

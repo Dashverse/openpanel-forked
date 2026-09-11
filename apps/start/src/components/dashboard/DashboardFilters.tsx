@@ -12,8 +12,14 @@ import { FilterIcon } from 'lucide-react';
 
 // Narrower value control for the dashboard bar: the Events page keeps its fixed
 // `w-[220px]`, but on the dashboard short values looked oversized, so size to
-// content within sensible bounds.
-const COMPACT_VALUE_CLASSNAME = 'min-w-[8rem] max-w-[16rem] w-auto';
+// content within sensible bounds. Paired with `valueMaxVisibleChips` below, the
+// control collapses many selected values to "first-two + N more" on one line
+// instead of ballooning the bar.
+const COMPACT_VALUE_CLASSNAME = 'min-w-[7rem] max-w-[15rem] w-auto';
+
+// Show at most two selected value chips on the dashboard bar; the rest collapse
+// into a "+N more" badge (Mixpanel board-filter style).
+const DASHBOARD_VALUE_MAX_CHIPS = 2;
 
 // Operators whose control accepts multiple values (the combobox). Everything
 // else is single-value (a text input) or valueless (isNull/isNotNull), so we
@@ -37,9 +43,18 @@ const MULTI_VALUE_OPERATORS: IChartEventFilterOperator[] = ['is', 'isNot'];
 export function DashboardFilters({
   filters,
   onChange,
+  section = 'all',
 }: {
   filters: IChartEventFilter[];
   onChange: (next: IChartEventFilter[]) => void;
+  /**
+   * Which part to render. The dashboard header splits the bar across two rows:
+   * the `trigger` (Add filter button) stays inline with the date/interval
+   * controls up top so it's always discoverable, while the active filter
+   * `rows` flow onto their own strip below so many filters never push the
+   * Save/Search/Reload actions around. `all` renders both (single-strip usage).
+   */
+  section?: 'trigger' | 'rows' | 'all';
 }) {
   const { projectId } = useAppParams();
 
@@ -81,6 +96,47 @@ export function DashboardFilters({
       ),
     );
 
+  // The rows strip only exists once there's something to show; an empty
+  // `rows`-only render collapses to nothing (no empty gap in the header).
+  if (section === 'rows' && filters.length === 0) {
+    return null;
+  }
+
+  const addFilterButton = (
+    <PropertyPicker
+      projectId={projectId}
+      categories={['event', 'profile', 'cohort']}
+      onSelect={(action) => {
+        // Guard duplicates: the property is already a filter on the bar.
+        if (filters.some((filter) => filter.name === action.value)) {
+          return;
+        }
+        onChange([
+          ...filters,
+          {
+            // Stable, name-independent id: keying by property name would collide
+            // if a filter is renamed (country→platform) and then `country` is
+            // re-added — two rows with id "country" → duplicate React keys and
+            // edits/removals hitting both. changeProperty preserves this id.
+            id: crypto.randomUUID(),
+            name: action.value,
+            operator: action.cohortId ? 'inCohort' : 'is',
+            value: [],
+            ...(action.cohortId ? { cohortId: action.cohortId } : {}),
+          } as IChartEventFilter,
+        ]);
+      }}
+    >
+      <Button variant="outline" size="sm" icon={FilterIcon}>
+        Add filter
+      </Button>
+    </PropertyPicker>
+  );
+
+  if (section === 'trigger') {
+    return addFilterButton;
+  }
+
   return (
     <div className="flex flex-wrap items-center gap-2">
       {filters.map((filter) => {
@@ -119,6 +175,7 @@ export function DashboardFilters({
             filter={filter}
             className="gap-2"
             valueClassName={COMPACT_VALUE_CLASSNAME}
+            valueMaxVisibleChips={DASHBOARD_VALUE_MAX_CHIPS}
             exclude={exclude}
             onChangeProperty={(next) => changeProperty(filter.id, next)}
             onChangeOperator={(operator) => changeOperator(filter.id, operator)}
@@ -128,34 +185,9 @@ export function DashboardFilters({
         );
       })}
 
-      <PropertyPicker
-        projectId={projectId}
-        categories={['event', 'profile', 'cohort']}
-        onSelect={(action) => {
-          // Guard duplicates: the property is already a filter on the bar.
-          if (filters.some((filter) => filter.name === action.value)) {
-            return;
-          }
-          onChange([
-            ...filters,
-            {
-              // Stable, name-independent id: keying by property name would collide
-              // if a filter is renamed (country→platform) and then `country` is
-              // re-added — two rows with id "country" → duplicate React keys and
-              // edits/removals hitting both. changeProperty preserves this id.
-              id: crypto.randomUUID(),
-              name: action.value,
-              operator: action.cohortId ? 'inCohort' : 'is',
-              value: [],
-              ...(action.cohortId ? { cohortId: action.cohortId } : {}),
-            } as IChartEventFilter,
-          ]);
-        }}
-      >
-        <Button variant="outline" size="sm" icon={FilterIcon}>
-          Add filter
-        </Button>
-      </PropertyPicker>
+      {/* In single-strip (`all`) mode the trigger trails the rows; when the
+          header splits the bar, the trigger lives up top instead. */}
+      {section === 'all' && addFilterButton}
     </div>
   );
 }

@@ -320,23 +320,39 @@ function Component() {
     savedDashboardFilters,
   );
 
-  // Resync local state to the saved filters when (and only when) the SAVED set
-  // actually changes server-side — initial `byId` load and the refetch after a
-  // successful Save. We key off a stable value-hash of the saved set and only
-  // overwrite local state when that hash moves; comparing against the PREVIOUS
-  // saved value (not the current local edits) means an in-progress edit isn't
-  // clobbered just because `byId` re-ran and handed back an equal-but-new array.
-  const lastSavedKeyRef = useRef<string | null>(null);
+  // Resync local state to the saved filters when (and only when) it's safe to
+  // adopt the server value. We remember the PREVIOUS dashboardId and the
+  // PREVIOUS saved snapshot, then only overwrite local state if:
+  //   • the dashboardId changed (navigation preserved the component — always
+  //     reset so the previous dashboard's unsaved edits can't leak over / be
+  //     saved onto the wrong dashboard), OR
+  //   • local state still equals the previous saved snapshot (the user has no
+  //     unsaved divergent edit, so adopting the fresh server value is lossless).
+  // If the saved set moved while the user has a divergent local edit — e.g. they
+  // edited again after Save started and the invalidated `byId` refetch returned
+  // the just-submitted snapshot — we preserve the newer local edit instead of
+  // clobbering it.
+  const prevDashboardIdRef = useRef(dashboardId);
+  const prevSavedRef = useRef<IChartEventFilter[]>(savedDashboardFilters);
   useEffect(() => {
-    // Key on dashboardId too: navigating between dashboards can preserve this
-    // component, and two dashboards with identical saved filters (e.g. both
-    // empty) would otherwise skip the resync — carrying the previous dashboard's
-    // unsaved edits over and risking a Save onto the wrong dashboard.
-    const savedKey = `${dashboardId}:${JSON.stringify(savedDashboardFilters)}`;
-    if (lastSavedKeyRef.current === savedKey) return;
-    lastSavedKeyRef.current = savedKey;
-    setDashboardFilters(savedDashboardFilters);
-  }, [dashboardId, savedDashboardFilters]);
+    const dashboardChanged = prevDashboardIdRef.current !== dashboardId;
+    const savedChanged = !dashboardFiltersEqual(
+      prevSavedRef.current,
+      savedDashboardFilters,
+    );
+    if (!dashboardChanged && !savedChanged) return;
+
+    const localMatchesPrevSaved = dashboardFiltersEqual(
+      dashboardFilters,
+      prevSavedRef.current,
+    );
+    if (dashboardChanged || localMatchesPrevSaved) {
+      setDashboardFilters(savedDashboardFilters);
+    }
+
+    prevDashboardIdRef.current = dashboardId;
+    prevSavedRef.current = savedDashboardFilters;
+  }, [dashboardId, savedDashboardFilters, dashboardFilters]);
 
   // Persist the current dashboard filters as the shared default. The Save
   // control lives at the end of the header row (not inside the filter bar), so
@@ -731,66 +747,78 @@ function Component() {
           </>
         }
       />
-      <div className="row mb-4 flex-wrap items-center gap-2">
-        {allReports.length > 0 && (
-          <>
-            <OverviewRange className="h-8 rounded-md" />
-            <OverviewInterval className="h-8 rounded-md" />
-            <DashboardFilters
-              filters={dashboardFilters}
-              onChange={setDashboardFilters}
-            />
-          </>
-        )}
-        <div className="row ml-auto gap-2">
-          {allReports.length > 0 && dashboardFiltersDirty && (
-            <Button
-              variant="default"
-              size="sm"
-              icon={SaveIcon}
-              disabled={saveDashboardFilters.isPending}
-              onClick={() =>
-                saveDashboardFilters.mutate({
-                  id: dashboardId,
-                  filters: dashboardFilters,
-                })
-              }
-            >
-              Save
-            </Button>
+      <div className="mb-4 flex flex-col gap-2">
+        {/* Controls + actions: kept on one line so Save/Search/Reload stay put
+            even as filters grow. The filter bar gets its own strip below. */}
+        <div className="row flex-wrap items-center gap-2">
+          {allReports.length > 0 && (
+            <>
+              <OverviewRange className="h-8 rounded-md" />
+              <OverviewInterval className="h-8 rounded-md" />
+              <DashboardFilters
+                section="trigger"
+                filters={dashboardFilters}
+                onChange={setDashboardFilters}
+              />
+            </>
           )}
-          <div className="relative flex items-center">
-            <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
-            <Input
-              placeholder="Search dashboard..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-48"
-              style={{ paddingLeft: '2rem' }}
-            />
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={RefreshCw}
-            onClick={handleReload}
-            title={
-              lastUpdatedAt
-                ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
-                : 'Reload reports with fresh data'
-            }
-            className="text-muted-foreground"
-          >
-            <span className="max-md:hidden">
-              {lastUpdatedAt
-                ? new Date(lastUpdatedAt).toLocaleTimeString([], {
-                    hour: '2-digit',
-                    minute: '2-digit',
+          <div className="row ml-auto gap-2">
+            {allReports.length > 0 && dashboardFiltersDirty && (
+              <Button
+                variant="default"
+                size="sm"
+                icon={SaveIcon}
+                disabled={saveDashboardFilters.isPending}
+                onClick={() =>
+                  saveDashboardFilters.mutate({
+                    id: dashboardId,
+                    filters: dashboardFilters,
                   })
-                : 'Reload'}
-            </span>
-          </Button>
+                }
+              >
+                Save
+              </Button>
+            )}
+            <div className="relative flex items-center">
+              <SearchIcon className="absolute left-2.5 size-4 text-muted-foreground pointer-events-none" />
+              <Input
+                placeholder="Search dashboard..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-48"
+                style={{ paddingLeft: '2rem' }}
+              />
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={RefreshCw}
+              onClick={handleReload}
+              title={
+                lastUpdatedAt
+                  ? `Data last updated ${new Date(lastUpdatedAt).toLocaleString()} — click to reload`
+                  : 'Reload reports with fresh data'
+              }
+              className="text-muted-foreground"
+            >
+              <span className="max-md:hidden">
+                {lastUpdatedAt
+                  ? new Date(lastUpdatedAt).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })
+                  : 'Reload'}
+              </span>
+            </Button>
+          </div>
         </div>
+        {allReports.length > 0 && (
+          <DashboardFilters
+            section="rows"
+            filters={dashboardFilters}
+            onChange={setDashboardFilters}
+          />
+        )}
       </div>
 
       {reportsQuery.isError || blocksQuery.isError || layoutQuery.isError ? (

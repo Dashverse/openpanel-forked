@@ -35,6 +35,12 @@ interface FilterRowProps {
    * controls read as one strip with the date/interval controls.
    */
   className?: string;
+  /**
+   * Collapse the multi-value control to the first N chips + "+X more" on one
+   * line (Mixpanel-style) instead of wrapping every selected value. Omit for
+   * the Events-page default (wrap all chips).
+   */
+  valueMaxVisibleChips?: number;
 }
 
 export function FilterRow({
@@ -48,6 +54,7 @@ export function FilterRow({
   exclude,
   valueClassName = 'w-[220px]',
   className,
+  valueMaxVisibleChips,
 }: FilterRowProps) {
   const potentialValues = usePropertyValues({
     event,
@@ -96,6 +103,7 @@ export function FilterRow({
           size="sm"
           onChange={onChangeValue}
           placeholder="Select..."
+          maxVisibleChips={valueMaxVisibleChips}
         />
       ) : (
         <div className={valueClassName}>
