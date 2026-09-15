@@ -1,30 +1,25 @@
 import { type ILogger, createLogger } from '@openpanel/logger';
+import { db } from '../../index';
 import { ch } from '../clickhouse/client';
 import { chMigrationClient } from '../clickhouse/migration';
-import { db } from '../../index';
 import { refreshMaterializedColumnsCache } from './chart.service';
 
-interface PropertyUsageStats {
-  property: string; // Full path: "properties.utm_source" or "profile.properties.campaign"
-  propertyKey: string; // Key only: "utm_source" or "campaign"
-  targetTable: 'events' | 'profiles'; // Which ClickHouse table to materialize on
-  usageCount: number; // How many reports use it
-  queryFrequency: number; // Estimated queries per day
-  cardinality: number; // Number of unique values (0 when using query-log path; see enrichWithQueryLogStats)
-  estimatedSize: number; // Estimated storage cost in bytes (0 when using query-log path)
-  benefit: number; // Calculated benefit score
-  // Pain signal from system.query_log (query-log-driven analysis):
-  // — populated by `enrichWithQueryLogStats`; all zero when a property has
-  //   no observed slow queries. Kept optional so the shape stays compatible
-  //   with any consumers of PropertyUsageStats that only care about
-  //   report-derived usage stats.
-  observedOccurrences?: number;
-  observedTimeouts?: number;
-  observedSlowCount?: number;
-  observedTotalMs?: number;
+// Pain signal for one property, read from system.query_log.
+interface PropertyPain {
+  occurrences: number; // total slow/timed-out queries touching this property
+  timeouts: number; // queries that hit the CH execution-time limit
+  slowCount: number; // queries slower than QUERY_LOG_SLOW_MS
+  totalMs: number; // summed query_duration_ms
 }
 
-interface PropertyAnalysis extends PropertyUsageStats {
+interface PropertyStats extends PropertyPain {
+  property: string; // Full path: "properties.utm_source" / "profile.properties.campaign"
+  propertyKey: string; // Key only: "utm_source" / "campaign"
+  targetTable: 'events' | 'profiles';
+  benefit: number; // Ranking score derived from the pain signal
+}
+
+interface PropertyAnalysis extends PropertyStats {
   skipReason?: string; // Why it wasn't materialized (if skipped)
 }
 
@@ -33,46 +28,46 @@ interface MaterializedColumnCandidate {
   columnName: string;
   targetTable: 'events' | 'profiles';
   reason: string;
-  stats: PropertyUsageStats;
+  stats: PropertyStats;
 }
 
+/**
+ * Picks ClickHouse map properties worth promoting to real materialized columns,
+ * driven purely by observed pain in `system.query_log` (PostHog's approach, see
+ * ee/clickhouse/materialized_columns/analyze.py).
+ *
+ * A property becomes a candidate when queries reading `properties['<key>']` on
+ * the target table are timing out or running slow in the analysis window. This
+ * catches the real offenders regardless of whether any saved report references
+ * them (dashboard filters, breakdowns, ad-hoc / API queries) — the thing that
+ * hurts is the thing that gets fixed.
+ */
 export class MaterializeColumnsService {
   private logger: ILogger;
 
-  // Thresholds for materialization decisions
-  private readonly MIN_USAGE_COUNT = 1; // Must be used in at least 1 report
-  private readonly MAX_CARDINALITY = 5000; // Don't materialize if >5000 unique values (only checked when USE_QUERY_LOG_PAIN_SIGNAL=false)
-  private readonly MIN_BENEFIT_SCORE = 20; // Minimum benefit score to justify materialization
-  private readonly MAX_DAILY_MATERIALIZATIONS = 3; // Rate limit: max 3 new columns per day (total across both tables)
+  private readonly MIN_BENEFIT_SCORE = 20; // Default benefit floor to materialize
+  private readonly MAX_DAILY_MATERIALIZATIONS = 3; // Max new columns per run (both tables)
 
-  // Query-log-driven analyzer knobs. Only consulted when
-  // USE_QUERY_LOG_PAIN_SIGNAL === true (default). Left tunable via env for
-  // scale-specific tuning without a code deploy — PostHog uses 20 GB / 5M
-  // rows / >slow_min at their scale; ours is smaller so defaults are looser.
-  private readonly QUERY_LOG_WINDOW_HOURS = Number.parseInt(
+  // query_log analysis knobs — env-tunable for scale without a redeploy.
+  private readonly WINDOW_HOURS = Number.parseInt(
     process.env.MATERIALIZE_QUERY_LOG_WINDOW_HOURS || '168', // 7 days
     10,
   );
-  private readonly QUERY_LOG_SLOW_MS = Number.parseInt(
+  private readonly SLOW_MS = Number.parseInt(
     process.env.MATERIALIZE_QUERY_LOG_SLOW_MS || '2000', // 2s
     10,
   );
-  private readonly QUERY_LOG_MIN_SLOW_COUNT = Number.parseInt(
+  private readonly MIN_SLOW_COUNT = Number.parseInt(
     process.env.MATERIALIZE_QUERY_LOG_MIN_SLOW_COUNT || '3',
     10,
   );
-
-  // Feature flag — default ON. Set MATERIALIZE_USE_QUERY_LOG=false to
-  // fall back to the original report-scan + source-table cardinality probe.
-  private readonly USE_QUERY_LOG_PAIN_SIGNAL =
-    process.env.MATERIALIZE_USE_QUERY_LOG !== 'false';
 
   constructor() {
     this.logger = createLogger({ name: 'materialize-columns' });
   }
 
   /**
-   * Main entry point with dry-run support
+   * Analyze both tables and (unless dryRun) materialize the top candidates.
    */
   async analyze(options: {
     dryRun: boolean;
@@ -84,40 +79,34 @@ export class MaterializeColumnsService {
     materialized: string[];
   }> {
     const { dryRun, threshold = this.MIN_BENEFIT_SCORE } = options;
-
     this.logger.info('Starting materialized column analysis', {
       dryRun,
       threshold,
     });
 
-    // Run both pipelines: events first, then profiles
-    const { candidates: eventsCandidates, allProperties: eventsProperties } =
-      await this.analyzeDashboardProperties('events', threshold);
+    const events = await this.analyzeTable('events', threshold);
+    const profiles = await this.analyzeTable('profiles', threshold);
 
-    const { candidates: profilesCandidates, allProperties: profilesProperties } =
-      await this.analyzeDashboardProperties('profiles', threshold);
-
-    const candidates = [...eventsCandidates, ...profilesCandidates];
-    const allProperties = [...eventsProperties, ...profilesProperties];
-
-    // Generate combined report
+    const candidates = [...events.candidates, ...profiles.candidates].sort(
+      (a, b) => b.stats.benefit - a.stats.benefit,
+    );
+    const allProperties = [...events.allProperties, ...profiles.allProperties];
     const report = this.generateReport(candidates, allProperties, dryRun);
 
-    // Execute if not dry-run
     const materialized: string[] = [];
     if (!dryRun && candidates.length > 0) {
-      // Rate limiting across both tables combined
       const limited = candidates.slice(0, this.MAX_DAILY_MATERIALIZATIONS);
       if (limited.length < candidates.length) {
         this.logger.warn(
-          `Rate limiting: Only materializing ${limited.length} of ${candidates.length} candidates`,
+          `Rate limiting: materializing ${limited.length} of ${candidates.length} candidates`,
         );
       }
-
       for (const candidate of limited) {
         try {
           await this.materializeColumn(candidate);
-          materialized.push(`${candidate.targetTable}:${candidate.propertyKey}`);
+          materialized.push(
+            `${candidate.targetTable}:${candidate.propertyKey}`,
+          );
         } catch (error) {
           this.logger.error(
             `Failed to materialize ${candidate.targetTable}:${candidate.propertyKey}`,
@@ -127,125 +116,86 @@ export class MaterializeColumnsService {
       }
     }
 
-    return {
-      candidates,
-      allProperties,
-      report,
-      materialized,
-    };
+    return { candidates, allProperties, report, materialized };
   }
 
   /**
-   * Main analysis function for a specific target table
+   * Analyze one table: read the pain signal, drop anything already
+   * materialized, score + rank the rest.
    */
-  private async analyzeDashboardProperties(
+  private async analyzeTable(
     targetTable: 'events' | 'profiles',
     threshold: number,
   ): Promise<{
     candidates: MaterializedColumnCandidate[];
     allProperties: PropertyAnalysis[];
   }> {
-    const propertyUsage = targetTable === 'events'
-      ? await this.getEventsPropertyUsageFromReports()
-      : await this.getProfilePropertyUsageFromReports();
-
-    if (propertyUsage.length === 0) {
-      this.logger.info(`No ${targetTable} properties found in reports`);
+    const painByKey = await this.fetchQueryLogPain(targetTable);
+    if (painByKey.size === 0) {
+      this.logger.info(
+        `No ${targetTable} properties with slow-query pain in ${this.WINDOW_HOURS}h`,
+      );
       return { candidates: [], allProperties: [] };
     }
+    this.logger.info(
+      `${painByKey.size} ${targetTable} properties showing slow-query pain`,
+    );
 
-    this.logger.info(`Found ${propertyUsage.length} unique ${targetTable} properties in reports`);
-
-    // Check already tracked in database
-    const existingColumns = await db.materializedColumn.findMany({
-      where: { status: 'active', targetTable },
-      select: { propertyKey: true },
-    });
-    const existingKeys = new Set(existingColumns.map((c) => c.propertyKey));
-
-    // Pull every column on the target table — we need both the names
-    // (to detect collisions with reserved top-level columns like `name`,
-    // `session_id`, `country`, etc.) AND each column's default_kind
-    // (so we can tell "already materialized → skip" from
-    // "regular column collision → rename to prop_<key>").
-    const clickhouseColumns = await this.getExistingClickHouseColumns(targetTable);
-    const materializedColumnNames = new Set(
-      Array.from(clickhouseColumns.entries())
+    // What's already a column? `tracked` = we materialized it before;
+    // `materialized` = a MATERIALIZED column exists; `reserved` = any column
+    // name (used to rename on collision with a real column like `name`).
+    const tracked = new Set(
+      (
+        await db.materializedColumn.findMany({
+          where: { status: 'active', targetTable },
+          select: { propertyKey: true },
+        })
+      ).map((c) => c.propertyKey),
+    );
+    const columns = await this.getExistingClickHouseColumns(targetTable);
+    const materialized = new Set(
+      Array.from(columns.entries())
         .filter(([, kind]) => kind === 'MATERIALIZED')
         .map(([name]) => name),
     );
-    const allColumnNames = new Set(clickhouseColumns.keys());
-
-    const alreadyTracked = propertyUsage.filter((p) => existingKeys.has(p.propertyKey));
-    // Only skip when the existing column is itself a materialized projection of
-    // this property — a regular column with the same name (e.g. `name`,
-    // `country`) is a collision we want to handle by renaming, not skipping.
-    const alreadyExistsInClickHouse = propertyUsage.filter(
-      (p) => !existingKeys.has(p.propertyKey) && materializedColumnNames.has(p.propertyKey),
-    );
-    const newProperties = propertyUsage.filter(
-      (p) => !existingKeys.has(p.propertyKey) && !materializedColumnNames.has(p.propertyKey),
-    );
+    const reserved = new Set(columns.keys());
 
     const allProperties: PropertyAnalysis[] = [];
+    const eligible: PropertyAnalysis[] = [];
 
-    allProperties.push(
-      ...alreadyTracked.map((p) => ({
-        ...p,
-        cardinality: 0,
-        estimatedSize: 0,
-        benefit: 0,
-        skipReason: '✅ Already materialized (tracked)',
-      })),
-    );
+    for (const [key, pain] of painByKey) {
+      const stats: PropertyStats = {
+        property:
+          targetTable === 'events'
+            ? `properties.${key}`
+            : `profile.properties.${key}`,
+        propertyKey: key,
+        targetTable,
+        ...pain,
+        benefit: this.benefitScore(pain),
+      };
 
-    allProperties.push(
-      ...alreadyExistsInClickHouse.map((p) => ({
-        ...p,
-        cardinality: 0,
-        estimatedSize: 0,
-        benefit: 0,
-        skipReason: `✅ Column already exists in ${targetTable} table`,
-      })),
-    );
+      let skipReason: string | undefined;
+      if (tracked.has(key)) {
+        skipReason = '✅ Already materialized (tracked)';
+      } else if (materialized.has(key)) {
+        skipReason = `✅ Column already exists in ${targetTable} table`;
+      } else if (stats.benefit < threshold) {
+        skipReason = `❌ Benefit ${stats.benefit} < ${threshold} threshold`;
+      }
 
-    if (newProperties.length === 0) {
-      this.logger.info(`No new ${targetTable} properties to analyze (all already materialized)`);
-      return { candidates: [], allProperties };
+      const analysis = { ...stats, skipReason };
+      allProperties.push(analysis);
+      if (!skipReason) eligible.push(analysis);
     }
 
-    this.logger.info(`${newProperties.length} ${targetTable} properties not yet materialized`);
-
-    // Enrich with pain signal. Query-log path (default): one system.query_log
-    // scan for the whole batch — no source-table access. Legacy path:
-    // per-property probe against events_property_values_mv (events) or the
-    // full profiles table (profiles). The legacy profile probe is a
-    // full-table scan repeated for every property and was the driver of the
-    // hourly CH CPU spike this rewrite is targeting.
-    const enrichedStats = this.USE_QUERY_LOG_PAIN_SIGNAL
-      ? await this.enrichWithQueryLogStats(newProperties, targetTable)
-      : await Promise.all(
-          newProperties.map((usage) => this.enrichWithClickHouseStats(usage)),
-        );
-
-    // Calculate benefit scores
-    const statsWithBenefit = enrichedStats.map((stats) => this.calculateBenefitScore(stats));
-
-    // Determine skip reasons
-    const analyzed = statsWithBenefit.map((stats) => ({
-      ...stats,
-      skipReason: this.getSkipReason(stats, threshold),
-    }));
-
-    allProperties.push(...analyzed);
-
-    const candidates = analyzed
-      .filter((stat) => !stat.skipReason)
-      .map((stats) => this.createCandidate(stats, allColumnNames))
+    const candidates = eligible
+      .map((stats) => this.createCandidate(stats, reserved))
       .sort((a, b) => b.stats.benefit - a.stats.benefit);
 
-    this.logger.info(`Identified ${candidates.length} ${targetTable} candidates for materialization`);
-
+    this.logger.info(
+      `Identified ${candidates.length} ${targetTable} candidates`,
+    );
     return {
       candidates,
       allProperties: allProperties.sort((a, b) => b.benefit - a.benefit),
@@ -253,289 +203,25 @@ export class MaterializeColumnsService {
   }
 
   /**
-   * Get every column on the target table, mapped to its default_kind.
-   * Used for both "already materialized → skip" detection (default_kind
-   * = 'MATERIALIZED') and reserved-column collision detection (everything
-   * else: DEFAULT, ALIAS, or no default at all).
+   * Read the pain signal from system.query_log: for each property read via
+   * `properties['<key>']` on the target table, how many slow / timed-out
+   * queries touched it in the window. One grouped scan across all replicas
+   * (query_log is node-local, so clusterAllReplicas is required to see the
+   * whole picture). ~130ms server-side; no source-table access.
+   *
+   * Returns only properties clearing the pain bar (≥1 timeout OR
+   * ≥MIN_SLOW_COUNT slow queries). Fails closed: on error, an empty map, so
+   * the run reports "no candidates" rather than doing anything risky.
    */
-  private async getExistingClickHouseColumns(
+  private async fetchQueryLogPain(
     targetTable: 'events' | 'profiles',
-  ): Promise<Map<string, string>> {
-    try {
-      const result = await ch.query({
-        query: `
-          SELECT name, default_kind
-          FROM system.columns
-          WHERE database = 'default'
-            AND table = '${targetTable}'
-        `,
-        format: 'JSONEachRow',
-      });
-
-      const data = await result.json<{ name: string; default_kind: string }>();
-      return new Map(data.map((row) => [row.name, row.default_kind]));
-    } catch (error) {
-      this.logger.warn(`Failed to get existing ClickHouse columns for ${targetTable}`, { error });
-      return new Map();
-    }
-  }
-
-  /**
-   * Determine why a property should be skipped.
-   *
-   * Query-log path (default): skip anything that never showed up in a slow
-   * query in the analysis window. If it's not causing pain today, no need
-   * to spend a materialized column on it (matches PostHog's philosophy).
-   *
-   * Legacy path (MATERIALIZE_USE_QUERY_LOG=false): the original
-   * cardinality-based checks.
-   */
-  private getSkipReason(stats: PropertyUsageStats, threshold: number): string | undefined {
-    if (stats.usageCount < this.MIN_USAGE_COUNT) {
-      return `❌ Low usage (${stats.usageCount} reports, need ${this.MIN_USAGE_COUNT})`;
-    }
-
-    if (this.USE_QUERY_LOG_PAIN_SIGNAL) {
-      const timeouts = stats.observedTimeouts ?? 0;
-      const slowCount = stats.observedSlowCount ?? 0;
-
-      if (timeouts === 0 && slowCount < this.QUERY_LOG_MIN_SLOW_COUNT) {
-        return `❌ No pain signal (${timeouts} timeouts, ${slowCount} slow queries in ${this.QUERY_LOG_WINDOW_HOURS}h; need ≥1 timeout OR ≥${this.QUERY_LOG_MIN_SLOW_COUNT} slow)`;
-      }
-      // No cardinality check — trust the pain signal.
-      return undefined;
-    }
-
-    if (stats.cardinality === 0) {
-      return `❌ No data found in source table`;
-    }
-
-    if (stats.cardinality > this.MAX_CARDINALITY) {
-      return `❌ Too high cardinality (${stats.cardinality} values > ${this.MAX_CARDINALITY} limit)`;
-    }
-
-    if (stats.benefit < threshold) {
-      return `❌ Benefit too low (${stats.benefit.toFixed(0)} < ${threshold} threshold)`;
-    }
-
-    return undefined;
-  }
-
-  /**
-   * Extract event properties from reports (properties.*)
-   */
-  private async getEventsPropertyUsageFromReports(): Promise<
-    Array<{
-      property: string;
-      propertyKey: string;
-      targetTable: 'events';
-      usageCount: number;
-      queryFrequency: number;
-    }>
-  > {
-    const reports = await db.report.findMany({
-      select: {
-        breakdowns: true,
-        events: true,
-        globalFilters: true,
-        holdProperties: true,
-      },
-    });
-
-    const propertyMap = new Map<string, number>();
-
-    for (const report of reports) {
-      const { eventsProperties } = this.extractPropertiesFromReport(report);
-      for (const prop of eventsProperties) {
-        propertyMap.set(prop, (propertyMap.get(prop) || 0) + 1);
-      }
-    }
-
-    const ESTIMATED_QUERIES_PER_DAY = 10;
-
-    return Array.from(propertyMap.entries()).map(([property, usageCount]) => ({
-      property,
-      propertyKey: property.replace('properties.', ''),
-      targetTable: 'events' as const,
-      usageCount,
-      queryFrequency: usageCount * ESTIMATED_QUERIES_PER_DAY,
-    }));
-  }
-
-  /**
-   * Extract profile properties from reports (profile.properties.*)
-   */
-  private async getProfilePropertyUsageFromReports(): Promise<
-    Array<{
-      property: string;
-      propertyKey: string;
-      targetTable: 'profiles';
-      usageCount: number;
-      queryFrequency: number;
-    }>
-  > {
-    const reports = await db.report.findMany({
-      select: {
-        breakdowns: true,
-        events: true,
-        globalFilters: true,
-        holdProperties: true,
-      },
-    });
-
-    const propertyMap = new Map<string, number>();
-
-    for (const report of reports) {
-      const { profileProperties } = this.extractPropertiesFromReport(report);
-      for (const prop of profileProperties) {
-        propertyMap.set(prop, (propertyMap.get(prop) || 0) + 1);
-      }
-    }
-
-    const ESTIMATED_QUERIES_PER_DAY = 10;
-
-    return Array.from(propertyMap.entries()).map(([property, usageCount]) => ({
-      property,
-      // "profile.properties.campaign" -> "campaign"
-      propertyKey: property.replace('profile.properties.', ''),
-      targetTable: 'profiles' as const,
-      usageCount,
-      queryFrequency: usageCount * ESTIMATED_QUERIES_PER_DAY,
-    }));
-  }
-
-  /**
-   * Extract property names from report JSON fields
-   * Returns two sets: event properties and profile properties
-   */
-  private extractPropertiesFromReport(report: {
-    breakdowns: any;
-    events: any;
-    globalFilters?: any;
-    holdProperties?: any;
-  }): { eventsProperties: string[]; profileProperties: string[] } {
-    const eventsProperties = new Set<string>();
-    const profileProperties = new Set<string>();
-
-    const isValid = (name: string) =>
-      !name.includes('*') && !name.includes('(') && !name.includes('[');
-
-    const addProperty = (name: unknown) => {
-      if (typeof name !== 'string' || !isValid(name)) return;
-      if (name.startsWith('properties.')) {
-        eventsProperties.add(name);
-      } else if (name.startsWith('profile.properties.')) {
-        profileProperties.add(name);
-      }
-    };
-
-    // Parse breakdowns
-    try {
-      const breakdowns = Array.isArray(report.breakdowns) ? report.breakdowns : [];
-      for (const breakdown of breakdowns) {
-        if (breakdown?.name) addProperty(breakdown.name);
-      }
-    } catch (e) {
-      this.logger.warn('Failed to parse breakdowns', { error: e });
-    }
-
-    // Parse events (per-series filters)
-    try {
-      const events = Array.isArray(report.events) ? report.events : [];
-      for (const event of events) {
-        if (event?.filters && Array.isArray(event.filters)) {
-          for (const filter of event.filters) {
-            if (filter?.name) addProperty(filter.name);
-          }
-        }
-      }
-    } catch (e) {
-      this.logger.warn('Failed to parse event filters', { error: e });
-    }
-
-    // Parse globalFilters — same shape as per-event filters but stored at
-    // the report level. Properties used only via globalFilters (e.g.
-    // metadata_type on a funnel that applies it across both steps) were
-    // previously invisible to the analyser and never became materialization
-    // candidates.
-    try {
-      const globalFilters = Array.isArray(report.globalFilters) ? report.globalFilters : [];
-      for (const filter of globalFilters) {
-        if (filter?.name) addProperty(filter.name);
-      }
-    } catch (e) {
-      this.logger.warn('Failed to parse global filters', { error: e });
-    }
-
-    // Parse holdProperties — funnel "hold constant" property names stored
-    // as a plain string[] on the report. Same materialization win applies
-    // when the held property is read from `properties` map on every event.
-    try {
-      const holdProperties = Array.isArray(report.holdProperties) ? report.holdProperties : [];
-      for (const prop of holdProperties) {
-        addProperty(prop);
-      }
-    } catch (e) {
-      this.logger.warn('Failed to parse hold properties', { error: e });
-    }
-
-    return {
-      eventsProperties: Array.from(eventsProperties),
-      profileProperties: Array.from(profileProperties),
-    };
-  }
-
-  /**
-   * Enrich a batch of property candidates with pain signal read from
-   * `system.query_log` — PostHog-style (see ee/clickhouse/materialized_columns/analyze.py).
-   *
-   * One CH query, grouped by extracted property name, filtered to slow /
-   * timed-out queries on the target table. Returns each input `usage` with
-   * `observedOccurrences`, `observedTimeouts`, `observedSlowCount`,
-   * `observedTotalMs` attached (all zero for properties with no observed
-   * pain). `cardinality` and `estimatedSize` stay zero — the query-log path
-   * doesn't need them; `getSkipReason` short-circuits on the pain signal
-   * instead of the cardinality cap.
-   *
-   * Two important filters:
-   *   1. `NOT LIKE '%uniqExact(properties[%as cardinality%'` — excludes
-   *      this analyzer's own cardinality probes from the legacy path so we
-   *      don't chase our own tail if both paths run in the same window.
-   *   2. Only queries that actually touched the target table via `tables`
-   *      Array — the cheapest way to attribute a property scan to the
-   *      right ClickHouse table without regex-guessing.
-   *
-   * A single scan of ~7d of query_log costs ~130 ms server-side on our
-   * cluster (validated 2026-09-02); the legacy per-property profile probe
-   * costs ~12s each × N candidates.
-   */
-  private async enrichWithQueryLogStats(
-    usages: Array<{
-      property: string;
-      propertyKey: string;
-      targetTable: 'events' | 'profiles';
-      usageCount: number;
-      queryFrequency: number;
-    }>,
-    targetTable: 'events' | 'profiles',
-  ): Promise<PropertyUsageStats[]> {
-    if (usages.length === 0) return [];
-
-    const painByKey = new Map<
-      string,
-      {
-        occurrences: number;
-        timeouts: number;
-        slowCount: number;
-        totalMs: number;
-      }
-    >();
-
+  ): Promise<Map<string, PropertyPain>> {
+    const painByKey = new Map<string, PropertyPain>();
     try {
       const result = await ch.query({
         query: `
           WITH
-            ${this.QUERY_LOG_SLOW_MS} AS min_query_time_ms,
+            ${this.SLOW_MS} AS min_query_time_ms,
             (159, 160) AS timeout_codes
           SELECT
             arrayJoin(extractAll(
@@ -546,8 +232,8 @@ export class MaterializeColumnsService {
             countIf(exception_code IN timeout_codes)         AS timeouts,
             countIf(query_duration_ms > min_query_time_ms)   AS slow_count,
             sum(query_duration_ms)                           AS total_ms
-          FROM system.query_log
-          WHERE event_time > now() - INTERVAL ${this.QUERY_LOG_WINDOW_HOURS} HOUR
+          FROM clusterAllReplicas('default', system.query_log)
+          WHERE event_time > now() - INTERVAL ${this.WINDOW_HOURS} HOUR
             AND type > 1
             AND is_initial_query
             AND query LIKE '%properties[%'
@@ -555,7 +241,7 @@ export class MaterializeColumnsService {
             AND arrayExists(t -> t = 'default.${targetTable}', tables)
             AND (exception_code IN timeout_codes OR query_duration_ms > min_query_time_ms)
           GROUP BY prop_name
-          HAVING timeouts > 0 OR slow_count >= ${this.QUERY_LOG_MIN_SLOW_COUNT}
+          HAVING timeouts > 0 OR slow_count >= ${this.MIN_SLOW_COUNT}
         `,
         format: 'JSONEachRow',
       });
@@ -576,193 +262,75 @@ export class MaterializeColumnsService {
           totalMs: Number(row.total_ms),
         });
       }
-
-      this.logger.info(
-        `Query-log pain signal: ${painByKey.size} ${targetTable} properties over ${this.QUERY_LOG_WINDOW_HOURS}h window`,
-      );
     } catch (error) {
-      // Fail closed — return zero pain for every property so the run
-      // reports "no candidates" instead of falling back to the expensive
-      // source-scan path.
       this.logger.warn(
-        `Failed to read system.query_log for ${targetTable}; skipping this run`,
-        { error },
+        `Failed to read system.query_log for ${targetTable}; skipping`,
+        {
+          error,
+        },
       );
     }
-
-    return usages.map((usage) => {
-      const pain = painByKey.get(usage.propertyKey);
-      return {
-        property: usage.property,
-        propertyKey: usage.propertyKey,
-        targetTable: usage.targetTable,
-        usageCount: usage.usageCount,
-        queryFrequency: usage.queryFrequency,
-        cardinality: 0,
-        estimatedSize: 0,
-        benefit: 0,
-        observedOccurrences: pain?.occurrences ?? 0,
-        observedTimeouts: pain?.timeouts ?? 0,
-        observedSlowCount: pain?.slowCount ?? 0,
-        observedTotalMs: pain?.totalMs ?? 0,
-      };
-    });
+    return painByKey;
   }
 
   /**
-   * Get cardinality and size stats from ClickHouse
-   * For events: uses event_property_values_mv
-   * For profiles: queries the profiles table directly
+   * Every column on the target table → its default_kind. Used to detect
+   * "already materialized" (kind === 'MATERIALIZED') and name collisions with
+   * real columns (everything else).
    */
-  private async enrichWithClickHouseStats(usage: {
-    property: string;
-    propertyKey: string;
-    targetTable: 'events' | 'profiles';
-    usageCount: number;
-    queryFrequency: number;
-  }): Promise<PropertyUsageStats> {
+  private async getExistingClickHouseColumns(
+    targetTable: 'events' | 'profiles',
+  ): Promise<Map<string, string>> {
     try {
-      let query: string;
-
-      if (usage.targetTable === 'profiles') {
-        // Query the profiles table directly for profile properties
-        query = `
-          SELECT
-            uniqExact(properties['${usage.propertyKey}']) AS cardinality,
-            avg(length(properties['${usage.propertyKey}'])) AS avg_length,
-            count() AS total_occurrences
-          FROM profiles
-          WHERE properties['${usage.propertyKey}'] != ''
-        `;
-      } else {
-        // Use the materialized view for event properties (much faster)
-        query = `
-          SELECT
-            uniqExact(property_value) AS cardinality,
-            avg(length(property_value)) AS avg_length,
-            count() AS total_occurrences
-          FROM event_property_values_mv
-          WHERE property_key = '${usage.propertyKey}'
-            AND property_value != ''
-        `;
-      }
-
-      const result = await ch.query({ query, format: 'JSONEachRow' });
-
-      const data = await result.json<{
-        cardinality: string;
-        avg_length: string;
-        total_occurrences: string;
-      }>();
-
-      const cardinality = Number(data[0]?.cardinality || 0);
-      const avgLength = Number(data[0]?.avg_length || 10);
-      const totalOccurrences = Number(data[0]?.total_occurrences || 0);
-      const estimatedSize = Math.ceil(avgLength * totalOccurrences);
-
-      return {
-        property: usage.property,
-        propertyKey: usage.propertyKey,
-        targetTable: usage.targetTable,
-        usageCount: usage.usageCount,
-        queryFrequency: usage.queryFrequency,
-        cardinality,
-        estimatedSize,
-        benefit: 0,
-      };
+      const result = await ch.query({
+        query: `
+          SELECT name, default_kind
+          FROM system.columns
+          WHERE database = 'default' AND table = '${targetTable}'
+        `,
+        format: 'JSONEachRow',
+      });
+      const data = await result.json<{ name: string; default_kind: string }>();
+      return new Map(data.map((row) => [row.name, row.default_kind]));
     } catch (error) {
-      this.logger.warn(`Failed to get stats for ${usage.property}`, { error });
-      return {
-        property: usage.property,
-        propertyKey: usage.propertyKey,
-        targetTable: usage.targetTable,
-        usageCount: usage.usageCount,
-        queryFrequency: usage.queryFrequency,
-        cardinality: 0,
-        estimatedSize: 0,
-        benefit: 0,
-      };
+      this.logger.warn(`Failed to get existing columns for ${targetTable}`, {
+        error,
+      });
+      return new Map();
     }
   }
 
   /**
-   * Calculate benefit score.
-   *
-   * Query-log path (default): benefit = timeouts × 1000 + slowCount × 10 +
-   * occurrences. Weights match PostHog's ORDER BY (timeouts dominate a
-   * single slow-count run; slow_count dominates raw occurrences). Ensures
-   * a property that timed out once ranks above 100 slow-but-completed
-   * queries, which matches operator intuition.
-   *
-   * Legacy path: original usage/frequency vs cardinality/size formula.
+   * Rank by pain: a timeout dominates a merely-slow query, which dominates a
+   * raw occurrence — so one timeout outranks 100 slow-but-completed queries.
    */
-  private calculateBenefitScore(stats: PropertyUsageStats): PropertyUsageStats {
-    if (this.USE_QUERY_LOG_PAIN_SIGNAL) {
-      const timeouts = stats.observedTimeouts ?? 0;
-      const slowCount = stats.observedSlowCount ?? 0;
-      const occurrences = stats.observedOccurrences ?? 0;
-      const benefit = timeouts * 1000 + slowCount * 10 + occurrences;
-      return { ...stats, benefit };
-    }
-
-    const usageScore = stats.usageCount * 10;
-    const frequencyScore = Math.min(stats.queryFrequency, 1000);
-    const cardinalityPenalty = Math.max(0, stats.cardinality - 100) * 0.5;
-    const sizePenalty = stats.estimatedSize / 1_000_000;
-
-    const benefit = usageScore + frequencyScore - cardinalityPenalty - sizePenalty;
-
-    return { ...stats, benefit: Math.max(0, benefit) };
+  private benefitScore(pain: PropertyPain): number {
+    return pain.timeouts * 1000 + pain.slowCount * 10 + pain.occurrences;
   }
 
   /**
-   * Create candidate object.
-   *
-   * If `propertyKey` collides with a column that already exists on the target
-   * table (regular column, DEFAULT, or ALIAS — NOT another MATERIALIZED
-   * projection, which would have been skipped upstream), we prefix the
-   * column name with `prop_`. Without this rename, `ALTER TABLE ... ADD COLUMN
-   * IF NOT EXISTS` becomes a silent no-op and the Postgres tracking row
-   * misleads the chart engine into rewriting `properties.<key>` to the wrong
-   * (existing) column — e.g. `properties.name` → the event-name column.
+   * Build a candidate. If the property key collides with an existing column
+   * (a real column, DEFAULT, or ALIAS — not a MATERIALIZED one, which was
+   * skipped upstream), prefix with `prop_`: otherwise `ADD COLUMN IF NOT
+   * EXISTS` silently no-ops and the tracking row would point the chart engine
+   * at the wrong column (e.g. `properties.name` → the event-name column).
    */
   private createCandidate(
-    stats: PropertyUsageStats,
+    stats: PropertyStats,
     reservedColumnNames: Set<string>,
   ): MaterializedColumnCandidate {
     const collides = reservedColumnNames.has(stats.propertyKey);
-    const columnName = collides ? `prop_${stats.propertyKey}` : stats.propertyKey;
+    const columnName = collides
+      ? `prop_${stats.propertyKey}`
+      : stats.propertyKey;
 
-    let reason: string;
-    if (this.USE_QUERY_LOG_PAIN_SIGNAL) {
-      const timeouts = stats.observedTimeouts ?? 0;
-      const slowCount = stats.observedSlowCount ?? 0;
-      const occurrences = stats.observedOccurrences ?? 0;
-      const totalMs = stats.observedTotalMs ?? 0;
-      reason =
-        `Slow-query pain over ${this.QUERY_LOG_WINDOW_HOURS}h: ` +
-        `${timeouts} timeouts, ${slowCount} slow queries, ${occurrences} total observations, ` +
-        `${(totalMs / 1000).toFixed(1)}s CH time. ` +
-        `Also referenced by ${stats.usageCount} report(s). `;
-    } else {
-      reason = `Used in ${stats.usageCount} reports (~${stats.queryFrequency} queries/day). `;
-
-      if (stats.cardinality < 50) {
-        reason += 'Low cardinality (ideal). ';
-      } else if (stats.cardinality < 200) {
-        reason += 'Moderate cardinality. ';
-      }
-
-      if (stats.estimatedSize < 100_000_000) {
-        reason += 'Small storage cost. ';
-      }
-    }
-
+    let reason =
+      `${stats.timeouts} timeouts, ${stats.slowCount} slow queries, ` +
+      `${(stats.totalMs / 1000).toFixed(1)}s CH time over ${this.WINDOW_HOURS}h. `;
     if (collides) {
       reason += `Renamed to \`${columnName}\` (collides with existing ${stats.targetTable}.${stats.propertyKey} column). `;
     }
-
-    reason += `Benefit: ${stats.benefit.toFixed(0)}.`;
+    reason += `Benefit: ${stats.benefit}.`;
 
     return {
       propertyKey: stats.propertyKey,
@@ -774,134 +342,110 @@ export class MaterializeColumnsService {
   }
 
   /**
-   * Execute materialization on the appropriate table
+   * Run the ALTER TABLE and record it. Backtick-quote the column name to
+   * support keys with hyphens / special chars.
    */
-  private async materializeColumn(candidate: MaterializedColumnCandidate): Promise<void> {
-    const table = candidate.targetTable;
-
-    this.logger.info(`Materializing column: ${table}.${candidate.columnName}`, {
+  private async materializeColumn(
+    candidate: MaterializedColumnCandidate,
+  ): Promise<void> {
+    const { targetTable, columnName, propertyKey, stats } = candidate;
+    this.logger.info(`Materializing column: ${targetTable}.${columnName}`, {
       reason: candidate.reason,
     });
 
     try {
-      // Execute ALTER TABLE on the target table
-      // Backtick-quote the column name to support keys with hyphens or other special chars
       await chMigrationClient.command({
         query: `
-          ALTER TABLE ${table}
-          ADD COLUMN IF NOT EXISTS \`${candidate.columnName}\` String
-          MATERIALIZED properties['${candidate.propertyKey}']
+          ALTER TABLE ${targetTable}
+          ADD COLUMN IF NOT EXISTS \`${columnName}\` String
+          MATERIALIZED properties['${propertyKey}']
         `,
       });
 
-      // Record in database with targetTable
       await db.materializedColumn.create({
         data: {
-          targetTable: candidate.targetTable,
-          propertyKey: candidate.propertyKey,
-          columnName: candidate.columnName,
-          cardinality: candidate.stats.cardinality,
-          usageCount: candidate.stats.usageCount,
-          benefitScore: candidate.stats.benefit,
-          estimatedSize: BigInt(candidate.stats.estimatedSize),
+          targetTable,
+          propertyKey,
+          columnName,
+          cardinality: 0,
+          usageCount: 0,
+          benefitScore: stats.benefit,
+          estimatedSize: BigInt(0),
           status: 'active',
           materializedAt: new Date(),
         },
       });
 
-      // Refresh chart service cache so new column is used immediately
+      // Refresh chart-service cache so the new column is used immediately.
       await refreshMaterializedColumnsCache();
-
-      this.logger.info(`Successfully materialized: ${table}.${candidate.columnName}`);
+      this.logger.info(
+        `Successfully materialized: ${targetTable}.${columnName}`,
+      );
     } catch (error) {
       try {
         await db.materializedColumn.create({
           data: {
-            targetTable: candidate.targetTable,
-            propertyKey: candidate.propertyKey,
-            columnName: candidate.columnName,
-            cardinality: candidate.stats.cardinality,
-            usageCount: candidate.stats.usageCount,
-            benefitScore: candidate.stats.benefit,
-            estimatedSize: BigInt(candidate.stats.estimatedSize),
+            targetTable,
+            propertyKey,
+            columnName,
+            cardinality: 0,
+            usageCount: 0,
+            benefitScore: stats.benefit,
+            estimatedSize: BigInt(0),
             status: 'failed',
           },
         });
       } catch (dbError) {
         this.logger.error('Failed to record failure in database', { dbError });
       }
-
       throw error;
     }
   }
 
   /**
-   * Generate human-readable report
+   * Human-readable report.
    */
   private generateReport(
     candidates: MaterializedColumnCandidate[],
     allProperties: PropertyAnalysis[],
     dryRun: boolean,
   ): string {
-    let report = '\n' + '='.repeat(80) + '\n';
-    report += dryRun
-      ? 'DRY RUN: Materialized Column Analysis\n'
-      : 'Materialized Column Analysis\n';
-    report += '='.repeat(80) + '\n\n';
-
-    report += `Total properties analyzed: ${allProperties.length}\n`;
+    const rule = '━'.repeat(80);
+    let report = `\n${'='.repeat(80)}\n`;
+    report += `${dryRun ? 'DRY RUN: ' : ''}Materialized Column Analysis\n`;
+    report += `${'='.repeat(80)}\n\n`;
+    report += `Properties with pain: ${allProperties.length}\n`;
     report += `Candidates for materialization: ${candidates.length}\n\n`;
 
     if (candidates.length > 0) {
-      report += '━'.repeat(80) + '\n';
-      report += '✅ RECOMMENDED FOR MATERIALIZATION\n';
-      report += '━'.repeat(80) + '\n\n';
-
-      for (let i = 0; i < candidates.length; i++) {
-        const candidate = candidates[i]!;
-        const prefix = candidate.targetTable === 'profiles' ? 'profile.properties' : 'properties';
-        report += `${i + 1}. ${prefix}.${candidate.propertyKey} [${candidate.targetTable}]\n`;
-        report += `   Usage: ${candidate.stats.usageCount} reports, ~${candidate.stats.queryFrequency} queries/day\n`;
-        report += `   Cardinality: ${candidate.stats.cardinality} unique values\n`;
-        report += `   Storage: ~${(candidate.stats.estimatedSize / 1_000_000).toFixed(2)} MB\n`;
-        report += `   Benefit Score: ${candidate.stats.benefit.toFixed(2)}\n`;
-        report += `   Reason: ${candidate.reason}\n\n`;
-      }
+      report += `${rule}\n✅ RECOMMENDED FOR MATERIALIZATION\n${rule}\n\n`;
+      candidates.forEach((candidate, i) => {
+        const { targetTable, propertyKey, stats } = candidate;
+        report += `${i + 1}. ${stats.property} [${targetTable}]\n`;
+        report += `   ${stats.timeouts} timeouts, ${stats.slowCount} slow, ${(stats.totalMs / 1000).toFixed(1)}s CH time — benefit ${stats.benefit}\n`;
+        report += `   ${candidate.reason}\n\n`;
+      });
     }
 
     const skipped = allProperties.filter((p) => p.skipReason);
     if (skipped.length > 0) {
-      report += '━'.repeat(80) + '\n';
-      report += 'ALL PROPERTIES ANALYZED\n';
-      report += '━'.repeat(80) + '\n\n';
-
+      report += `${rule}\nSKIPPED\n${rule}\n\n`;
       for (const prop of skipped) {
-        const prefix = prop.targetTable === 'profiles' ? 'profile.properties' : 'properties';
-        report += `• ${prefix}.${prop.propertyKey} [${prop.targetTable}]\n`;
-        report += `  ${prop.skipReason}\n`;
-        report += `  Usage: ${prop.usageCount} reports, ~${prop.queryFrequency} queries/day`;
-        if (prop.cardinality > 0) {
-          report += `, Cardinality: ${prop.cardinality}, Benefit: ${prop.benefit.toFixed(0)}`;
-        }
-        report += '\n\n';
+        report += `• ${prop.property} [${prop.targetTable}]\n`;
+        report += `  ${prop.skipReason} (${prop.timeouts} timeouts, ${prop.slowCount} slow)\n\n`;
       }
     }
 
-    report += '━'.repeat(80) + '\n';
-    report += 'SUMMARY\n';
-    report += '━'.repeat(80) + '\n';
-
+    report += `${rule}\nSUMMARY\n${rule}\n`;
     if (dryRun) {
-      report += '⚠️  DRY RUN MODE: No changes will be made.\n';
-      report += 'Run with --execute flag to materialize these columns.\n';
+      report +=
+        '⚠️  DRY RUN: no changes made. Run with --execute to materialize.\n';
     } else if (candidates.length > 0) {
-      report += `✅ Materializing top ${Math.min(candidates.length, this.MAX_DAILY_MATERIALIZATIONS)} columns...\n`;
+      report += `✅ Materializing top ${Math.min(candidates.length, this.MAX_DAILY_MATERIALIZATIONS)} column(s).\n`;
     } else {
-      report += 'No actions needed. All eligible properties are already materialized.\n';
+      report += 'No actions needed.\n';
     }
-
-    report += '\n' + '='.repeat(80) + '\n';
-
+    report += `\n${'='.repeat(80)}\n`;
     return report;
   }
 }
