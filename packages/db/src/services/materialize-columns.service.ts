@@ -62,6 +62,16 @@ export class MaterializeColumnsService {
     10,
   );
 
+  // Clustered deployments must aggregate query_log across replicas (it's
+  // node-local); set MATERIALIZE_QUERY_LOG_CLUSTER to the cluster name (our
+  // prod uses "default"). Left empty for single-node / self-hosted setups that
+  // have no cluster configured — there we read system.query_log directly, since
+  // clusterAllReplicas('default', …) would error on an undefined cluster.
+  // Sanitized to an identifier to keep it out of the raw SQL string safely.
+  private readonly QUERY_LOG_CLUSTER = (
+    process.env.MATERIALIZE_QUERY_LOG_CLUSTER || ''
+  ).replace(/[^A-Za-z0-9_]/g, '');
+
   constructor() {
     this.logger = createLogger({ name: 'materialize-columns' });
   }
@@ -210,9 +220,10 @@ export class MaterializeColumnsService {
   /**
    * Read the pain signal from system.query_log: for each property read via
    * `properties['<key>']` on the target table, how many slow / timed-out
-   * queries touched it in the window. One grouped scan across all replicas
-   * (query_log is node-local, so clusterAllReplicas is required to see the
-   * whole picture). ~130ms server-side; no source-table access.
+   * queries touched it in the window. One grouped scan; ~130ms server-side, no
+   * source-table access. query_log is node-local, so on a clustered deployment
+   * (QUERY_LOG_CLUSTER set) this reads clusterAllReplicas to see every replica;
+   * on single-node setups it reads system.query_log directly.
    *
    * Returns only properties clearing the pain bar (≥1 timeout OR
    * ≥MIN_SLOW_COUNT slow queries). Fails closed: on error, an empty map, so
@@ -241,7 +252,11 @@ export class MaterializeColumnsService {
             countIf(exception_code IN timeout_codes)         AS timeouts,
             countIf(query_duration_ms > min_query_time_ms)   AS slow_count,
             sum(query_duration_ms)                           AS total_ms
-          FROM clusterAllReplicas('default', system.query_log)
+          FROM ${
+            this.QUERY_LOG_CLUSTER
+              ? `clusterAllReplicas('${this.QUERY_LOG_CLUSTER}', system.query_log)`
+              : 'system.query_log'
+          }
           WHERE event_time > now() - INTERVAL ${this.WINDOW_HOURS} HOUR
             AND type > 1
             AND is_initial_query
