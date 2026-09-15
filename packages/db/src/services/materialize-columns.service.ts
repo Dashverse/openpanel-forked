@@ -84,13 +84,18 @@ export class MaterializeColumnsService {
       threshold,
     });
 
-    const events = await this.analyzeTable('events', threshold);
-    const profiles = await this.analyzeTable('profiles', threshold);
-
-    const candidates = [...events.candidates, ...profiles.candidates].sort(
-      (a, b) => b.stats.benefit - a.stats.benefit,
+    // Events only. The pain signal is `properties['x']` map reads, which in
+    // generated SQL come exclusively from the events table — profile
+    // properties render as `profile.`properties.X`` (an aliased join column),
+    // so they never match this pattern. Running a "profiles" pass over the
+    // same regex would only misattribute events properties that leaked in via
+    // mixed-table queries (an events filter + a profile filter log both
+    // tables), never find real profile pain. Profiles are also a fraction of
+    // the events volume, so map-read cost there is negligible.
+    const { candidates, allProperties } = await this.analyzeTable(
+      'events',
+      threshold,
     );
-    const allProperties = [...events.allProperties, ...profiles.allProperties];
     const report = this.generateReport(candidates, allProperties, dryRun);
 
     const materialized: string[] = [];
@@ -224,10 +229,14 @@ export class MaterializeColumnsService {
             ${this.SLOW_MS} AS min_query_time_ms,
             (159, 160) AS timeout_codes
           SELECT
-            arrayJoin(extractAll(
+            -- arrayDistinct: a single query can reference properties['x']
+            -- more than once (e.g. SELECT + WHERE); without it arrayJoin would
+            -- count that one query multiple times and inflate the pain signal
+            -- (a lone slow query could spuriously clear MIN_SLOW_COUNT).
+            arrayJoin(arrayDistinct(extractAll(
               query,
               'properties\\\\[\\'([a-zA-Z0-9_\\\\-\\\\.\\\\$]+)\\'\\\\]'
-            )) AS prop_name,
+            ))) AS prop_name,
             count()                                          AS occurrences,
             countIf(exception_code IN timeout_codes)         AS timeouts,
             countIf(query_duration_ms > min_query_time_ms)   AS slow_count,
