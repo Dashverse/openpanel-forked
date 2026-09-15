@@ -10,9 +10,18 @@ interface PropertyUsageStats {
   targetTable: 'events' | 'profiles'; // Which ClickHouse table to materialize on
   usageCount: number; // How many reports use it
   queryFrequency: number; // Estimated queries per day
-  cardinality: number; // Number of unique values
-  estimatedSize: number; // Estimated storage cost in bytes
+  cardinality: number; // Number of unique values (0 when using query-log path; see enrichWithQueryLogStats)
+  estimatedSize: number; // Estimated storage cost in bytes (0 when using query-log path)
   benefit: number; // Calculated benefit score
+  // Pain signal from system.query_log (query-log-driven analysis):
+  // — populated by `enrichWithQueryLogStats`; all zero when a property has
+  //   no observed slow queries. Kept optional so the shape stays compatible
+  //   with any consumers of PropertyUsageStats that only care about
+  //   report-derived usage stats.
+  observedOccurrences?: number;
+  observedTimeouts?: number;
+  observedSlowCount?: number;
+  observedTotalMs?: number;
 }
 
 interface PropertyAnalysis extends PropertyUsageStats {
@@ -32,9 +41,31 @@ export class MaterializeColumnsService {
 
   // Thresholds for materialization decisions
   private readonly MIN_USAGE_COUNT = 1; // Must be used in at least 1 report
-  private readonly MAX_CARDINALITY = 5000; // Don't materialize if >5000 unique values
+  private readonly MAX_CARDINALITY = 5000; // Don't materialize if >5000 unique values (only checked when USE_QUERY_LOG_PAIN_SIGNAL=false)
   private readonly MIN_BENEFIT_SCORE = 20; // Minimum benefit score to justify materialization
   private readonly MAX_DAILY_MATERIALIZATIONS = 3; // Rate limit: max 3 new columns per day (total across both tables)
+
+  // Query-log-driven analyzer knobs. Only consulted when
+  // USE_QUERY_LOG_PAIN_SIGNAL === true (default). Left tunable via env for
+  // scale-specific tuning without a code deploy — PostHog uses 20 GB / 5M
+  // rows / >slow_min at their scale; ours is smaller so defaults are looser.
+  private readonly QUERY_LOG_WINDOW_HOURS = Number.parseInt(
+    process.env.MATERIALIZE_QUERY_LOG_WINDOW_HOURS || '168', // 7 days
+    10,
+  );
+  private readonly QUERY_LOG_SLOW_MS = Number.parseInt(
+    process.env.MATERIALIZE_QUERY_LOG_SLOW_MS || '2000', // 2s
+    10,
+  );
+  private readonly QUERY_LOG_MIN_SLOW_COUNT = Number.parseInt(
+    process.env.MATERIALIZE_QUERY_LOG_MIN_SLOW_COUNT || '3',
+    10,
+  );
+
+  // Feature flag — default ON. Set MATERIALIZE_USE_QUERY_LOG=false to
+  // fall back to the original report-scan + source-table cardinality probe.
+  private readonly USE_QUERY_LOG_PAIN_SIGNAL =
+    process.env.MATERIALIZE_USE_QUERY_LOG !== 'false';
 
   constructor() {
     this.logger = createLogger({ name: 'materialize-columns' });
@@ -185,10 +216,17 @@ export class MaterializeColumnsService {
 
     this.logger.info(`${newProperties.length} ${targetTable} properties not yet materialized`);
 
-    // Enrich with ClickHouse statistics
-    const enrichedStats = await Promise.all(
-      newProperties.map((usage) => this.enrichWithClickHouseStats(usage)),
-    );
+    // Enrich with pain signal. Query-log path (default): one system.query_log
+    // scan for the whole batch — no source-table access. Legacy path:
+    // per-property probe against events_property_values_mv (events) or the
+    // full profiles table (profiles). The legacy profile probe is a
+    // full-table scan repeated for every property and was the driver of the
+    // hourly CH CPU spike this rewrite is targeting.
+    const enrichedStats = this.USE_QUERY_LOG_PAIN_SIGNAL
+      ? await this.enrichWithQueryLogStats(newProperties, targetTable)
+      : await Promise.all(
+          newProperties.map((usage) => this.enrichWithClickHouseStats(usage)),
+        );
 
     // Calculate benefit scores
     const statsWithBenefit = enrichedStats.map((stats) => this.calculateBenefitScore(stats));
@@ -243,11 +281,29 @@ export class MaterializeColumnsService {
   }
 
   /**
-   * Determine why a property should be skipped
+   * Determine why a property should be skipped.
+   *
+   * Query-log path (default): skip anything that never showed up in a slow
+   * query in the analysis window. If it's not causing pain today, no need
+   * to spend a materialized column on it (matches PostHog's philosophy).
+   *
+   * Legacy path (MATERIALIZE_USE_QUERY_LOG=false): the original
+   * cardinality-based checks.
    */
   private getSkipReason(stats: PropertyUsageStats, threshold: number): string | undefined {
     if (stats.usageCount < this.MIN_USAGE_COUNT) {
       return `❌ Low usage (${stats.usageCount} reports, need ${this.MIN_USAGE_COUNT})`;
+    }
+
+    if (this.USE_QUERY_LOG_PAIN_SIGNAL) {
+      const timeouts = stats.observedTimeouts ?? 0;
+      const slowCount = stats.observedSlowCount ?? 0;
+
+      if (timeouts === 0 && slowCount < this.QUERY_LOG_MIN_SLOW_COUNT) {
+        return `❌ No pain signal (${timeouts} timeouts, ${slowCount} slow queries in ${this.QUERY_LOG_WINDOW_HOURS}h; need ≥1 timeout OR ≥${this.QUERY_LOG_MIN_SLOW_COUNT} slow)`;
+      }
+      // No cardinality check — trust the pain signal.
+      return undefined;
     }
 
     if (stats.cardinality === 0) {
@@ -430,6 +486,130 @@ export class MaterializeColumnsService {
   }
 
   /**
+   * Enrich a batch of property candidates with pain signal read from
+   * `system.query_log` — PostHog-style (see ee/clickhouse/materialized_columns/analyze.py).
+   *
+   * One CH query, grouped by extracted property name, filtered to slow /
+   * timed-out queries on the target table. Returns each input `usage` with
+   * `observedOccurrences`, `observedTimeouts`, `observedSlowCount`,
+   * `observedTotalMs` attached (all zero for properties with no observed
+   * pain). `cardinality` and `estimatedSize` stay zero — the query-log path
+   * doesn't need them; `getSkipReason` short-circuits on the pain signal
+   * instead of the cardinality cap.
+   *
+   * Two important filters:
+   *   1. `NOT LIKE '%uniqExact(properties[%as cardinality%'` — excludes
+   *      this analyzer's own cardinality probes from the legacy path so we
+   *      don't chase our own tail if both paths run in the same window.
+   *   2. Only queries that actually touched the target table via `tables`
+   *      Array — the cheapest way to attribute a property scan to the
+   *      right ClickHouse table without regex-guessing.
+   *
+   * A single scan of ~7d of query_log costs ~130 ms server-side on our
+   * cluster (validated 2026-09-02); the legacy per-property profile probe
+   * costs ~12s each × N candidates.
+   */
+  private async enrichWithQueryLogStats(
+    usages: Array<{
+      property: string;
+      propertyKey: string;
+      targetTable: 'events' | 'profiles';
+      usageCount: number;
+      queryFrequency: number;
+    }>,
+    targetTable: 'events' | 'profiles',
+  ): Promise<PropertyUsageStats[]> {
+    if (usages.length === 0) return [];
+
+    const painByKey = new Map<
+      string,
+      {
+        occurrences: number;
+        timeouts: number;
+        slowCount: number;
+        totalMs: number;
+      }
+    >();
+
+    try {
+      const result = await ch.query({
+        query: `
+          WITH
+            ${this.QUERY_LOG_SLOW_MS} AS min_query_time_ms,
+            (159, 160) AS timeout_codes
+          SELECT
+            arrayJoin(extractAll(
+              query,
+              'properties\\\\[\\'([a-zA-Z0-9_\\\\-\\\\.\\\\$]+)\\'\\\\]'
+            )) AS prop_name,
+            count()                                          AS occurrences,
+            countIf(exception_code IN timeout_codes)         AS timeouts,
+            countIf(query_duration_ms > min_query_time_ms)   AS slow_count,
+            sum(query_duration_ms)                           AS total_ms
+          FROM system.query_log
+          WHERE event_time > now() - INTERVAL ${this.QUERY_LOG_WINDOW_HOURS} HOUR
+            AND type > 1
+            AND is_initial_query
+            AND query LIKE '%properties[%'
+            AND query NOT LIKE '%uniqExact(properties[%'
+            AND arrayExists(t -> t = 'default.${targetTable}', tables)
+            AND (exception_code IN timeout_codes OR query_duration_ms > min_query_time_ms)
+          GROUP BY prop_name
+          HAVING timeouts > 0 OR slow_count >= ${this.QUERY_LOG_MIN_SLOW_COUNT}
+        `,
+        format: 'JSONEachRow',
+      });
+
+      const rows = await result.json<{
+        prop_name: string;
+        occurrences: string;
+        timeouts: string;
+        slow_count: string;
+        total_ms: string;
+      }>();
+
+      for (const row of rows) {
+        painByKey.set(row.prop_name, {
+          occurrences: Number(row.occurrences),
+          timeouts: Number(row.timeouts),
+          slowCount: Number(row.slow_count),
+          totalMs: Number(row.total_ms),
+        });
+      }
+
+      this.logger.info(
+        `Query-log pain signal: ${painByKey.size} ${targetTable} properties over ${this.QUERY_LOG_WINDOW_HOURS}h window`,
+      );
+    } catch (error) {
+      // Fail closed — return zero pain for every property so the run
+      // reports "no candidates" instead of falling back to the expensive
+      // source-scan path.
+      this.logger.warn(
+        `Failed to read system.query_log for ${targetTable}; skipping this run`,
+        { error },
+      );
+    }
+
+    return usages.map((usage) => {
+      const pain = painByKey.get(usage.propertyKey);
+      return {
+        property: usage.property,
+        propertyKey: usage.propertyKey,
+        targetTable: usage.targetTable,
+        usageCount: usage.usageCount,
+        queryFrequency: usage.queryFrequency,
+        cardinality: 0,
+        estimatedSize: 0,
+        benefit: 0,
+        observedOccurrences: pain?.occurrences ?? 0,
+        observedTimeouts: pain?.timeouts ?? 0,
+        observedSlowCount: pain?.slowCount ?? 0,
+        observedTotalMs: pain?.totalMs ?? 0,
+      };
+    });
+  }
+
+  /**
    * Get cardinality and size stats from ClickHouse
    * For events: uses event_property_values_mv
    * For profiles: queries the profiles table directly
@@ -506,9 +686,25 @@ export class MaterializeColumnsService {
   }
 
   /**
-   * Calculate benefit score
+   * Calculate benefit score.
+   *
+   * Query-log path (default): benefit = timeouts × 1000 + slowCount × 10 +
+   * occurrences. Weights match PostHog's ORDER BY (timeouts dominate a
+   * single slow-count run; slow_count dominates raw occurrences). Ensures
+   * a property that timed out once ranks above 100 slow-but-completed
+   * queries, which matches operator intuition.
+   *
+   * Legacy path: original usage/frequency vs cardinality/size formula.
    */
   private calculateBenefitScore(stats: PropertyUsageStats): PropertyUsageStats {
+    if (this.USE_QUERY_LOG_PAIN_SIGNAL) {
+      const timeouts = stats.observedTimeouts ?? 0;
+      const slowCount = stats.observedSlowCount ?? 0;
+      const occurrences = stats.observedOccurrences ?? 0;
+      const benefit = timeouts * 1000 + slowCount * 10 + occurrences;
+      return { ...stats, benefit };
+    }
+
     const usageScore = stats.usageCount * 10;
     const frequencyScore = Math.min(stats.queryFrequency, 1000);
     const cardinalityPenalty = Math.max(0, stats.cardinality - 100) * 0.5;
@@ -537,16 +733,29 @@ export class MaterializeColumnsService {
     const collides = reservedColumnNames.has(stats.propertyKey);
     const columnName = collides ? `prop_${stats.propertyKey}` : stats.propertyKey;
 
-    let reason = `Used in ${stats.usageCount} reports (~${stats.queryFrequency} queries/day). `;
+    let reason: string;
+    if (this.USE_QUERY_LOG_PAIN_SIGNAL) {
+      const timeouts = stats.observedTimeouts ?? 0;
+      const slowCount = stats.observedSlowCount ?? 0;
+      const occurrences = stats.observedOccurrences ?? 0;
+      const totalMs = stats.observedTotalMs ?? 0;
+      reason =
+        `Slow-query pain over ${this.QUERY_LOG_WINDOW_HOURS}h: ` +
+        `${timeouts} timeouts, ${slowCount} slow queries, ${occurrences} total observations, ` +
+        `${(totalMs / 1000).toFixed(1)}s CH time. ` +
+        `Also referenced by ${stats.usageCount} report(s). `;
+    } else {
+      reason = `Used in ${stats.usageCount} reports (~${stats.queryFrequency} queries/day). `;
 
-    if (stats.cardinality < 50) {
-      reason += 'Low cardinality (ideal). ';
-    } else if (stats.cardinality < 200) {
-      reason += 'Moderate cardinality. ';
-    }
+      if (stats.cardinality < 50) {
+        reason += 'Low cardinality (ideal). ';
+      } else if (stats.cardinality < 200) {
+        reason += 'Moderate cardinality. ';
+      }
 
-    if (stats.estimatedSize < 100_000_000) {
-      reason += 'Small storage cost. ';
+      if (stats.estimatedSize < 100_000_000) {
+        reason += 'Small storage cost. ';
+      }
     }
 
     if (collides) {
