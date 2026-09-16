@@ -58,7 +58,37 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Test build
-        run: docker buildx build --file apps/api/Dockerfile --build-arg DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy .
+        run: docker buildx build --load -t openpanel-api:ci --file apps/api/Dockerfile --build-arg DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy .
+
+      # A successful `docker build` only proves the image compiles — it does NOT
+      # prove the container can start. Bundled prod images can still crash on
+      # boot with ERR_MODULE_NOT_FOUND when a dependency is externalized but
+      # missing from the image (e.g. a workspace package left out of the
+      # Dockerfile COPY list). Start the container and fail the PR if the process
+      # crashes on a module-resolution error before it can serve.
+      - name: Boot smoke-test
+        run: |
+          set -euo pipefail
+          docker run -d --name op-api-ci \
+            -e DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy \
+            -e CLICKHOUSE_URL=http://dummy:8123 \
+            -e REDIS_URL=redis://localhost:6379 \
+            openpanel-api:ci
+          # Give it time to either finish module resolution or crash on it.
+          sleep 15
+          logs="$(docker logs op-api-ci 2>&1 || true)"
+          echo "----- container logs -----"
+          echo "$logs" | tail -50
+          echo "--------------------------"
+          docker rm -f op-api-ci >/dev/null 2>&1 || true
+          # A module-resolution crash means the image is not runnable, regardless
+          # of a green build. (Connection errors to the dummy DB/Redis are fine —
+          # they prove the app got PAST module loading and started executing.)
+          if echo "$logs" | grep -qE "ERR_MODULE_NOT_FOUND|Cannot find (package|module)"; then
+            echo "::error::api image built but crashed at boot on a module-resolution error — not runnable"
+            exit 1
+          fi
+          echo "No module-resolution errors at boot ✅"
 
   test-build-worker:
     needs: changes
