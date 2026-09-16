@@ -14,6 +14,11 @@ export interface McpAuthContext {
   projectId: string | null;
   organizationId: string;
   clientType: 'read' | 'root';
+  /**
+   * The id of the client that authenticated. Stored in the session so that
+   * only the creating client can close its own session (see mcp.router DELETE).
+   */
+  clientId: string;
 }
 
 export class McpAuthError extends Error {
@@ -61,10 +66,7 @@ export async function authenticateToken(
   const clientId = decoded.slice(0, colonIndex);
   const clientSecret = decoded.slice(colonIndex + 1);
 
-  logger.info(
-    { clientId, secretPrefix: clientSecret.slice(0, 6) },
-    'MCP auth: decoded token',
-  );
+  logger.info({ clientId }, 'MCP auth: decoded token');
 
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
@@ -103,7 +105,10 @@ export async function authenticateToken(
     );
   }
 
-  const secretHash = createHash('sha256').update(clientSecret).digest('hex').slice(0, 16);
+  const secretHash = createHash('sha256')
+    .update(clientSecret)
+    .digest('hex')
+    .slice(0, 16);
   const cacheKey = `mcp:auth:${clientId}:${secretHash}`;
   const isVerified = await getCache(
     cacheKey,
@@ -127,6 +132,7 @@ export async function authenticateToken(
     projectId: isRoot ? null : (client.projectId ?? null),
     organizationId: client.organizationId,
     clientType: isRoot ? 'root' : 'read',
+    clientId: client.id,
   };
 }
 
@@ -146,4 +152,3 @@ export function extractToken(
   }
   return undefined;
 }
-

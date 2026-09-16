@@ -32,11 +32,10 @@ export function projectIdSchema(context: McpAuthContext) {
     ? z
         .string()
         .describe(
-          'Project ID to query (required for organization-level access)'
+          'Project ID to query (required for organization-level access)',
         )
     : z.string().optional();
 }
-
 
 /**
  * Zod schema for common date range inputs. Both fields are optional and
@@ -47,13 +46,13 @@ export const zDateRange = {
     .string()
     .optional()
     .describe(
-      'Start date in YYYY-MM-DD format (e.g. 2024-01-01). Defaults to 30 days ago.'
+      'Start date in YYYY-MM-DD format (e.g. 2024-01-01). Defaults to 30 days ago.',
     ),
   endDate: z
     .string()
     .optional()
     .describe(
-      'End date in YYYY-MM-DD format (e.g. 2024-03-31). Defaults to today.'
+      'End date in YYYY-MM-DD format (e.g. 2024-03-31). Defaults to today.',
     ),
 };
 
@@ -71,7 +70,7 @@ export const zFilters = z
       name: z
         .string()
         .describe(
-          'Property to filter on. Built-in column: bare name (e.g. "country"). Custom event property: "properties.<key>" (e.g. "properties.gateway").'
+          'Property to filter on. Built-in column: bare name (e.g. "country"). Custom event property: "properties.<key>" (e.g. "properties.gateway").',
         ),
       operator: z
         .enum([
@@ -89,13 +88,13 @@ export const zFilters = z
         .array(z.union([z.string(), z.number()]))
         .optional()
         .describe(
-          'Value(s) to match (any-of for multiple). Omit for isNull/isNotNull.'
+          'Value(s) to match (any-of for multiple). Omit for isNull/isNotNull.',
         ),
-    })
+    }),
   )
   .optional()
   .describe(
-    'Optional filters applied across the whole query (AND-combined), e.g. [{ name: "country", operator: "is", value: ["US"] }].'
+    'Optional filters applied across the whole query (AND-combined), e.g. [{ name: "country", operator: "is", value: ["US"] }].',
   );
 
 /**
@@ -103,7 +102,7 @@ export const zFilters = z
  */
 export function resolveDateRange(
   startDate?: string,
-  endDate?: string
+  endDate?: string,
 ): { startDate: string; endDate: string } {
   const end = endDate ?? new Date().toISOString().slice(0, 10);
   const start =
@@ -127,7 +126,7 @@ export function zLimit(defaultLimit: number, max: number) {
     .max(max)
     .optional()
     .describe(
-      `Max rows to return (default ${defaultLimit}, max ${max}). Results are ranked, so the default covers the meaningful head of the distribution; only raise it if you specifically need the long tail.`
+      `Max rows to return (default ${defaultLimit}, max ${max}). Results are ranked, so the default covers the meaningful head of the distribution; only raise it if you specifically need the long tail.`,
     );
 }
 
@@ -152,8 +151,11 @@ export const MAX_RESPONSE_CHARS = 24_000;
 export interface TableResult {
   columns: string[];
   rows: unknown[][];
-  /** Rows matched before the limit was applied. */
-  total_rows: number;
+  /**
+   * Rows matched before the limit was applied. `null` when the true total is
+   * unknown because SQL already capped the result (`moreAvailable`).
+   */
+  total_rows: number | null;
   /** Present only when rows were dropped or rolled up — explains what's missing. */
   note?: string;
 }
@@ -205,7 +207,7 @@ export interface TableOptions<T> {
  */
 export function table<T extends object>(
   rows: readonly T[],
-  options: TableOptions<T>
+  options: TableOptions<T>,
 ): TableResult {
   const { limit, sum, sortedBy, unit = 'rows', moreAvailable } = options;
   const columns: (keyof T & string)[] = options.columns
@@ -225,7 +227,9 @@ export function table<T extends object>(
     return {
       columns,
       rows: out,
-      total_rows: rows.length,
+      // SQL already capped the result, so rows.length is the cap, not the true
+      // total — report it as unknown rather than a misleadingly exact number.
+      total_rows: moreAvailable ? null : rows.length,
       ...(moreAvailable
         ? {
             note: `Showing the top ${head.length} ${unit}${rankedBy}. This is a capped query — more ${unit} exist beyond the limit, so do not read ${head.length} as the total. Raise \`limit\` or narrow the range to see the rest.`,
@@ -258,7 +262,7 @@ export function table<T extends object>(
     columns.map((column) => {
       if (column === labelColumn) return `(other: ${tail.length} ${unit})`;
       return totals.has(column) ? totals.get(column) : null;
-    })
+    }),
   );
 
   const summed = sum.join(' + ');
@@ -293,7 +297,7 @@ function shrinkLargestTable(payload: unknown): boolean {
 
   const kept = Math.max(1, Math.floor(largest.rows.length / 2));
   largest.rows = largest.rows.slice(0, kept);
-  largest.note = `Truncated to ${kept} rows (of ${largest.total_rows} matched) to fit the response size limit. Narrow the date range or add a filter to see more.`;
+  largest.note = `Truncated to ${kept} rows (of ${largest.total_rows ?? 'many'} matched) to fit the response size limit. Narrow the date range or add a filter to see more.`;
   return true;
 }
 
@@ -320,7 +324,7 @@ export function toText(data: unknown): {
   if (text.length > MAX_RESPONSE_CHARS) {
     logger.warn(
       { chars: text.length },
-      'MCP response exceeded size limit with no shrinkable table'
+      'MCP response exceeded size limit with no shrinkable table',
     );
     text = JSON.stringify({
       error: 'response_too_large',
@@ -337,7 +341,7 @@ export function toText(data: unknown): {
  * Wrap a tool handler to catch errors and return them as MCP error content.
  */
 export async function withErrorHandling<T>(
-  fn: () => Promise<T>
+  fn: () => Promise<T>,
 ): Promise<{ content: [{ type: 'text'; text: string }]; isError?: boolean }> {
   try {
     const result = await fn();

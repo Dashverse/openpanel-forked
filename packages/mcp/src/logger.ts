@@ -1,4 +1,16 @@
+import { createHash } from 'node:crypto';
 import { createLogger as createBaseLogger } from '@openpanel/logger';
+
+/**
+ * A non-reversible fingerprint of a session id, safe to log. Session ids are
+ * reusable bearer credentials (they authorize later requests without a token),
+ * so the raw value must never hit the logs — only this short hash, enough to
+ * correlate lines for one session.
+ */
+export function fingerprint(id?: string): string {
+  if (!id) return 'none';
+  return createHash('sha256').update(id).digest('hex').slice(0, 12);
+}
 
 /**
  * The upstream MCP code (ported here) logs pino-style — object first, message

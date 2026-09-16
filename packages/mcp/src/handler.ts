@@ -1,7 +1,7 @@
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createLogger } from './logger';
+import { createLogger, fingerprint } from './logger';
 import { McpAuthError, authenticateToken, extractToken } from './auth';
 import { createMcpServer } from './server';
 import type { SessionManager } from './session-manager';
@@ -9,6 +9,9 @@ import type { SessionManager } from './session-manager';
 const logger = createLogger({ name: 'mcp:handler' });
 
 const MCP_PROTOCOL_VERSION = '2024-11-05';
+
+/** Upper bound on how long a single JSON-RPC message may take to process. */
+const REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * Handle a POST /mcp request.
@@ -29,11 +32,19 @@ export async function handleMcpPost(
   query: Record<string, unknown>,
 ): Promise<void> {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+  // Guard the body shape before using `in` on it — a null/primitive body would
+  // otherwise throw a TypeError at `'method' in message`.
+  if (typeof body !== 'object' || body === null) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Invalid JSON-RPC message' }));
+    return;
+  }
   const message = body as JSONRPCMessage;
 
   logger.info(
     {
-      sessionId: sessionId ?? 'new',
+      session: fingerprint(sessionId),
       method: 'method' in message ? message.method : 'unknown',
       hasAuth: !!(query['token'] || req.headers.authorization),
     },
@@ -43,9 +54,14 @@ export async function handleMcpPost(
   if (sessionId) {
     const context = await sessionManager.getContext(sessionId);
     if (!context) {
-      logger.warn({ sessionId }, 'MCP session not found in Redis');
+      logger.warn(
+        { session: fingerprint(sessionId) },
+        'MCP session not found in Redis',
+      );
       res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Session not found — please reconnect' }));
+      res.end(
+        JSON.stringify({ error: 'Session not found — please reconnect' }),
+      );
       return;
     }
 
@@ -66,7 +82,10 @@ export async function handleMcpPost(
       });
       res.end(JSON.stringify(response));
     } catch (err) {
-      logger.error({ err, sessionId }, 'MCP request processing error');
+      logger.error(
+        { err, session: fingerprint(sessionId) },
+        'MCP request processing error',
+      );
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Internal server error' }));
     }
@@ -85,13 +104,23 @@ export async function handleMcpPost(
       return;
     }
 
+    // `initialize` must be a request (has an id), not a notification — a
+    // notification produces no response, so processRequest would wait forever.
+    if (!('id' in message) || message.id === null || message.id === undefined) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ error: 'initialize must be a request with an id' }),
+      );
+      return;
+    }
+
     const response = await processRequest(context, message, true);
     const newSessionId = sessionManager.generateId();
     await sessionManager.setContext(newSessionId, context);
 
     logger.info(
       {
-        sessionId: newSessionId,
+        session: fingerprint(newSessionId),
         clientType: context.clientType,
         organizationId: context.organizationId,
         projectId: context.projectId,
@@ -130,12 +159,23 @@ async function processRequest(
   message: JSONRPCMessage,
   isInitialize = false,
 ): Promise<JSONRPCMessage> {
-  if ('method' in message && message.method === 'tools/call' && 'params' in message) {
-    const { name, arguments: args } = (message.params ?? {}) as { name?: string; arguments?: unknown };
+  if (
+    'method' in message &&
+    message.method === 'tools/call' &&
+    'params' in message
+  ) {
+    const { name, arguments: args } = (message.params ?? {}) as {
+      name?: string;
+      arguments?: unknown;
+    };
+    // Never log `args` — they carry user identity ids, property filters and other
+    // values that must stay inside the analytics access boundary. Name + a count
+    // of argument keys is enough to trace a call.
     logger.info(
       {
         tool: name,
-        params: args,
+        argKeys:
+          args && typeof args === 'object' ? Object.keys(args).length : 0,
         organizationId: context.organizationId,
         projectId: context.projectId,
         clientType: context.clientType,
@@ -143,7 +183,8 @@ async function processRequest(
       'MCP tool call',
     );
   }
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
   const server = createMcpServer(context);
   await server.connect(serverTransport);
 
@@ -173,13 +214,27 @@ async function processRequest(
 
   const start = Date.now();
   const response = await new Promise<JSONRPCMessage>((resolve, reject) => {
-    clientTransport.onmessage = resolve;
-    clientTransport.send(message).catch(reject);
+    const timer = setTimeout(
+      () => reject(new Error('MCP request timed out')),
+      REQUEST_TIMEOUT_MS,
+    );
+    clientTransport.onmessage = (msg) => {
+      clearTimeout(timer);
+      resolve(msg);
+    };
+    clientTransport.send(message).catch((err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 
   if ('method' in message && message.method === 'tools/call') {
-    const { name } = (('params' in message && message.params) ?? {}) as { name?: string };
-    const isError = 'result' in response && (response.result as { isError?: boolean })?.isError;
+    const { name } = (('params' in message && message.params) ?? {}) as {
+      name?: string;
+    };
+    const isError =
+      'result' in response &&
+      (response.result as { isError?: boolean })?.isError;
     logger.info(
       {
         tool: name,
@@ -201,6 +256,11 @@ export async function handleMcpGet(
   _req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
-  res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'POST, DELETE' });
-  res.end(JSON.stringify({ error: 'SSE not supported — use POST for all requests' }));
+  res.writeHead(405, {
+    'Content-Type': 'application/json',
+    Allow: 'POST, DELETE',
+  });
+  res.end(
+    JSON.stringify({ error: 'SSE not supported — use POST for all requests' }),
+  );
 }

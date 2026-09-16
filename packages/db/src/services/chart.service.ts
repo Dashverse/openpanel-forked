@@ -17,6 +17,7 @@ import { db } from '../../index';
 import {
   TABLE_NAMES,
   aliasResolutionNeedsCte,
+  chMcp,
   chQuery,
   formatClickhouseDate,
   getEventsTableForRange,
@@ -2014,16 +2015,22 @@ export function getChartPrevStartEndDate({
  * millions of rows (the MV isn't pre-deduplicated) — far too slow to run on
  * every query. Paid once per project per hour, then instant.
  */
-const getProjectEventNamesCached = cacheable(async function getProjectEventNames(
-  projectId: string,
-): Promise<string[]> {
-  const rows = await chQuery<{ name: string }>(
-    `SELECT DISTINCT name FROM ${TABLE_NAMES.event_names_mv}
-     WHERE project_id = ${sqlstring.escape(projectId)}
-     SETTINGS max_execution_time = 10`,
-  );
-  return rows.map((r) => r.name);
-}, 60 * 60);
+const getProjectEventNamesCached = cacheable(
+  async function getProjectEventNames(projectId: string): Promise<string[]> {
+    // Runs on the MCP client (read-only user + short timeout) — this validator is
+    // only reached from MCP tool paths (getFunnelCore / getConversionCore), so on
+    // a cache miss the scan must honour MCP_CLICKHOUSE_URL and the MCP timeout
+    // rather than the primary chQuery client.
+    const res = await chMcp.query({
+      query: `SELECT DISTINCT name FROM ${TABLE_NAMES.event_names_mv}
+     WHERE project_id = ${sqlstring.escape(projectId)}`,
+      format: 'JSONEachRow',
+    });
+    const rows = await res.json<{ name: string }>();
+    return rows.map((r) => r.name);
+  },
+  60 * 60,
+);
 
 /**
  * Validate that event names exist for a project before running a funnel /

@@ -1,4 +1,11 @@
-import { McpAuthError, authenticateToken, extractToken, handleMcpGet, handleMcpPost, SessionManager } from '@openpanel/mcp';
+import {
+  McpAuthError,
+  authenticateToken,
+  extractToken,
+  handleMcpGet,
+  handleMcpPost,
+  SessionManager,
+} from '@openpanel/mcp';
 import type { FastifyPluginAsync } from 'fastify';
 import { activateRateLimiter } from '@/utils/rate-limiter';
 
@@ -7,6 +14,13 @@ import { activateRateLimiter } from '@/utils/rate-limiter';
  * Exported so graceful shutdown can clean it up.
  */
 export const mcpSessionManager = new SessionManager();
+
+/**
+ * MCP JSON-RPC messages are tiny. Cap the body well below the API's global
+ * 500 MB limit so an unauthenticated caller can't force large allocations /
+ * JSON parsing before the token is even checked (the parser runs first).
+ */
+const MCP_BODY_LIMIT_BYTES = 1_048_576; // 1 MiB
 
 const mcpRouter: FastifyPluginAsync = async (fastify) => {
   await activateRateLimiter({ fastify, max: 60, timeWindow: '1 minute' });
@@ -20,17 +34,21 @@ const mcpRouter: FastifyPluginAsync = async (fastify) => {
    * First request: authenticate via ?token= query param or Authorization: Bearer.
    * Subsequent requests: route by Mcp-Session-Id header.
    */
-  await fastify.post('/', async (req, reply) => {
-    // Hand off full response control to the MCP transport
-    reply.hijack();
-    await handleMcpPost(
-      mcpSessionManager,
-      req.raw,
-      reply.raw,
-      req.body,
-      req.query as Record<string, unknown>,
-    );
-  });
+  await fastify.post(
+    '/',
+    { bodyLimit: MCP_BODY_LIMIT_BYTES },
+    async (req, reply) => {
+      // Hand off full response control to the MCP transport
+      reply.hijack();
+      await handleMcpPost(
+        mcpSessionManager,
+        req.raw,
+        reply.raw,
+        req.body,
+        req.query as Record<string, unknown>,
+      );
+    },
+  );
 
   /**
    * GET /mcp
@@ -53,15 +71,24 @@ const mcpRouter: FastifyPluginAsync = async (fastify) => {
   await fastify.delete('/', async (req, reply) => {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
     if (!sessionId) {
-      return reply.status(400).send({ error: 'Mcp-Session-Id header is required' });
+      return reply
+        .status(400)
+        .send({ error: 'Mcp-Session-Id header is required' });
     }
 
-    const token = extractToken(req.query as Record<string, unknown>, req.headers.authorization);
+    const token = extractToken(
+      req.query as Record<string, unknown>,
+      req.headers.authorization,
+    );
     let callerContext;
     try {
       callerContext = await authenticateToken(token);
     } catch (err) {
-      return reply.status(401).send({ error: err instanceof McpAuthError ? err.message : 'Unauthorized' });
+      return reply
+        .status(401)
+        .send({
+          error: err instanceof McpAuthError ? err.message : 'Unauthorized',
+        });
     }
 
     const context = await mcpSessionManager.getContext(sessionId);
@@ -69,7 +96,12 @@ const mcpRouter: FastifyPluginAsync = async (fastify) => {
       return reply.status(404).send({ error: 'Session not found' });
     }
 
-    if (context.organizationId !== callerContext.organizationId) {
+    // Only the client that created the session may close it — an org match
+    // alone would let any other client in the same org tear down the session.
+    if (
+      context.organizationId !== callerContext.organizationId ||
+      context.clientId !== callerContext.clientId
+    ) {
       return reply.status(403).send({ error: 'Forbidden' });
     }
 

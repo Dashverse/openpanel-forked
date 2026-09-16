@@ -295,15 +295,20 @@ export const originalCh = createClient({
  *      so the MCP physically cannot mutate/DDL. Falls back to the main URL until
  *      that user exists (the timeout still applies).
  */
+// A malformed MCP_QUERY_TIMEOUT_S must not reach the client as NaN — the CH
+// client serializes settings into query params, and `max_execution_time=NaN`
+// would make ClickHouse reject every MCP request. Fall back to 5s.
+const mcpQueryTimeoutS = (() => {
+  const parsed = Number.parseInt(process.env.MCP_QUERY_TIMEOUT_S || '5', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
+})();
+
 export const chMcp = createClient({
   url: process.env.MCP_CLICKHOUSE_URL || process.env.CLICKHOUSE_URL,
   ...CLICKHOUSE_OPTIONS,
   clickhouse_settings: {
     ...CLICKHOUSE_OPTIONS.clickhouse_settings,
-    max_execution_time: Number.parseInt(
-      process.env.MCP_QUERY_TIMEOUT_S || '5',
-      10,
-    ),
+    max_execution_time: mcpQueryTimeoutS,
     max_result_rows: '200000',
     max_result_bytes: '104857600', // 100 MB hard cap on any single result
   },
@@ -395,10 +400,7 @@ function buildLogComment(): string | undefined {
   const traceId = currentTraceId();
   const qc = getQueryContext();
   const hasQueryContext =
-    !!qc.project_id ||
-    !!qc.endpoint ||
-    !!qc.chart_type ||
-    !!qc.user_id;
+    !!qc.project_id || !!qc.endpoint || !!qc.chart_type || !!qc.user_id;
   if (!traceId && !hasQueryContext) return undefined;
 
   // Assemble by hand — JSON.stringify would emit "undefined" for missing

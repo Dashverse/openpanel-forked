@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createLogger } from './logger';
+import { createLogger, fingerprint } from './logger';
 import { getRedisCache } from '@openpanel/redis';
 import type { McpAuthContext } from './auth';
 
@@ -26,7 +26,7 @@ export class SessionManager {
     await getRedisCache().setJson(redisKey(id), SESSION_TTL_SECONDS, context);
     logger.info(
       {
-        sessionId: id,
+        session: fingerprint(id),
         clientType: context.clientType,
         organizationId: context.organizationId,
         projectId: context.projectId,
@@ -45,7 +45,7 @@ export class SessionManager {
 
   async deleteContext(id: string): Promise<void> {
     await getRedisCache().del(redisKey(id));
-    logger.info({ sessionId: id }, 'MCP session deleted');
+    logger.info({ session: fingerprint(id) }, 'MCP session deleted');
   }
 
   async close(id: string): Promise<void> {

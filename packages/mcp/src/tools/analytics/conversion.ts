@@ -24,10 +24,9 @@ export function registerConversionTools(
       ...zDateRange,
       steps: z
         .array(z.string())
-        .min(2)
-        .max(10)
+        .length(2)
         .describe(
-          'The events, in order: the first is the starting event, the last is the conversion event (minimum 2).',
+          'Exactly two events: [startingEvent, conversionEvent]. For multi-step drop-off use get_funnel instead.',
         ),
       windowHours: z
         .number()
