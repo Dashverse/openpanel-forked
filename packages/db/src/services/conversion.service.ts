@@ -1,10 +1,15 @@
 import { NOT_SET_VALUE } from '@openpanel/constants';
-import type { IChartEvent, IChartInput } from '@openpanel/validation';
+import type {
+  IChartEvent,
+  IChartEventFilter,
+  IChartInput,
+} from '@openpanel/validation';
 import { omit } from 'ramda';
 import sqlstring from 'sqlstring';
 import {
   TABLE_NAMES,
   ch,
+  chMcp,
   formatClickhouseDate,
   getEventsTableForRange,
   resolvedPersonIdSql,
@@ -19,9 +24,14 @@ import {
   getCohortAlias,
   buildCohortMembershipQuery,
   getMaterializedColumns,
+  assertEventNamesExist,
 } from './chart.service';
+import { getSettingsForProject } from './organization.service';
 import { onlyReportEvents } from './reports.service';
-import { getCustomEventByName, expandCustomEventToSQL } from './custom-event.service';
+import {
+  getCustomEventByName,
+  expandCustomEventToSQL,
+} from './custom-event.service';
 
 const quoteCol = (col: string) => `\`${col.replace(/^`|`$/g, '')}\``;
 
@@ -39,7 +49,12 @@ export class ConversionService {
     tableAlias: string,
     cohortName?: string,
   ): string {
-    const propertyKey = getSelectPropertyKey(breakdownName, projectId, cohortId, cohortName);
+    const propertyKey = getSelectPropertyKey(
+      breakdownName,
+      projectId,
+      cohortId,
+      cohortName,
+    );
 
     // Cohort expressions already have their own aliases (e.g., cohort_abc123.profile_id)
     if (propertyKey.includes('cohort_') || propertyKey.startsWith('if(')) {
@@ -53,7 +68,10 @@ export class ConversionService {
 
     // For property fields, prepend table alias
     // e.g., properties['key'] -> se.properties['key']
-    if (propertyKey.startsWith('properties[') || propertyKey.includes('arrayMap')) {
+    if (
+      propertyKey.startsWith('properties[') ||
+      propertyKey.includes('arrayMap')
+    ) {
       return `${tableAlias}.${propertyKey}`;
     }
 
@@ -91,7 +109,9 @@ export class ConversionService {
         `created_at >= toDateTime('${formatClickhouseDate(startDate)}')`,
         `created_at <= toDateTime('${formatClickhouseDate(endDate)}')`,
         `${groupCol} != ''`,
-        ...(preFilterCte ? [`${groupCol} IN (SELECT ${groupCol} FROM ${preFilterCte})`] : []),
+        ...(preFilterCte
+          ? [`${groupCol} IN (SELECT ${groupCol} FROM ${preFilterCte})`]
+          : []),
       ];
 
       const sql = await expandCustomEventToSQL(
@@ -110,14 +130,16 @@ export class ConversionService {
       // Regular event - apply filters if present
       // Exclude cohort filters — they're handled via JOINs in the outer query
       const nonCohortFilters = (event.filters ?? []).filter(
-        f => f.operator !== 'inCohort' && f.operator !== 'notInCohort'
+        (f) => f.operator !== 'inCohort' && f.operator !== 'notInCohort',
       );
-      const filterClauses = nonCohortFilters.length > 0
-        ? Object.values(getEventFiltersWhereClause(nonCohortFilters, projectId))
-        : [];
-      const filterWhere = filterClauses.length > 0
-        ? ' AND ' + filterClauses.join(' AND ')
-        : '';
+      const filterClauses =
+        nonCohortFilters.length > 0
+          ? Object.values(
+              getEventFiltersWhereClause(nonCohortFilters, projectId),
+            )
+          : [];
+      const filterWhere =
+        filterClauses.length > 0 ? ' AND ' + filterClauses.join(' AND ') : '';
 
       // If any filter references profile.*, join the profiles table inside the CTE.
       // For profile.properties.X paths, extract the specific key as an aliased
@@ -125,23 +147,29 @@ export class ConversionService {
       // collision with events.properties when a conversion mixes profile.* and
       // event-level properties.* filters. Matches the alias form returned by
       // getSelectPropertyKey for profile.properties.X.
-      const profileFilters = (event.filters || []).filter(f => f.name.startsWith('profile.'));
+      const profileFilters = (event.filters || []).filter((f) =>
+        f.name.startsWith('profile.'),
+      );
       let profileJoinClause = '';
       if (profileFilters.length > 0) {
         const matCols = await getMaterializedColumns('profiles');
-        const profileColumns = [...new Set(
-          profileFilters.flatMap(f => {
-            if (f.name.startsWith('profile.properties.')) {
-              const cached = matCols[f.name];
-              if (cached) {
-                return [cached.replace('profile.', '')];
+        const profileColumns = [
+          ...new Set(
+            profileFilters.flatMap((f) => {
+              if (f.name.startsWith('profile.properties.')) {
+                const cached = matCols[f.name];
+                if (cached) {
+                  return [cached.replace('profile.', '')];
+                }
+                const key = f.name.replace('profile.properties.', '');
+                return [
+                  `properties[${sqlstring.escape(key)}] AS \`properties.${key}\``,
+                ];
               }
-              const key = f.name.replace('profile.properties.', '');
-              return [`properties[${sqlstring.escape(key)}] AS \`properties.${key}\``];
-            }
-            return [f.name.replace('profile.', '').split('.')[0]!];
-          })
-        )];
+              return [f.name.replace('profile.', '').split('.')[0]!];
+            }),
+          ),
+        ];
         profileJoinClause = `\n        LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = ${getEventsTableForRange(startDate)}.profile_id`;
       }
 
@@ -216,11 +244,11 @@ export class ConversionService {
   }> {
     // Check if any events are custom events
     const customEvents = await Promise.all(
-      events.map(event => getCustomEventByName(event.name, projectId))
+      events.map((event) => getCustomEventByName(event.name, projectId)),
     );
 
     // If no custom events, use regular events table
-    if (customEvents.every(ce => !ce)) {
+    if (customEvents.every((ce) => !ce)) {
       return {
         fromClause: getEventsTableForRange(startDate),
         ctes: [],
@@ -231,9 +259,10 @@ export class ConversionService {
     // Get materialized columns to ensure UNION compatibility (events table only)
     const materializedColumns = await getMaterializedColumns('events');
     const materializedColumnNames = Object.values(materializedColumns);
-    const materializedColumnsSelect = materializedColumnNames.length > 0
-      ? `, ${materializedColumnNames.map(col => `\`${col}\``).join(', ')}`
-      : '';
+    const materializedColumnsSelect =
+      materializedColumnNames.length > 0
+        ? `, ${materializedColumnNames.map((col) => `\`${col}\``).join(', ')}`
+        : '';
 
     // Build CTEs for custom events
     const ctes: string[] = [];
@@ -259,7 +288,7 @@ export class ConversionService {
           return `custom_event_${index} AS (${sql})`;
         }
         return null;
-      })
+      }),
     );
 
     ctes.push(...customEventQueries.filter((q): q is string => q !== null));
@@ -417,7 +446,11 @@ export class ConversionService {
     const aliasJoin = aliasResolutionNeedsCte()
       ? `\n        LEFT JOIN al ON al.alias = ${E}.device_id`
       : '';
-    const resolvedPid = resolvedPersonIdSql(projectId, `${E}.device_id`, `${E}.profile_id`);
+    const resolvedPid = resolvedPersonIdSql(
+      projectId,
+      `${E}.device_id`,
+      `${E}.profile_id`,
+    );
 
     // Split-scan breakdown variant. Opens (first event) are grouped per
     // (resolved_pid, b_0) so the breakdown value comes from the START event;
@@ -568,7 +601,7 @@ export class ConversionService {
     timezone: string;
   }) {
     // Merge global filters into each event's filters (same as fetch.ts does for regular charts)
-    const events = onlyReportEvents(series).map(event => ({
+    const events = onlyReportEvents(series).map((event) => ({
       ...event,
       filters: [...(event.filters ?? []), ...globalFilters],
     }));
@@ -611,7 +644,9 @@ export class ConversionService {
 
     // Calculate extended end date for conversion events (add funnel window)
     const endDateObj = new Date(endDate);
-    const extendedEndDateObj = new Date(endDateObj.getTime() + funnelWindowSeconds * 1000);
+    const extendedEndDateObj = new Date(
+      endDateObj.getTime() + funnelWindowSeconds * 1000,
+    );
     const extendedEndDate = formatClickhouseDate(extendedEndDateObj);
 
     // Ensure materialized columns cache is warm so getSelectPropertyKey works synchronously
@@ -708,8 +743,13 @@ export class ConversionService {
     // Determine which event-property columns are needed from start_events
     // (profile.* and cohort breakdowns are handled separately via JOINs)
     const breakdownExtraCols = breakdowns
-      .filter(b => !b.name.startsWith('profile.') && !b.cohortId && !b.name.startsWith('cohort:'))
-      .flatMap(b => {
+      .filter(
+        (b) =>
+          !b.name.startsWith('profile.') &&
+          !b.cohortId &&
+          !b.name.startsWith('cohort:'),
+      )
+      .flatMap((b) => {
         const col = getSelectPropertyKey(b.name, projectId, undefined);
         if (col.startsWith('profile.') || col.startsWith('if(')) return [];
         // Map access (not materialized) — need the whole properties map
@@ -718,13 +758,15 @@ export class ConversionService {
       });
 
     // Hold property constant: columns needed in both CTEs for the JOIN condition
-    const holdExtraCols = holdProperties.flatMap(prop => {
+    const holdExtraCols = holdProperties.flatMap((prop) => {
       const col = getSelectPropertyKey(prop, projectId, undefined);
       if (col.startsWith('properties[')) return ['properties'];
       return [col];
     });
 
-    const startExtraCols = [...new Set([...breakdownExtraCols, ...holdExtraCols])];
+    const startExtraCols = [
+      ...new Set([...breakdownExtraCols, ...holdExtraCols]),
+    ];
     const endExtraCols = [...new Set(holdExtraCols)];
 
     // Define group column (profile_id or session_id) — needed by CTE builders below
@@ -780,18 +822,22 @@ export class ConversionService {
     // Alias is first_open_at (not created_at) to avoid ILLEGAL_AGGREGATION when
     // ClickHouse inlines the CTE and sees the aggregate alias in JOIN/WHERE conditions.
     const otherIdCol = groupCol === 'profile_id' ? 'session_id' : 'profile_id';
-    const safeGroupByCols = startExtraCols.filter(c => c !== 'properties');
-    const anyWrapCols = startExtraCols.filter(c => c === 'properties');
+    const safeGroupByCols = startExtraCols.filter((c) => c !== 'properties');
+    const anyWrapCols = startExtraCols.filter((c) => c === 'properties');
     // GROUP BY uses _day (pre-computed in the subquery) instead of toDate(created_at)
     // to avoid ClickHouse resolving 'created_at' in toDate(created_at) to the SELECT
     // alias min(created_at) AS first_open_at — which would put an aggregate in GROUP BY.
-    const dedupeGroupBy = [quoteCol(groupCol), '_day', ...safeGroupByCols.map(quoteCol)].join(', ');
+    const dedupeGroupBy = [
+      quoteCol(groupCol),
+      '_day',
+      ...safeGroupByCols.map(quoteCol),
+    ].join(', ');
     const dedupeSelect = [
       quoteCol(groupCol),
       `any(${quoteCol(otherIdCol)}) AS ${quoteCol(otherIdCol)}`,
       'min(created_at) AS first_open_at',
       ...safeGroupByCols.map(quoteCol),
-      ...anyWrapCols.map(c => `any(${quoteCol(c)}) AS ${quoteCol(c)}`),
+      ...anyWrapCols.map((c) => `any(${quoteCol(c)}) AS ${quoteCol(c)}`),
     ].join(', ');
     ctes.push(`start_events AS (
       SELECT ${dedupeSelect}
@@ -817,14 +863,18 @@ export class ConversionService {
     // Per-day dedup (not global) so the same user converting on different days
     // is counted as multiple conversions — one per (profile, show, day).
     // Alias is first_act_at (not created_at) for the same ILLEGAL_AGGREGATION reason.
-    const endSafeGroupByCols = endExtraCols.filter(c => c !== 'properties');
-    const endAnyWrapCols = endExtraCols.filter(c => c === 'properties');
-    const endDedupeGroupBy = [quoteCol(groupCol), 'toDate(created_at)', ...endSafeGroupByCols.map(quoteCol)].join(', ');
+    const endSafeGroupByCols = endExtraCols.filter((c) => c !== 'properties');
+    const endAnyWrapCols = endExtraCols.filter((c) => c === 'properties');
+    const endDedupeGroupBy = [
+      quoteCol(groupCol),
+      'toDate(created_at)',
+      ...endSafeGroupByCols.map(quoteCol),
+    ].join(', ');
     const endDedupeSelect = [
       quoteCol(groupCol),
       'min(created_at) AS first_act_at',
       ...endSafeGroupByCols.map(quoteCol),
-      ...endAnyWrapCols.map(c => `any(${quoteCol(c)}) AS ${quoteCol(c)}`),
+      ...endAnyWrapCols.map((c) => `any(${quoteCol(c)}) AS ${quoteCol(c)}`),
     ].join(', ');
     ctes.push(`end_events AS (
       SELECT ${endDedupeSelect}
@@ -865,17 +915,29 @@ export class ConversionService {
 
     // Build breakdown columns (from start_events with 'se' alias)
     const breakdownColumns = breakdowns.map((b, index) => {
-      const columnWithAlias = this.getBreakdownColumnWithAlias(b.name, projectId, b.cohortId, 'se', b.cohortId ? cohortMetadata.get(b.cohortId)?.name : undefined);
+      const columnWithAlias = this.getBreakdownColumnWithAlias(
+        b.name,
+        projectId,
+        b.cohortId,
+        'se',
+        b.cohortId ? cohortMetadata.get(b.cohortId)?.name : undefined,
+      );
       return `${columnWithAlias} as b_${index}`;
     });
     const breakdownGroupBy = breakdowns.map((b, index) => `b_${index}`);
 
     // Build LEFT JOINs for cohorts (on start_events)
-    const cohortJoins = cohortIds.length > 0 ? '\n      ' + cohortIds.map((cohortId) => {
-      const cohortAlias = getCohortAlias(cohortId);
-      const cohortCte = getCohortCteName(cohortId);
-      return `LEFT ANY JOIN ${cohortCte} AS ${cohortAlias} ON ${cohortAlias}.profile_id = se.profile_id`;
-    }).join('\n      ') : '';
+    const cohortJoins =
+      cohortIds.length > 0
+        ? '\n      ' +
+          cohortIds
+            .map((cohortId) => {
+              const cohortAlias = getCohortAlias(cohortId);
+              const cohortCte = getCohortCteName(cohortId);
+              return `LEFT ANY JOIN ${cohortCte} AS ${cohortAlias} ON ${cohortAlias}.profile_id = se.profile_id`;
+            })
+            .join('\n      ')
+        : '';
 
     // Build LEFT JOIN for profile table if any breakdown uses profile.*.
     // For profile.properties.X paths, extract the specific key as an aliased
@@ -883,23 +945,29 @@ export class ConversionService {
     // collision with events.properties when breakdowns mix profile.* and
     // event-level properties.* paths. Matches the alias form returned by
     // getSelectPropertyKey for profile.properties.X.
-    const profileBreakdowns = breakdowns.filter(b => b.name.startsWith('profile.'));
+    const profileBreakdowns = breakdowns.filter((b) =>
+      b.name.startsWith('profile.'),
+    );
     let profileJoin = '';
     if (profileBreakdowns.length > 0) {
       const matCols = await getMaterializedColumns('profiles');
-      const profileColumns = [...new Set(
-        profileBreakdowns.flatMap(b => {
-          if (b.name.startsWith('profile.properties.')) {
-            const cached = matCols[b.name];
-            if (cached) {
-              return [cached.replace('profile.', '')];
+      const profileColumns = [
+        ...new Set(
+          profileBreakdowns.flatMap((b) => {
+            if (b.name.startsWith('profile.properties.')) {
+              const cached = matCols[b.name];
+              if (cached) {
+                return [cached.replace('profile.', '')];
+              }
+              const key = b.name.replace('profile.properties.', '');
+              return [
+                `properties[${sqlstring.escape(key)}] AS \`properties.${key}\``,
+              ];
             }
-            const key = b.name.replace('profile.properties.', '');
-            return [`properties[${sqlstring.escape(key)}] AS \`properties.${key}\``];
-          }
-          return [b.name.replace('profile.', '').split('.')[0]!];
-        })
-      )];
+            return [b.name.replace('profile.', '').split('.')[0]!];
+          }),
+        ),
+      ];
       profileJoin = `\n      LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = se.profile_id`;
     }
 
@@ -908,10 +976,12 @@ export class ConversionService {
     const gracePeriodSeconds = 2;
 
     // Hold property constant: require same property value in start and end events
-    const holdJoinConditions = holdProperties.map(prop => {
-      const col = getSelectPropertyKey(prop, projectId, undefined);
-      return `AND se.${col} = ee.${col}`;
-    }).join('\n        ');
+    const holdJoinConditions = holdProperties
+      .map((prop) => {
+        const col = getSelectPropertyKey(prop, projectId, undefined);
+        return `AND se.${col} = ee.${col}`;
+      })
+      .join('\n        ');
 
     const toStartOf = clix.toStartOf('se.first_open_at', interval);
     const breakdownGroupByStr = breakdownGroupBy.join(', ');
@@ -935,27 +1005,33 @@ export class ConversionService {
     // Time-to-convert: ASOF emits a single matched row per start, so no minIf is
     // needed — dateDiff is already correct per row. Emit NULL when unmatched (or
     // matched but past the window) so quantile / avg / min / max skip it.
-    const timeDiffCol = measuring === 'time_to_convert'
-      ? `,\n        if(${conversionCondition}, dateDiff('second', se.first_open_at, ee.first_act_at), NULL) AS time_diff_seconds`
-      : '';
+    const timeDiffCol =
+      measuring === 'time_to_convert'
+        ? `,\n        if(${conversionCondition}, dateDiff('second', se.first_open_at, ee.first_act_at), NULL) AS time_diff_seconds`
+        : '';
 
     // Build WHERE clause for cohort global filters (inCohort / notInCohort).
     // Applied per joined row, before the agg CTE aggregates by event_day.
-    const cohortFilterClauses = events.flatMap(event =>
+    const cohortFilterClauses = events.flatMap((event) =>
       (event.filters ?? [])
-        .filter(f => (f.operator === 'inCohort' || f.operator === 'notInCohort') && f.cohortId)
-        .map(f => {
+        .filter(
+          (f) =>
+            (f.operator === 'inCohort' || f.operator === 'notInCohort') &&
+            f.cohortId,
+        )
+        .map((f) => {
           const alias = getCohortAlias(f.cohortId!);
           return f.operator === 'inCohort'
             ? `notEmpty(${alias}.profile_id)`
             : `empty(${alias}.profile_id)`;
-        })
+        }),
     );
     // Deduplicate (same filter merged into multiple events)
     const uniqueCohortFilterClauses = [...new Set(cohortFilterClauses)];
-    const cohortFilterWhere = uniqueCohortFilterClauses.length > 0
-      ? `\n      WHERE ${uniqueCohortFilterClauses.join('\n        AND ')}`
-      : '';
+    const cohortFilterWhere =
+      uniqueCohortFilterClauses.length > 0
+        ? `\n      WHERE ${uniqueCohortFilterClauses.join('\n        AND ')}`
+        : '';
 
     // One row per start_events row — ASOF guarantees a single matched-or-default
     // ee row, so no inner GROUP BY is needed. The agg CTE below aggregates
@@ -974,8 +1050,9 @@ export class ConversionService {
 
     // TTC aggregation columns — condition is 'converted' (Bool) so TTC stats
     // are computed only over start events that actually had a conversion.
-    const ttcAggColumns = measuring === 'time_to_convert'
-      ? `,
+    const ttcAggColumns =
+      measuring === 'time_to_convert'
+        ? `,
         round(avgIf(time_diff_seconds, converted)) AS ttc_avg,
         round(quantileIf(0.5)(time_diff_seconds, converted)) AS ttc_median,
         minIf(time_diff_seconds, converted) AS ttc_min,
@@ -984,7 +1061,7 @@ export class ConversionService {
         round(quantileIf(0.75)(time_diff_seconds, converted)) AS ttc_p75,
         round(quantileIf(0.9)(time_diff_seconds, converted)) AS ttc_p90,
         round(quantileIf(0.99)(time_diff_seconds, converted)) AS ttc_p99`
-      : '';
+        : '';
 
     // agg CTE: count() for total opens, countIf(converted) for conversions.
     // Counts all conversion opportunities (not just unique users) so the same
@@ -1000,12 +1077,14 @@ export class ConversionService {
     )`;
 
     // TTC columns for final SELECT
-    const ttcSelectColumns = measuring === 'time_to_convert'
-      ? ', ttc_avg, ttc_median, ttc_min, ttc_max, ttc_p25, ttc_p75, ttc_p90, ttc_p99'
-      : '';
-    const ttcSelectColumnsWithPrefix = measuring === 'time_to_convert'
-      ? ',\n          agg.ttc_avg, agg.ttc_median, agg.ttc_min, agg.ttc_max, agg.ttc_p25, agg.ttc_p75, agg.ttc_p90, agg.ttc_p99'
-      : '';
+    const ttcSelectColumns =
+      measuring === 'time_to_convert'
+        ? ', ttc_avg, ttc_median, ttc_min, ttc_max, ttc_p25, ttc_p75, ttc_p90, ttc_p99'
+        : '';
+    const ttcSelectColumnsWithPrefix =
+      measuring === 'time_to_convert'
+        ? ',\n          agg.ttc_avg, agg.ttc_median, agg.ttc_min, agg.ttc_max, agg.ttc_p25, agg.ttc_p75, agg.ttc_p90, agg.ttc_p99'
+        : '';
 
     let finalSql: string;
 
@@ -1015,9 +1094,10 @@ export class ConversionService {
       // `agg` twice (once in top_breakdowns, once in the outer SELECT), which
       // CH inlined — making the full conversion subtree run twice per query.
       // Window function over a single `FROM agg` halves CH work.
-      const rankMetric = measuring === 'time_to_convert'
-        ? 'avg(ttc_avg)'
-        : 'avg(conversion_rate_percentage)';
+      const rankMetric =
+        measuring === 'time_to_convert'
+          ? 'avg(ttc_avg)'
+          : 'avg(conversion_rate_percentage)';
       const rankDirection = measuring === 'time_to_convert' ? 'ASC' : 'DESC';
       const topNLimit = limit ?? 50;
       const partitionBy = breakdownGroupByStr;
@@ -1053,7 +1133,7 @@ export class ConversionService {
       query: finalSql,
       clickhouse_settings: { session_timezone: timezone },
     });
-    const json = await rawResult.json() as {
+    const json = (await rawResult.json()) as {
       data: {
         event_day: string;
         total_first: number;
@@ -1167,3 +1247,113 @@ export class ConversionService {
 }
 
 export const conversionService = new ConversionService(ch);
+
+// MCP-bound instance: queries run on the 5s-capped / read-only chMcp client.
+const conversionServiceMcp = new ConversionService(chMcp);
+
+/**
+ * Headless conversion entry point for the MCP layer (the `*Core` seam).
+ *
+ * Fork-only capability (upstream's MCP has no conversion tool). Wraps THIS
+ * fork's `conversionService.getConversion`, which carries the identity
+ * resolution (#428, device_id → canonical person via profile_aliases) and
+ * routes over the events table (no dropped summary MVs). Takes flat,
+ * LLM-friendly args (a from→to event pair + a date range) and collapses the
+ * per-day series into a single window summary.
+ */
+export async function getConversionCore(input: {
+  projectId: string;
+  startDate: string;
+  endDate: string;
+  steps: string[];
+  windowHours?: number;
+  groupBy?: 'session_id' | 'profile_id';
+  /**
+   * Property to break the conversion down by. Use the bare name for a built-in
+   * column (`country`, `os`, `device`, `path`) or `properties.<key>` for a
+   * custom event property (`properties.gateway`). The engine picks the
+   * materialized column automatically when one exists.
+   */
+  breakdown?: string;
+  /**
+   * Filters applied across the conversion (same shape as dashboard filters).
+   * `name` follows the same bare-column / `properties.<key>` convention.
+   */
+  filters?: Array<{
+    name: string;
+    operator: IChartEventFilter['operator'];
+    value?: (string | number | boolean | null)[];
+  }>;
+}) {
+  // Exactly two: the engine below measures from the first event to the last and
+  // ignores anything in between, so accepting 3+ would silently drop the middle
+  // steps (use get_funnel for multi-step drop-off).
+  if (input.steps.length !== 2) {
+    throw new Error('conversion needs exactly 2 events (from → to)');
+  }
+  // Fail loudly on a mistyped event name (with a "did you mean") instead of
+  // returning a plausible-looking zero-conversion result. MCP-safe (chMcp).
+  await assertEventNamesExist(input.projectId, input.steps);
+  const { timezone } = await getSettingsForProject(input.projectId);
+
+  const series = input.steps.map((name, index) => ({
+    id: String(index + 1),
+    type: 'event' as const,
+    name,
+    displayName: name,
+    segment: 'user' as const,
+    filters: [],
+  }));
+
+  const globalFilters = (input.filters ?? []).map((f, index) => ({
+    id: String(index),
+    name: f.name,
+    operator: f.operator,
+    value: f.value ?? [],
+  }));
+
+  const result = await conversionServiceMcp.getConversion({
+    projectId: input.projectId,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    series,
+    breakdowns: input.breakdown ? [{ id: '0', name: input.breakdown }] : [],
+    globalFilters,
+    interval: 'day',
+    funnelWindow: input.windowHours ?? 24,
+    funnelGroup: input.groupBy ?? 'session_id',
+    timezone,
+  } as unknown as Parameters<typeof conversionService.getConversion>[0]);
+
+  // Each series carries a per-day point list; sum to a window total.
+  const summarize = (data: Array<{ total: number; conversions: number }>) => {
+    const started = data.reduce((sum, d) => sum + (d.total ?? 0), 0);
+    const converted = data.reduce((sum, d) => sum + (d.conversions ?? 0), 0);
+    return {
+      started,
+      converted,
+      conversionRate:
+        started > 0 ? Math.round((converted / started) * 10000) / 100 : 0,
+    };
+  };
+
+  const base = {
+    fromEvent: input.steps[0],
+    toEvent: input.steps[input.steps.length - 1],
+    windowHours: input.windowHours ?? 24,
+  };
+
+  if (!input.breakdown) {
+    return { ...base, ...summarize((result[0]?.data ?? []) as any) };
+  }
+
+  // Breakdown: one summarized row per value, biggest cohort first.
+  const groups = (result as Array<{ breakdowns?: string[]; data: any[] }>)
+    .map((serie) => ({
+      value: serie.breakdowns?.[0] ?? '(not set)',
+      ...summarize(serie.data ?? []),
+    }))
+    .sort((a, b) => b.started - a.started);
+
+  return { ...base, breakdownBy: input.breakdown, groups };
+}

@@ -129,3 +129,46 @@ export const getProjectEventsCount = cacheable(
   getProjectEventsCountUncached,
   60 * 60, // 1 hour cache
 );
+
+/**
+ * Resolve the effective projectId for a client-authenticated request (MCP).
+ *
+ * Ported from upstream. `read` clients are pinned to their own project;
+ * `root` (organization-level) clients must name a projectId per call, which is
+ * validated to belong to their organization.
+ */
+export async function resolveClientProjectId({
+  clientType,
+  clientProjectId,
+  organizationId,
+  inputProjectId,
+}: {
+  clientType: 'read' | 'root';
+  clientProjectId: string | null;
+  organizationId: string;
+  inputProjectId: string | undefined;
+}): Promise<string> {
+  if (clientType !== 'root') {
+    if (!clientProjectId) {
+      throw new Error('Client is not associated with a project');
+    }
+    return clientProjectId;
+  }
+
+  if (!inputProjectId) {
+    throw new Error(
+      'projectId is required when using a root (organization-level) client',
+    );
+  }
+
+  const project = await db.project.findFirst({
+    where: { id: inputProjectId, organizationId },
+    select: { id: true },
+  });
+
+  if (!project) {
+    throw new Error('Project not found or does not belong to your organization');
+  }
+
+  return inputProjectId;
+}

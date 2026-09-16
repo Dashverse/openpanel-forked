@@ -5,7 +5,11 @@ import type { Prisma } from '@openpanel/db';
 import { db } from '@openpanel/db';
 
 import { hashPassword } from '@openpanel/common/server';
-import { getClientAccess } from '../access';
+import {
+  getClientAccess,
+  getOrganizationAccess,
+  getProjectAccess,
+} from '../access';
 import { TRPCAccessError } from '../errors';
 import { createTRPCRouter, protectedProcedure } from '../trpc';
 
@@ -16,10 +20,24 @@ export const clientRouter = createTRPCRouter({
         projectId: z.string(),
       }),
     )
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
+      // Gate by project access — previously any authenticated user could list
+      // any project's clients.
+      const access = await getProjectAccess({
+        userId: ctx.session.userId,
+        projectId: input.projectId,
+      });
+      if (!access) {
+        throw TRPCAccessError('You do not have access to this project');
+      }
+      // Never return the secret column (even hashed) to the client — the
+      // plaintext is shown once at creation and never again.
       return db.client.findMany({
         where: {
           projectId: input.projectId,
+        },
+        omit: {
+          secret: true,
         },
       });
     }),
@@ -58,13 +76,34 @@ export const clientRouter = createTRPCRouter({
         type: z.enum(['read', 'write', 'root']).optional(),
       }),
     )
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      // Must belong to the org (previously unchecked — any authenticated user
+      // could mint a client for any organizationId).
+      const access = await getOrganizationAccess({
+        userId: ctx.session.userId,
+        organizationId: input.organizationId,
+      });
+      if (!access) {
+        throw TRPCAccessError('You do not have access to this organization');
+      }
+
+      // Self-service tokens: any org member can mint their own `read` client
+      // (scoped to a single project, read-only analytics) and `write` client
+      // (ingestion). `root` clients are organization-wide (every project), so
+      // those stay admin-only.
+      const type = input.type ?? 'write';
+      if (type === 'root' && access.role !== 'org:admin') {
+        throw TRPCAccessError(
+          'Only organization admins can create root (organization-wide) MCP clients',
+        );
+      }
+
       const secret = `sec_${crypto.randomBytes(10).toString('hex')}`;
       const data: Prisma.ClientCreateArgs['data'] = {
         organizationId: input.organizationId,
         projectId: input.projectId,
         name: input.name,
-        type: input.type ?? 'write',
+        type,
         secret: await hashPassword(secret),
       };
 

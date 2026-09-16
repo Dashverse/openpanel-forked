@@ -6,7 +6,7 @@ import type {
 } from '@openpanel/validation';
 import { last, reverse, uniq } from 'ramda';
 import sqlstring from 'sqlstring';
-import { ch, formatClickhouseDate } from '../clickhouse/client';
+import { ch, chMcp, formatClickhouseDate } from '../clickhouse/client';
 import {
   TABLE_NAMES,
   getEventsTableForRange,
@@ -23,7 +23,9 @@ import {
   getCohortAlias,
   buildCohortMembershipQuery,
   getMaterializedColumns,
+  assertEventNamesExist,
 } from './chart.service';
+import { getSettingsForProject } from './organization.service';
 import { onlyReportEvents } from './reports.service';
 import {
   getCustomEventByName,
@@ -1057,3 +1059,88 @@ export class FunnelService {
 }
 
 export const funnelService = new FunnelService(ch);
+
+// MCP-bound instance: same logic, but its queries run on the 5s-capped /
+// read-only chMcp client (see getFunnelCore).
+const funnelServiceMcp = new FunnelService(chMcp);
+
+/**
+ * Headless funnel entry point for the MCP layer (the `*Core` seam).
+ *
+ * Ported from upstream `packages/mcp`, re-homed onto THIS fork's
+ * `funnelService.getFunnel` so the numbers carry the fork's identity
+ * resolution (#428: device_id → canonical person). Takes flat, LLM-friendly
+ * args (ordered event names + a date range) and returns a compact,
+ * model-sized summary rather than the full chart payload.
+ */
+export async function getFunnelCore(input: {
+  projectId: string;
+  startDate: string;
+  endDate: string;
+  steps: string[];
+  windowHours?: number;
+  groupBy?: 'session_id' | 'profile_id';
+}) {
+  await assertEventNamesExist(input.projectId, input.steps);
+  const { timezone } = await getSettingsForProject(input.projectId);
+
+  const series = input.steps.map((name, index) => ({
+    id: String(index + 1),
+    type: 'event' as const,
+    name,
+    displayName: name,
+    segment: 'user' as const,
+    filters: [],
+  }));
+
+  const result = await funnelServiceMcp.getFunnel({
+    projectId: input.projectId,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    series,
+    breakdowns: [],
+    chartType: 'funnel',
+    interval: 'day',
+    range: 'custom',
+    previous: false,
+    metric: 'sum',
+    funnelWindow: input.windowHours ?? 24,
+    funnelGroup: input.groupBy ?? 'session_id',
+    timezone,
+  } as unknown as Parameters<typeof funnelService.getFunnel>[0]);
+
+  const primarySeries = result[0];
+  if (!primarySeries) {
+    return {
+      steps: [],
+      totalUsers: 0,
+      completedUsers: 0,
+      overallConversionRate: 0,
+    };
+  }
+
+  const steps = primarySeries.steps.map((step, index) => ({
+    step: index + 1,
+    eventName: step.event.displayName || step.event.name,
+    users: step.count,
+    conversionRateFromStart: Math.round(step.percent * 100) / 100,
+    dropoffPercent:
+      step.dropoffPercent != null
+        ? Math.round(step.dropoffPercent * 100) / 100
+        : null,
+    isHighestDropoff: step.isHighestDropoff,
+  }));
+
+  const totalUsers = steps[0]?.users ?? 0;
+  const completedUsers = steps[steps.length - 1]?.users ?? 0;
+
+  return {
+    steps,
+    totalUsers,
+    completedUsers,
+    overallConversionRate:
+      totalUsers > 0
+        ? Math.round((completedUsers / totalUsers) * 10000) / 100
+        : 0,
+  };
+}

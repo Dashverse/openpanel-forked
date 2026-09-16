@@ -42,6 +42,7 @@ function ProjectDashboard() {
     { id: 'details', label: 'Details' },
     { id: 'events', label: 'Events' },
     { id: 'clients', label: 'Clients' },
+    { id: 'mcp', label: 'MCP' },
     { id: 'imports', label: 'Imports' },
   ];
 
