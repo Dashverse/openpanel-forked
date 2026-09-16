@@ -1365,8 +1365,8 @@ importers:
   packages/queue:
     dependencies:
       '@azure/event-hubs':
-        specifier: ^5.11.0
-        version: 5.12.2
+        specifier: ^6.0.4
+        version: 6.0.4
       '@openpanel/db':
         specifier: workspace:*
         version: link:../db
@@ -1844,9 +1844,9 @@ packages:
     resolution: {integrity: sha512-9n2pWK61veAuN0V20t9lOuoV4CFMdyAZ1ygZzvBGk/pBBJRib/PjL9PLXa/aI2CcPpyHfqVsxxqLCYl6uZlfDw==}
     engines: {node: '>=22.0.0'}
 
-  '@azure/event-hubs@5.12.2':
-    resolution: {integrity: sha512-5YO7QnOAxfgv76JTpemDeQBaGrR01eCTrM4GlVeMCc5skOrShJ7CTYU2d8fSU5Ak3lNjObTDABtSqzxxmeOwSw==}
-    engines: {node: '>=18.0.0'}
+  '@azure/event-hubs@6.0.4':
+    resolution: {integrity: sha512-iP1I3Le8xNi/1z24pIQlZM2sRp/gE4jXxcXtvkYpU4K28FO0p4lu06yz1lFEN2VOh7ycjJNlOUgEaHjqymc7ng==}
+    engines: {node: '>=20.0.0'}
 
   '@azure/logger@1.4.0':
     resolution: {integrity: sha512-rbAE25KUfjU/s3XHUdJgceoCP5dEOpMx85J04kF+QMdta73XkuG9JGHHinch+XIoKpBdqljin+KqURpJriSzLA==}
@@ -2820,6 +2820,7 @@ packages:
 
   '@clickhouse/client-common@1.20.0':
     resolution: {integrity: sha512-s0oDSwxQyJO/Xwne6sNE7xTAlms72Hq2AHzHAB9oSOBfiaXTzQOyHQrhufJ9ldPJTwr4L47/RxG1i6I0I8Xy9A==}
+    deprecated: 'Deprecated: import from @clickhouse/client or @clickhouse/client-web instead.'
 
   '@clickhouse/client@1.20.0':
     resolution: {integrity: sha512-LfHZ9bZZhc7KrNFVa9v73JMqwsP+m/5SgwdKMmxze4Urcw6pE0F7RNog3Lzx3GKRnJr3Hd15uDlIbqaDa9BbgA==}
@@ -5969,6 +5970,7 @@ packages:
   '@opentelemetry/propagation-utils@0.30.11':
     resolution: {integrity: sha512-rY4L/2LWNk5p/22zdunpqVmgz6uN419DsRTw5KFMa6u21tWhXS8devlMy4h8m8nnS20wM7r6yYweCNNKjgLYJw==}
     engines: {node: '>=14'}
+    deprecated: The use of process spans has been removed from Messaging Semantic Conventions. It is now recommended to connect pub/sub spans via Span Links. See https://opentelemetry.io/docs/specs/semconv/messaging/messaging-spans/ for details.
     peerDependencies:
       '@opentelemetry/api': ^1.0.0
 
@@ -6256,12 +6258,15 @@ packages:
 
   '@oslojs/asn1@1.0.0':
     resolution: {integrity: sha512-zw/wn0sj0j0QKbIXfIlnEcTviaCzYOY3V5rAyjR6YtOByFtJiT574+8p9Wlach0lZH9fddD4yb9laEAIl4vXQA==}
+    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   '@oslojs/binary@1.0.0':
     resolution: {integrity: sha512-9RCU6OwXU6p67H4NODbuxv2S3eenuQ4/WFLrsq+K/k682xrznH5EVWA7N4VFk9VYVcbFtKqur5YQQZc0ySGhsQ==}
+    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   '@oslojs/crypto@1.0.1':
     resolution: {integrity: sha512-7n08G8nWjAr/Yu3vu9zzrd0L9XnrJfpMioQcvCMxBIiF5orECHe5/3J0jmXRVvgfqMm/+4oxlQ+Sq39COYLcNQ==}
+    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   '@oslojs/encoding@0.4.1':
     resolution: {integrity: sha512-hkjo6MuIK/kQR5CrGNdAPZhS01ZCXuWDRJ187zh6qqF2+yMHZpD9fAYpX8q2bOO6Ryhl3XpCT6kUX76N8hhm4Q==}
@@ -6271,6 +6276,7 @@ packages:
 
   '@oslojs/jwt@0.2.0':
     resolution: {integrity: sha512-bLE7BtHrURedCn4Mco3ma9L4Y1GR2SMBuIvjWr7rmQ4/W/4Jy70TIAgZ+0nIlk0xHz1vNP8x8DCns45Sb2XRbg==}
+    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   '@oxc-project/types@0.94.0':
     resolution: {integrity: sha512-+UgQT/4o59cZfH6Cp7G0hwmqEQ0wE+AdIwhikdwnhWI9Dp8CgSY081+Q3O67/wq3VJu8mgUEB93J9EHHn70fOw==}
@@ -9589,6 +9595,7 @@ packages:
 
   arctic@2.3.0:
     resolution: {integrity: sha512-ImueY1iKm044nMVxQGsLvzSFLrLsqCIpsvohZprK2l8o3ypXjoSKiMBlxBBdoFpAG0iC78cJ6J/vyLpvdLQlkw==}
+    deprecated: Package no longer supported. Contact Support at https://www.npmjs.com/support for more info.
 
   arg@5.0.2:
     resolution: {integrity: sha512-PYjyFOLKQ9y57JvQ6QLo8dAgNqswh8M1RMJYdQduT6xbWSgK36P/Z/v+p888pM69jMMfS8Xd8F6I1kQ/I9HUGg==}
@@ -10431,6 +10438,7 @@ packages:
   cron-parser@4.9.0:
     resolution: {integrity: sha512-p0SaNjrHOnQeR8/VnfGbmg9te2kfyYSQ7Sc/j/6DtPL3JQvKxmjO9TSjNFpujqV3vEYYBvNNvXSxzyksBWAx1Q==}
     engines: {node: '>=12.0.0'}
+    deprecated: v4 is no longer maintained, upgrade to v5
 
   croner@9.1.0:
     resolution: {integrity: sha512-p9nwwR4qyT5W996vBZhdvBCnMhicY5ytZkR4D1Xj0wuTDEiMnjwR57Q3RXYY/s0EpX6Ay3vgIcfaR+ewGHsi+g==}
@@ -14548,6 +14556,7 @@ packages:
   prom-client@15.1.3:
     resolution: {integrity: sha512-6ZiOBfCywsD4k1BN9IX0uZhF+tJkV8q8llP64G5Hajs4JOeVLPCwpPVcpXy3BwYiUGgyJzsJJQeOIv7+hDSq8g==}
     engines: {node: ^16 || ^18 || >=20}
+    deprecated: prom-client has been replaced by @prometheus-io/client
 
   promise-inflight@1.0.1:
     resolution: {integrity: sha512-6zWPyEOFaQBJYcGMHBKTKJ3u6TBsnMFOIZSa6ce1e/ZrrsOlnHRHbabMjLiBYKp+n44X9eUI6VUPaukCXHuG4g==}
@@ -14750,6 +14759,7 @@ packages:
 
   react-grid-layout@1.5.2:
     resolution: {integrity: sha512-vT7xmQqszTT+sQw/LfisrEO4le1EPNnSEMVHy6sBZyzS3yGkMywdOd+5iEFFwQwt0NSaGkxuRmYwa1JsP6OJdw==}
+    deprecated: 'Ships stray files that were never in the repo: an ip_fetcher binary and its curl-sample source (1.5.0-1.5.3), plus a yarn-error.log containing local paths (1.5.3). Upgrade to 1.5.4, which is byte-identical apart from removing them. See https://github.com/react-grid-layout/react-grid-layout/issues/2269'
     peerDependencies:
       react: '>= 16.3.0'
       react-dom: '>= 16.3.0'
@@ -15016,6 +15026,7 @@ packages:
   recharts@2.15.4:
     resolution: {integrity: sha512-UT/q6fwS3c1dHbXv2uFgYJ9BMFHu3fwnd7AYZaEQhXuYQ4hgsxLvsUXzGdKeZrW5xopzDCvuA2N41WJ88I7zIw==}
     engines: {node: '>=14'}
+    deprecated: 1.x and 2.x branches are no longer active. Bump to Recharts v3 to receive latest features and bugfixes. See https://github.com/recharts/recharts/wiki/3.0-migration-guide
     peerDependencies:
       react: ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
       react-dom: ^16.0.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
@@ -16259,6 +16270,7 @@ packages:
   tsconfck@3.1.5:
     resolution: {integrity: sha512-CLDfGgUp7XPswWnezWwsCRxNmgQjhYq3VXHM0/XIRxhVrKw0M1if9agzryh1QS3nxjCROvV+xWxoJO1YctzzWg==}
     engines: {node: ^18 || >=20}
+    deprecated: unmaintained
     hasBin: true
     peerDependencies:
       typescript: ^5.0.0
@@ -17612,7 +17624,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@azure/event-hubs@5.12.2':
+  '@azure/event-hubs@6.0.4':
     dependencies:
       '@azure/abort-controller': 2.2.0
       '@azure/core-amqp': 4.5.0
@@ -17625,6 +17637,7 @@ snapshots:
       process: 0.11.10
       rhea-promise: 3.0.3
       tslib: 2.8.1
+      util: 0.12.5
     transitivePeerDependencies:
       - supports-color
 
@@ -27902,7 +27915,7 @@ snapshots:
       object.assign: 4.1.5
       regexp.prototype.flags: 1.5.2
       safe-array-concat: 1.1.0
-      safe-regex-test: 1.0.3
+      safe-regex-test: 1.1.0
       string.prototype.trim: 1.2.8
       string.prototype.trimend: 1.0.7
       string.prototype.trimstart: 1.0.7
