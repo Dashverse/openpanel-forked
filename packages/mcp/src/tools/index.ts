@@ -4,6 +4,8 @@ import { registerConversionTools } from './analytics/conversion';
 import { registerDiscoveryTools } from './analytics/discovery';
 import { registerFunnelTools } from './analytics/funnel';
 import { registerIdentityTools } from './analytics/identity';
+import { registerReplayTools } from './analytics/replay';
+import { registerUserTools } from './analytics/user';
 
 /**
  * Tools are added one at a time as each `*Core` seam is re-homed onto the
@@ -20,4 +22,8 @@ export function registerAllTools(
   registerConversionTools(server, context);
   // Identity (fork differentiator)
   registerIdentityTools(server, context);
+  // User-centric: profile, events, sessions, unified journey
+  registerUserTools(server, context);
+  // Session replay links
+  registerReplayTools(server, context);
 }
