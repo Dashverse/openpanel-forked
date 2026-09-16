@@ -6,10 +6,9 @@ import type { McpAuthContext } from '../../auth';
 import {
   projectIdSchema,
   resolveDateRange,
-  
   withErrorHandling,
   zDateRange,
-  resolveProjectId
+  resolveProjectId,
 } from '../shared';
 
 export function registerFunnelTools(
@@ -40,13 +39,20 @@ export function registerFunnelTools(
         ),
       groupBy: z
         .enum(['session_id', 'profile_id'])
-        .default('session_id')
+        .default('profile_id')
         .optional()
         .describe(
-          '"session_id" counts within-session completions, "profile_id" counts cross-session completions (default: session_id)',
+          'How to count: "profile_id" = unique users across sessions (the default, and what the OpenPanel dashboard uses for its "Profile" funnel group — use this to match a dashboard report); "session_id" = within a single visit.',
         ),
     },
-    async ({ projectId: inputProjectId, startDate: sd, endDate: ed, steps, windowHours, groupBy }) =>
+    async ({
+      projectId: inputProjectId,
+      startDate: sd,
+      endDate: ed,
+      steps,
+      windowHours,
+      groupBy,
+    }) =>
       withErrorHandling(async () => {
         const projectId = await resolveProjectId(context, inputProjectId);
         const { startDate, endDate } = resolveDateRange(sd, ed);

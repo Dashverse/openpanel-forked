@@ -1321,7 +1321,7 @@ export async function getConversionCore(input: {
     globalFilters,
     interval: 'day',
     funnelWindow: input.windowHours ?? 24,
-    funnelGroup: input.groupBy ?? 'session_id',
+    funnelGroup: input.groupBy ?? 'profile_id',
     timezone,
   } as unknown as Parameters<typeof conversionService.getConversion>[0]);
 

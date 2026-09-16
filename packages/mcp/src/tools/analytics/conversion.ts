@@ -39,10 +39,10 @@ export function registerConversionTools(
         ),
       groupBy: z
         .enum(['session_id', 'profile_id'])
-        .default('session_id')
+        .default('profile_id')
         .optional()
         .describe(
-          '"session_id" counts within-session conversions, "profile_id" counts cross-session conversions (default: session_id).',
+          'How to count: "profile_id" = unique users across sessions (the default, and what the OpenPanel dashboard uses for its "Profile" funnel group — use this to match a dashboard report); "session_id" = within a single visit.',
         ),
       breakdown: z
         .string()

@@ -97,7 +97,9 @@ export class FunnelService {
         {
           name: event.name,
           projectId,
-          definition: customEvent?.definition ?? { events: [{ name: event.name }] },
+          definition: customEvent?.definition ?? {
+            events: [{ name: event.name }],
+          },
         } as any,
         baseWhere,
         selectColumns,
@@ -186,11 +188,13 @@ export class FunnelService {
     );
 
     const breakdownCols = breakdowns.flatMap((b) => {
-      if (b.cohortId || b.name.startsWith('cohort:') || b.name.startsWith('profile.'))
+      if (
+        b.cohortId ||
+        b.name.startsWith('cohort:') ||
+        b.name.startsWith('profile.')
+      )
         return [];
-      return exprToColumn(
-        getSelectPropertyKey(b.name, projectId, undefined),
-      );
+      return exprToColumn(getSelectPropertyKey(b.name, projectId, undefined));
     });
 
     const holdCols = holdProperties.flatMap((prop) =>
@@ -219,7 +223,10 @@ export class FunnelService {
     ];
   }
 
-  getFunnelConditions(events: IChartEvent[] = [], projectId?: string): string[] {
+  getFunnelConditions(
+    events: IChartEvent[] = [],
+    projectId?: string,
+  ): string[] {
     return events.map((event) => {
       const { sb, getWhere } = createSqlBuilder();
       sb.where = getEventFiltersWhereClause(event.filters, projectId);
@@ -432,7 +439,7 @@ export class FunnelService {
     }
 
     // Merge global filters into each event's filters (same as fetch.ts does for regular charts)
-    const eventSeries = onlyReportEvents(series).map(event => ({
+    const eventSeries = onlyReportEvents(series).map((event) => ({
       ...event,
       filters: [...(event.filters ?? []), ...globalFilters],
     }));
@@ -543,7 +550,9 @@ export class FunnelService {
             operator: f.operator,
             value: f.value,
           }))
-          .sort((a, b) => (a.name + a.operator).localeCompare(b.name + b.operator)),
+          .sort((a, b) =>
+            (a.name + a.operator).localeCompare(b.name + b.operator),
+          ),
       ),
     );
     const allFiltersIdentical = eventFilterSets.every(
@@ -733,7 +742,9 @@ export class FunnelService {
     // membership, which is resolved to the same canonical when resolveAliases is
     // on. When off (session group / dict off), group[0] is the raw profile_id and
     // the membership is raw too — identical to the previous behavior.
-    const cohortJoinKey = resolveAliases ? group[0] : `${fromClause}.profile_id`;
+    const cohortJoinKey = resolveAliases
+      ? group[0]
+      : `${fromClause}.profile_id`;
     cohortIds.forEach((cohortId) => {
       const cohortAlias = getCohortAlias(cohortId);
       const cohortCte = getCohortCteName(cohortId);
@@ -778,7 +789,6 @@ export class FunnelService {
       );
       funnelQuery.with(getCohortCteName(cohortId), cohortQuery);
     });
-
 
     // Register the `filtered_profiles` pre-CTE + WHERE clause when the gate
     // above was satisfied. The funnelCte's main scan becomes
@@ -928,7 +938,9 @@ export class FunnelService {
     // Compute time-to-convert if requested
     if (measuring === 'time_to_convert' && eventSeries.length >= 2) {
       const endDateObj = new Date(endDate);
-      const extendedEndDateObj = new Date(endDateObj.getTime() + funnelWindowSeconds * 1000);
+      const extendedEndDateObj = new Date(
+        endDateObj.getTime() + funnelWindowSeconds * 1000,
+      );
       const extendedEndDate = formatClickhouseDate(extendedEndDateObj);
 
       const firstEvent = eventSeries[0]!;
@@ -938,12 +950,20 @@ export class FunnelService {
       // granules using the sort key before reading other columns (profile_id,
       // properties, …). User-defined filters stay in WHERE — they may reference
       // map / high-cardinality columns where PREWHERE isn't a clear win.
-      const firstEventWhere = firstEvent.filters && firstEvent.filters.length > 0
-        ? '\n          WHERE ' + Object.values(getEventFiltersWhereClause(firstEvent.filters, projectId)).join(' AND ')
-        : '';
-      const lastEventWhere = lastEventItem.filters && lastEventItem.filters.length > 0
-        ? '\n          WHERE ' + Object.values(getEventFiltersWhereClause(lastEventItem.filters, projectId)).join(' AND ')
-        : '';
+      const firstEventWhere =
+        firstEvent.filters && firstEvent.filters.length > 0
+          ? '\n          WHERE ' +
+            Object.values(
+              getEventFiltersWhereClause(firstEvent.filters, projectId),
+            ).join(' AND ')
+          : '';
+      const lastEventWhere =
+        lastEventItem.filters && lastEventItem.filters.length > 0
+          ? '\n          WHERE ' +
+            Object.values(
+              getEventFiltersWhereClause(lastEventItem.filters, projectId),
+            ).join(' AND ')
+          : '';
 
       const toStartOf = clix.toStartOf('fs.first_ts', interval || 'day');
 
@@ -1018,7 +1038,7 @@ export class FunnelService {
         query: ttcQuery,
         clickhouse_settings: { session_timezone: timezone },
       });
-      const ttcJson = await ttcResult.json() as {
+      const ttcJson = (await ttcResult.json()) as {
         data: {
           event_day: string;
           completed_count: number;
@@ -1033,7 +1053,7 @@ export class FunnelService {
         }[];
       };
 
-      const timeToConvert = ttcJson.data.map(d => ({
+      const timeToConvert = ttcJson.data.map((d) => ({
         date: d.event_day,
         completedCount: Number(d.completed_count),
         ttc: {
@@ -1048,7 +1068,7 @@ export class FunnelService {
         },
       }));
 
-      return funnelResult.map(item => ({
+      return funnelResult.map((item) => ({
         ...item,
         timeToConvert,
       }));
@@ -1105,7 +1125,7 @@ export async function getFunnelCore(input: {
     previous: false,
     metric: 'sum',
     funnelWindow: input.windowHours ?? 24,
-    funnelGroup: input.groupBy ?? 'session_id',
+    funnelGroup: input.groupBy ?? 'profile_id',
     timezone,
   } as unknown as Parameters<typeof funnelService.getFunnel>[0]);
 
