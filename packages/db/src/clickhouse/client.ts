@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Readable } from 'node:stream';
 import type { ClickHouseSettings, ResponseJSON } from '@clickhouse/client';
 import { ClickHouseLogLevel, createClient } from '@clickhouse/client';
@@ -520,12 +521,39 @@ export const ch = new Proxy(originalCh, {
   },
 });
 
+/** A ClickHouse client handle (the primary `ch` or the MCP-scoped `chMcp`). */
+export type ChClient = typeof ch;
+
+/**
+ * Request-scoped ClickHouse client override. When code runs inside
+ * `runWithChClient(chMcp, ...)`, every `chQuery`/`chQueryWithMeta` beneath it
+ * (however deeply nested through the services) executes on that client instead
+ * of the primary `ch` — no need to thread a client argument through each call.
+ * The MCP layer uses this so all agent-driven reads run as the read-only
+ * `mcp_ro` user, isolated from dashboard traffic. Empty (→ `ch`) everywhere else.
+ */
+const chClientStore = new AsyncLocalStorage<ChClient>();
+
+/** Run `fn` with `client` as the ambient ClickHouse client for all reads in it. */
+export function runWithChClient<T>(client: ChClient, fn: () => T): T {
+  return chClientStore.run(client, fn);
+}
+
+/** Run `fn` with the read-only MCP client (`chMcp`) as the ambient client. */
+export function runWithMcpClient<T>(fn: () => T): T {
+  return chClientStore.run(chMcp, fn);
+}
+
 export async function chQueryWithMeta<T extends Record<string, any>>(
   query: string,
   clickhouseSettings?: ClickHouseSettings,
   bypassConcurrencyLimit = false,
+  // Explicit client override. Normally left undefined — the client is taken
+  // from the ambient context (`runWithChClient`), falling back to `ch`.
+  client?: ChClient,
 ): Promise<ResponseJSON<T>> {
   const start = Date.now();
+  const activeClient = client ?? chClientStore.getStore() ?? ch;
 
   // Merge settings, allowing higher concurrent query limit for critical operations
   // to prevent profile queries from being blocked by dashboard query limits
@@ -539,7 +567,7 @@ export async function chQueryWithMeta<T extends Record<string, any>>(
       }
     : clickhouseSettings;
 
-  const res = await ch.query({
+  const res = await activeClient.query({
     query,
     clickhouse_settings: finalSettings,
   });
@@ -613,9 +641,15 @@ export async function chQuery<T extends Record<string, any>>(
   query: string,
   clickhouseSettings?: ClickHouseSettings,
   bypassConcurrencyLimit = false,
+  client?: ChClient,
 ): Promise<T[]> {
   return (
-    await chQueryWithMeta<T>(query, clickhouseSettings, bypassConcurrencyLimit)
+    await chQueryWithMeta<T>(
+      query,
+      clickhouseSettings,
+      bypassConcurrencyLimit,
+      client,
+    )
   ).data;
 }
 
