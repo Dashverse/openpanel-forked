@@ -5,7 +5,11 @@ import type { Prisma } from '@openpanel/db';
 import { db } from '@openpanel/db';
 
 import { hashPassword } from '@openpanel/common/server';
-import { getClientAccess, getOrganizationAccess } from '../access';
+import {
+  getClientAccess,
+  getOrganizationAccess,
+  getProjectAccess,
+} from '../access';
 import { TRPCAccessError } from '../errors';
 import { createTRPCRouter, protectedProcedure } from '../trpc';
 
@@ -16,10 +20,24 @@ export const clientRouter = createTRPCRouter({
         projectId: z.string(),
       }),
     )
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
+      // Gate by project access — previously any authenticated user could list
+      // any project's clients.
+      const access = await getProjectAccess({
+        userId: ctx.session.userId,
+        projectId: input.projectId,
+      });
+      if (!access) {
+        throw TRPCAccessError('You do not have access to this project');
+      }
+      // Never return the secret column (even hashed) to the client — the
+      // plaintext is shown once at creation and never again.
       return db.client.findMany({
         where: {
           projectId: input.projectId,
+        },
+        omit: {
+          secret: true,
         },
       });
     }),
@@ -69,12 +87,14 @@ export const clientRouter = createTRPCRouter({
         throw TRPCAccessError('You do not have access to this organization');
       }
 
-      // read/root clients can drive the MCP server (read your analytics) — mint
-      // them admin-only. write clients (ingestion) stay open to any member.
+      // Self-service tokens: any org member can mint their own `read` client
+      // (scoped to a single project, read-only analytics) and `write` client
+      // (ingestion). `root` clients are organization-wide (every project), so
+      // those stay admin-only.
       const type = input.type ?? 'write';
-      if ((type === 'read' || type === 'root') && access.role !== 'org:admin') {
+      if (type === 'root' && access.role !== 'org:admin') {
         throw TRPCAccessError(
-          'Only organization admins can create MCP (read/root) clients',
+          'Only organization admins can create root (organization-wide) MCP clients',
         );
       }
 
