@@ -60,7 +60,10 @@ export async function getEventPropertiesCore(input: {
       GROUP BY property_key ORDER BY distinct_values DESC LIMIT ${limit}`,
     format: 'JSONEachRow',
   });
-  const rows = await res.json<{ property_key: string; distinct_values: string }>();
+  const rows = await res.json<{
+    property_key: string;
+    distinct_values: string;
+  }>();
   return {
     eventName: input.eventName,
     properties: rows.map((r) => ({
@@ -90,7 +93,11 @@ export async function getPropertyValuesCore(input: {
     format: 'JSONEachRow',
   });
   const rows = await res.json<{ value: string }>();
-  return { eventName: input.eventName, property: `properties.${key}`, values: rows.map((r) => r.value) };
+  return {
+    eventName: input.eventName,
+    property: `properties.${key}`,
+    values: rows.map((r) => r.value),
+  };
 }
 
 /**
@@ -120,7 +127,9 @@ export async function resolveIdentityCore(input: {
       WHERE project_id = ${pid} AND profile_id = ${esc(canonical)} LIMIT 100`,
     format: 'JSONEachRow',
   });
-  const aliases = (await aliasRes.json<{ alias: string }>()).map((r) => r.alias);
+  const aliases = (await aliasRes.json<{ alias: string }>()).map(
+    (r) => r.alias,
+  );
 
   return {
     input: input.id,
@@ -221,7 +230,11 @@ export async function getSessionsCore(input: {
 }
 
 /** Build the dashboard deep-link to a session's replay player. */
-function replayLink(organizationId: string, projectId: string, sessionId: string) {
+function replayLink(
+  organizationId: string,
+  projectId: string,
+  sessionId: string,
+) {
   return `${DASHBOARD_URL}/${organizationId}/${projectId}/session-replays/?session=${sessionId}`;
 }
 
@@ -245,8 +258,19 @@ export async function getSessionReplayCore(input: {
     });
     const has = Number((await res.json<{ c: string }>())[0]?.c ?? 0) > 0;
     return has
-      ? { sessionId: input.sessionId, replayUrl: replayLink(input.organizationId, input.projectId, input.sessionId) }
-      : { sessionId: input.sessionId, replayUrl: null, note: 'No replay recording exists for this session.' };
+      ? {
+          sessionId: input.sessionId,
+          replayUrl: replayLink(
+            input.organizationId,
+            input.projectId,
+            input.sessionId,
+          ),
+        }
+      : {
+          sessionId: input.sessionId,
+          replayUrl: null,
+          note: 'No replay recording exists for this session.',
+        };
   }
 
   // by user: sessions that have a replay
@@ -260,7 +284,7 @@ export async function getSessionReplayCore(input: {
     replays: items.map((s) => ({
       sessionId: s.id,
       startedAt: s.createdAt,
-      durationSeconds: s.duration,
+      durationSeconds: Math.round(s.duration / 1000), // s.duration is ms
       replayUrl: replayLink(input.organizationId, input.projectId, s.id),
     })),
   };
@@ -309,14 +333,22 @@ export async function getUserJourneyCore(input: {
     canonicalProfileId: identity.canonicalProfileId,
     aliases: identity.aliases,
     profile: profile
-      ? { firstName: profile.firstName, email: profile.email, createdAt: profile.createdAt }
+      ? {
+          firstName: profile.firstName,
+          email: profile.email,
+          createdAt: profile.createdAt,
+        }
       : null,
-    sessionCount: sessionRes.items.length,
+    // The count of the most-recent sessions fetched (capped at 25) — NOT the
+    // user's lifetime session total.
+    recentSessionCount: sessionRes.items.length,
     sessions: sessionRes.items.slice(0, 10).map((s) => ({
       sessionId: s.id,
       startedAt: s.createdAt,
-      durationSeconds: s.duration,
-      replayUrl: s.hasReplay ? replayLink(input.organizationId, input.projectId, s.id) : undefined,
+      durationSeconds: Math.round(s.duration / 1000), // s.duration is ms
+      replayUrl: s.hasReplay
+        ? replayLink(input.organizationId, input.projectId, s.id)
+        : undefined,
     })),
     timeline: events.map((e) => ({
       name: e.name,
