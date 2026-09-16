@@ -5,7 +5,7 @@ import type { Prisma } from '@openpanel/db';
 import { db } from '@openpanel/db';
 
 import { hashPassword } from '@openpanel/common/server';
-import { getClientAccess } from '../access';
+import { getClientAccess, getOrganizationAccess } from '../access';
 import { TRPCAccessError } from '../errors';
 import { createTRPCRouter, protectedProcedure } from '../trpc';
 
@@ -58,13 +58,32 @@ export const clientRouter = createTRPCRouter({
         type: z.enum(['read', 'write', 'root']).optional(),
       }),
     )
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      // Must belong to the org (previously unchecked — any authenticated user
+      // could mint a client for any organizationId).
+      const access = await getOrganizationAccess({
+        userId: ctx.session.userId,
+        organizationId: input.organizationId,
+      });
+      if (!access) {
+        throw TRPCAccessError('You do not have access to this organization');
+      }
+
+      // read/root clients can drive the MCP server (read your analytics) — mint
+      // them admin-only. write clients (ingestion) stay open to any member.
+      const type = input.type ?? 'write';
+      if ((type === 'read' || type === 'root') && access.role !== 'org:admin') {
+        throw TRPCAccessError(
+          'Only organization admins can create MCP (read/root) clients',
+        );
+      }
+
       const secret = `sec_${crypto.randomBytes(10).toString('hex')}`;
       const data: Prisma.ClientCreateArgs['data'] = {
         organizationId: input.organizationId,
         projectId: input.projectId,
         name: input.name,
-        type: input.type ?? 'write',
+        type,
         secret: await hashPassword(secret),
       };
 

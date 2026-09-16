@@ -1,3 +1,4 @@
+import { cacheable } from '@openpanel/redis';
 import { uniq } from 'ramda';
 import sqlstring from 'sqlstring';
 
@@ -16,6 +17,7 @@ import { db } from '../../index';
 import {
   TABLE_NAMES,
   aliasResolutionNeedsCte,
+  chQuery,
   formatClickhouseDate,
   getEventsTableForRange,
   resolvedProfileIdSql,
@@ -2004,4 +2006,56 @@ export function getChartPrevStartEndDate({
       .minus({ millisecond: diff.milliseconds })
       .toFormat('yyyy-MM-dd HH:mm:ss'),
   };
+}
+
+/**
+ * All distinct event names for a project. Cached in Redis for 1h because the
+ * distinct-name scan over `distinct_event_names_mv` is ~2s / hundreds of
+ * millions of rows (the MV isn't pre-deduplicated) — far too slow to run on
+ * every query. Paid once per project per hour, then instant.
+ */
+const getProjectEventNamesCached = cacheable(async function getProjectEventNames(
+  projectId: string,
+): Promise<string[]> {
+  const rows = await chQuery<{ name: string }>(
+    `SELECT DISTINCT name FROM ${TABLE_NAMES.event_names_mv}
+     WHERE project_id = ${sqlstring.escape(projectId)}
+     SETTINGS max_execution_time = 10`,
+  );
+  return rows.map((r) => r.name);
+}, 60 * 60);
+
+/**
+ * Validate that event names exist for a project before running a funnel /
+ * conversion query. Without this, a mistyped name (e.g. "show1activated" vs
+ * "show1Activated") silently yields 0 conversions — a plausible-looking wrong
+ * answer, which is the worst failure mode for an LLM-driven tool. Instead we
+ * fail loudly with a case-insensitive "did you mean" suggestion so the agent
+ * self-corrects. Uses the cached name list (no per-call CH cost).
+ */
+export async function assertEventNamesExist(
+  projectId: string,
+  names: string[],
+): Promise<void> {
+  const wanted = Array.from(new Set(names.filter((n) => n && n !== '*')));
+  if (wanted.length === 0) return;
+
+  const known = await getProjectEventNamesCached(projectId);
+  const knownSet = new Set(known);
+  const byLower = new Map(known.map((n) => [n.toLowerCase(), n]));
+
+  const problems = wanted
+    .filter((n) => !knownSet.has(n))
+    .map((n) => {
+      const ci = byLower.get(n.toLowerCase());
+      return ci
+        ? `"${n}" not found — did you mean "${ci}"? (event names are case-sensitive)`
+        : `"${n}" not found`;
+    });
+
+  if (problems.length > 0) {
+    throw new Error(
+      `${problems.join('; ')}. Use get_property_values / the event picker to list valid event names for this project.`,
+    );
+  }
 }

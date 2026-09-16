@@ -1,10 +1,15 @@
 import { NOT_SET_VALUE } from '@openpanel/constants';
-import type { IChartEvent, IChartInput } from '@openpanel/validation';
+import type {
+  IChartEvent,
+  IChartEventFilter,
+  IChartInput,
+} from '@openpanel/validation';
 import { omit } from 'ramda';
 import sqlstring from 'sqlstring';
 import {
   TABLE_NAMES,
   ch,
+  chMcp,
   formatClickhouseDate,
   getEventsTableForRange,
   resolvedPersonIdSql,
@@ -20,6 +25,7 @@ import {
   buildCohortMembershipQuery,
   getMaterializedColumns,
 } from './chart.service';
+import { getSettingsForProject } from './organization.service';
 import { onlyReportEvents } from './reports.service';
 import { getCustomEventByName, expandCustomEventToSQL } from './custom-event.service';
 
@@ -1167,3 +1173,107 @@ export class ConversionService {
 }
 
 export const conversionService = new ConversionService(ch);
+
+// MCP-bound instance: queries run on the 5s-capped / read-only chMcp client.
+const conversionServiceMcp = new ConversionService(chMcp);
+
+/**
+ * Headless conversion entry point for the MCP layer (the `*Core` seam).
+ *
+ * Fork-only capability (upstream's MCP has no conversion tool). Wraps THIS
+ * fork's `conversionService.getConversion`, which carries the identity
+ * resolution (#428, device_id → canonical person via profile_aliases) and
+ * routes over the events table (no dropped summary MVs). Takes flat,
+ * LLM-friendly args (a from→to event pair + a date range) and collapses the
+ * per-day series into a single window summary.
+ */
+export async function getConversionCore(input: {
+  projectId: string;
+  startDate: string;
+  endDate: string;
+  steps: string[];
+  windowHours?: number;
+  groupBy?: 'session_id' | 'profile_id';
+  /**
+   * Property to break the conversion down by. Use the bare name for a built-in
+   * column (`country`, `os`, `device`, `path`) or `properties.<key>` for a
+   * custom event property (`properties.gateway`). The engine picks the
+   * materialized column automatically when one exists.
+   */
+  breakdown?: string;
+  /**
+   * Filters applied across the conversion (same shape as dashboard filters).
+   * `name` follows the same bare-column / `properties.<key>` convention.
+   */
+  filters?: Array<{
+    name: string;
+    operator: IChartEventFilter['operator'];
+    value?: (string | number | boolean | null)[];
+  }>;
+}) {
+  if (input.steps.length < 2) {
+    throw new Error('conversion needs at least 2 events (from → to)');
+  }
+  const { timezone } = await getSettingsForProject(input.projectId);
+
+  const series = input.steps.map((name, index) => ({
+    id: String(index + 1),
+    type: 'event' as const,
+    name,
+    displayName: name,
+    segment: 'user' as const,
+    filters: [],
+  }));
+
+  const globalFilters = (input.filters ?? []).map((f, index) => ({
+    id: String(index),
+    name: f.name,
+    operator: f.operator,
+    value: f.value ?? [],
+  }));
+
+  const result = await conversionServiceMcp.getConversion({
+    projectId: input.projectId,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    series,
+    breakdowns: input.breakdown ? [{ id: '0', name: input.breakdown }] : [],
+    globalFilters,
+    interval: 'day',
+    funnelWindow: input.windowHours ?? 24,
+    funnelGroup: input.groupBy ?? 'session_id',
+    timezone,
+  } as unknown as Parameters<typeof conversionService.getConversion>[0]);
+
+  // Each series carries a per-day point list; sum to a window total.
+  const summarize = (data: Array<{ total: number; conversions: number }>) => {
+    const started = data.reduce((sum, d) => sum + (d.total ?? 0), 0);
+    const converted = data.reduce((sum, d) => sum + (d.conversions ?? 0), 0);
+    return {
+      started,
+      converted,
+      conversionRate:
+        started > 0 ? Math.round((converted / started) * 10000) / 100 : 0,
+    };
+  };
+
+  const base = {
+    fromEvent: input.steps[0],
+    toEvent: input.steps[input.steps.length - 1],
+    windowHours: input.windowHours ?? 24,
+  };
+
+  if (!input.breakdown) {
+    return { ...base, ...summarize((result[0]?.data ?? []) as any) };
+  }
+
+  // Breakdown: one summarized row per value, biggest cohort first.
+  const groups = (result as Array<{ breakdowns?: string[]; data: any[] }>)
+    .map((serie) => ({
+      value: serie.breakdowns?.[0] ?? '(not set)',
+      ...summarize(serie.data ?? []),
+    }))
+    .sort((a, b) => b.started - a.started);
+
+  return { ...base, breakdownBy: input.breakdown, groups };
+}
