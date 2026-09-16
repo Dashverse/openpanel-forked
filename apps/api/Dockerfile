@@ -38,6 +38,7 @@ COPY packages/telemetry/package.json packages/telemetry/
 COPY packages/redis/package.json packages/redis/
 COPY packages/logger/package.json packages/logger/
 COPY packages/common/package.json packages/common/
+COPY packages/mcp/package.json packages/mcp/
 COPY packages/payments/package.json packages/payments/
 COPY packages/sdks/sdk/package.json packages/sdks/sdk/
 COPY packages/constants/package.json packages/constants/
@@ -108,6 +109,7 @@ COPY --from=build /app/packages/telemetry ./packages/telemetry
 COPY --from=build /app/packages/redis ./packages/redis
 COPY --from=build /app/packages/logger ./packages/logger
 COPY --from=build /app/packages/common ./packages/common
+COPY --from=build /app/packages/mcp ./packages/mcp
 COPY --from=build /app/packages/payments ./packages/payments
 COPY --from=build /app/packages/sdks/sdk ./packages/sdks/sdk
 COPY --from=build /app/packages/constants ./packages/constants
