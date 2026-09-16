@@ -220,9 +220,9 @@ export async function getSessionsCore(input: {
   return { sessions: items };
 }
 
-/** Build the dashboard deep-link to a session (its replay player). */
+/** Build the dashboard deep-link to a session's replay player. */
 function replayLink(organizationId: string, projectId: string, sessionId: string) {
-  return `${DASHBOARD_URL}/${organizationId}/${projectId}/sessions/${sessionId}`;
+  return `${DASHBOARD_URL}/${organizationId}/${projectId}/session-replays/?session=${sessionId}`;
 }
 
 /**
