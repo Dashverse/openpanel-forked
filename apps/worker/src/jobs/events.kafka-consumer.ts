@@ -314,44 +314,15 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                 // events that already completed and were marked. Same-key
                 // retries land on the same partition and are serialized in this
                 // per-group loop, so there is no check→mark race between them.
-                // Atomic dedup claim: single-round-trip SET NX EX. Returns
-                // 'OK' if we're the first sight of this event (we own it and
-                // proceed), or null if the key already exists (duplicate,
-                // skip). Replaces the old EXISTS-then-SET pattern which paid
-                // 2× Redis RTT per event; under peak Redis latency those two
-                // sequential awaits compounded and blocked the per-partition
-                // serialized consumer loop → visible consumer lag. Race-safe
-                // (unlike check-then-set) so two workers on the same key can
-                // never both claim.
-                //
-                // At-least-once preserved: if incomingEvent throws below, we
-                // DELETE the key in the catch so a retry re-processes. The
-                // rare-and-double failure of "handler throws AND del also
-                // fails" leaves the key set until DEDUP_TTL_SECONDS expires,
-                // and a retry within that window is silently skipped —
-                // equivalent-severity to the old code where a Redis blip
-                // between EXISTS-false and SET could also drop-then-skip a
-                // retry. There is no ClickHouse-side backstop: event.id is
-                // a fresh uuid (see event.service.ts), so this Redis dedup
-                // IS the only line of defence against retry duplicates.
                 let duplicate = false;
-                let claimed = false;
                 if (dedupKey) {
                   try {
-                    const res = await getRedisEvent().set(
-                      dedupKey,
-                      '1',
-                      'EX',
-                      DEDUP_TTL_SECONDS,
-                      'NX',
-                    );
-                    duplicate = res === null;
-                    claimed = !duplicate;
+                    duplicate = (await getRedisEvent().exists(dedupKey)) === 1;
                   } catch (err) {
                     // Fail OPEN on a dedup-store blip: process the event. At
                     // worst a retry duplicates; we never DROP an event because
                     // Redis hiccuped.
-                    logger.warn('kafka dedup claim failed; processing anyway', {
+                    logger.warn('kafka dedup check failed; processing anyway', {
                       error: err,
                       partition: batch.partition,
                       offset: m.offset,
@@ -368,6 +339,34 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                     kafkaEventsConsumedTotal.inc({
                       partition: String(batch.partition),
                     });
+                    // Mark processed ONLY after success. Fire-and-forget: this
+                    // is best-effort (a failed mark risks a future duplicate,
+                    // never a loss — same as before), and awaiting doubled the
+                    // per-event Redis round-trips (EXISTS check + SET mark).
+                    // Under peak load, Redis latency compounds and blocks the
+                    // per-partition consumer loop → visible as consumer lag.
+                    // Trade-off: a duplicate arriving within the ~ms it takes
+                    // the SET to land in Redis slips through and re-processes.
+                    // SDK/producer retries land seconds later so the race window
+                    // is tiny in practice. Note there is NO ClickHouse-side
+                    // backstop for such a duplicate — event.service.ts sets
+                    // event.id = uuid() (fresh per row, deliberately not
+                    // $insert_id; see the comment there re: session_start
+                    // collision), so ReplacingMergeTree does NOT collapse
+                    // retry duplicates. This Redis dedup is the only line of
+                    // defence against retry duplicates. Not marked on a
+                    // handler throw either, so a retry can re-attempt.
+                    if (dedupKey) {
+                      getRedisEvent()
+                        .set(dedupKey, '1', 'EX', DEDUP_TTL_SECONDS)
+                        .catch((err) => {
+                          logger.warn('kafka dedup mark failed', {
+                            error: err,
+                            partition: batch.partition,
+                            offset: m.offset,
+                          });
+                        });
+                    }
                   } catch (err) {
                     // Match the GroupMQ behaviour: log and ack. At-most-once on
                     // handler exceptions; failures here would otherwise block the
@@ -381,24 +380,6 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                       offset: m.offset,
                       projectId: payload.projectId,
                     });
-                    // Release the dedup claim so a retry re-processes. Fire-
-                    // and-forget: same fail-open discipline as the claim above,
-                    // and we've already thrown/logged. A failed DEL leaves the
-                    // key set for DEDUP_TTL_SECONDS and drops the retry — rare
-                    // (handler-fail + Redis-hiccup at the same instant), same
-                    // shape of loss the old code had when a post-success SET
-                    // occasionally failed.
-                    if (claimed && dedupKey) {
-                      getRedisEvent()
-                        .del(dedupKey)
-                        .catch((delErr) => {
-                          logger.warn('kafka dedup release failed', {
-                            error: delErr,
-                            partition: batch.partition,
-                            offset: m.offset,
-                          });
-                        });
-                    }
                   }
                 }
               }
