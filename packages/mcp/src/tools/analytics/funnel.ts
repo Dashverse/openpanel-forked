@@ -44,6 +44,12 @@ export function registerFunnelTools(
         .describe(
           'How to count: "profile_id" = unique users across sessions (the default, and what the OpenPanel dashboard uses for its "Profile" funnel group — use this to match a dashboard report); "session_id" = within a single visit.',
         ),
+      cohortId: z
+        .string()
+        .optional()
+        .describe(
+          'Optional cohort id (from list_cohorts) to gate the funnel to that audience — only users in the cohort are counted.',
+        ),
     },
     async ({
       projectId: inputProjectId,
@@ -52,6 +58,7 @@ export function registerFunnelTools(
       steps,
       windowHours,
       groupBy,
+      cohortId,
     }) =>
       withErrorHandling(async () => {
         const projectId = await resolveProjectId(context, inputProjectId);
@@ -63,6 +70,7 @@ export function registerFunnelTools(
           steps,
           windowHours,
           groupBy,
+          cohortId,
         });
       }),
   );

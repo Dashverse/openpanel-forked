@@ -1284,6 +1284,12 @@ export async function getConversionCore(input: {
     operator: IChartEventFilter['operator'];
     value?: (string | number | boolean | null)[];
   }>;
+  /**
+   * Optional cohort to gate the conversion by: only users in this cohort are
+   * counted (Mixpanel's "cohort as audience/filter"). Resolves via the same
+   * `inCohort` global-filter path the dashboard uses (membership CTE JOIN).
+   */
+  cohortId?: string;
 }) {
   // Exactly two: the engine below measures from the first event to the last and
   // ignores anything in between, so accepting 3+ would silently drop the middle
@@ -1305,12 +1311,25 @@ export async function getConversionCore(input: {
     filters: [],
   }));
 
-  const globalFilters = (input.filters ?? []).map((f, index) => ({
-    id: String(index),
-    name: f.name,
-    operator: f.operator,
-    value: f.value ?? [],
-  }));
+  const globalFilters = [
+    ...(input.filters ?? []).map((f, index) => ({
+      id: String(index),
+      name: f.name,
+      operator: f.operator,
+      value: f.value ?? [],
+    })),
+    ...(input.cohortId
+      ? [
+          {
+            id: 'cohort',
+            name: 'cohort',
+            operator: 'inCohort' as const,
+            value: [] as string[],
+            cohortId: input.cohortId,
+          },
+        ]
+      : []),
+  ];
 
   const result = await conversionServiceMcp.getConversion({
     projectId: input.projectId,
