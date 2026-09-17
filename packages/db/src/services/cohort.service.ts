@@ -707,3 +707,84 @@ export async function getProfilesInCohort(
   });
   return new Set(profileIds);
 }
+
+/**
+ * List a project's cohorts for the MCP layer (the `*Core` seam).
+ *
+ * Metadata only — reads Postgres (`cohorts` table) and returns the cached
+ * `profileCount` so no ClickHouse compute is triggered. Ordered newest-first.
+ */
+export async function listCohortsCore(input: {
+  projectId: string;
+  limit?: number;
+}) {
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+  const cohorts = await db.cohort.findMany({
+    where: { projectId: input.projectId },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  });
+
+  return {
+    cohorts: cohorts.map((c) => ({
+      id: c.id,
+      name: c.name,
+      description: c.description ?? undefined,
+      // 'event' (did event X) or 'property' (profile attribute).
+      type: (c.definition as CohortDefinition | null)?.type,
+      isStatic: c.isStatic,
+      computeOnDemand: c.computeOnDemand,
+      // Cached count; may be stale (see get_cohort for a fresh count).
+      memberCount: c.profileCount,
+      lastComputedAt: c.lastComputedAt ?? undefined,
+      createdAt: c.createdAt,
+    })),
+  };
+}
+
+/**
+ * One cohort's definition, fresh member count, and a small sample of member
+ * profile ids for the MCP layer (the `*Core` seam).
+ *
+ * Ownership is validated first (project-scoped lookup). The count comes from
+ * `getCohortCount` (cache → ClickHouse `cohort_members` for stored cohorts, or
+ * an on-demand COUNT). The sample comes from `getCohortMembers`. Both resolve
+ * to canonical persons (a user's anonymous + identified ids collapse to one),
+ * so ids match the identity-resolved funnel/conversion/profile tools. All
+ * ClickHouse reads run on the ambient `mcp_ro` client.
+ */
+export async function getCohortCore(input: {
+  projectId: string;
+  cohortId: string;
+  sampleSize?: number;
+}) {
+  const cohort = await db.cohort.findFirst({
+    where: { id: input.cohortId, projectId: input.projectId },
+  });
+  if (!cohort) {
+    throw new Error('Cohort not found');
+  }
+
+  const sampleSize = Math.min(Math.max(input.sampleSize ?? 10, 0), 100);
+  const [memberCount, members] = await Promise.all([
+    getCohortCount(input.cohortId, input.projectId),
+    sampleSize > 0
+      ? getCohortMembers(input.cohortId, input.projectId, { limit: sampleSize })
+      : Promise.resolve({ profileIds: [] as string[], total: 0 }),
+  ]);
+
+  return {
+    id: cohort.id,
+    name: cohort.name,
+    description: cohort.description ?? undefined,
+    type: (cohort.definition as CohortDefinition | null)?.type,
+    isStatic: cohort.isStatic,
+    computeOnDemand: cohort.computeOnDemand,
+    memberCount,
+    definition: cohort.definition,
+    // Canonical person ids — the same identity space as the analytics tools.
+    sampleProfileIds: members.profileIds,
+    createdAt: cohort.createdAt,
+    lastComputedAt: cohort.lastComputedAt ?? undefined,
+  };
+}

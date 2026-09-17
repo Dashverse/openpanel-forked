@@ -1100,6 +1100,12 @@ export async function getFunnelCore(input: {
   steps: string[];
   windowHours?: number;
   groupBy?: 'session_id' | 'profile_id';
+  /**
+   * Optional cohort to gate the funnel by: only users in this cohort are
+   * counted (Mixpanel's "cohort as audience/filter"). Resolves via the same
+   * `inCohort` global-filter path the dashboard uses (membership CTE JOIN).
+   */
+  cohortId?: string;
 }) {
   await assertEventNamesExist(input.projectId, input.steps);
   const { timezone } = await getSettingsForProject(input.projectId);
@@ -1113,12 +1119,25 @@ export async function getFunnelCore(input: {
     filters: [],
   }));
 
+  const globalFilters = input.cohortId
+    ? [
+        {
+          id: 'cohort',
+          name: 'cohort',
+          operator: 'inCohort' as const,
+          value: [] as string[],
+          cohortId: input.cohortId,
+        },
+      ]
+    : [];
+
   const result = await funnelServiceMcp.getFunnel({
     projectId: input.projectId,
     startDate: input.startDate,
     endDate: input.endDate,
     series,
     breakdowns: [],
+    globalFilters,
     chartType: 'funnel',
     interval: 'day',
     range: 'custom',
