@@ -1,4 +1,4 @@
-import { resolveClientProjectId } from '@openpanel/db';
+import { resolveClientProjectId, runWithMcpClient } from '@openpanel/db';
 import { createLogger } from '../logger';
 import { z } from 'zod';
 import type { McpAuthContext } from '../auth';
@@ -344,7 +344,11 @@ export async function withErrorHandling<T>(
   fn: () => Promise<T>,
 ): Promise<{ content: [{ type: 'text'; text: string }]; isError?: boolean }> {
   try {
-    const result = await fn();
+    // Run every tool's DB work with the read-only `mcp_ro` client as the
+    // ambient ClickHouse client, so all reads (however deeply nested through the
+    // services) are isolated from dashboard traffic and attributed to mcp_ro —
+    // without threading a client argument through each service function.
+    const result = await runWithMcpClient(fn);
     return toText(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

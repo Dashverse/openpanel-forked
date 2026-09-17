@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Readable } from 'node:stream';
 import type { ClickHouseSettings, ResponseJSON } from '@clickhouse/client';
 import { ClickHouseLogLevel, createClient } from '@clickhouse/client';
@@ -303,7 +304,7 @@ const mcpQueryTimeoutS = (() => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
 })();
 
-export const chMcp = createClient({
+const originalChMcp = createClient({
   url: process.env.MCP_CLICKHOUSE_URL || process.env.CLICKHOUSE_URL,
   ...CLICKHOUSE_OPTIONS,
   clickhouse_settings: {
@@ -418,114 +419,159 @@ function buildLogComment(): string | undefined {
   return JSON.stringify(payload);
 }
 
-export const ch = new Proxy(originalCh, {
-  get(target, property, receiver) {
-    const value = Reflect.get(target, property, receiver);
+/**
+ * Wrap a raw ClickHouse client with retry + OTel spans + log_comment trace
+ * injection. Applied to BOTH the primary client and the MCP client, so
+ * agent-driven MCP reads get the same resilience/observability as dashboard
+ * reads instead of hitting the raw client on the first transient failure.
+ */
+function instrumentClient<T extends object>(base: T): T {
+  return new Proxy(base, {
+    get(target, property, receiver) {
+      // biome-ignore lint/suspicious/noExplicitAny: proxied client methods are dynamically dispatched
+      const value = Reflect.get(target, property, receiver) as any;
 
-    if (property === 'insert') {
-      return (...args: any[]) =>
-        withSpan(
-          'ch.insert',
-          {
-            attributes: {
-              'db.system': 'clickhouse',
-              'db.operation': 'insert',
-              'db.clickhouse.table': args[0]?.table ?? 'unknown',
-              'db.clickhouse.format': args[0]?.format ?? 'JSONEachRow',
+      if (property === 'insert') {
+        return (...args: any[]) =>
+          withSpan(
+            'ch.insert',
+            {
+              attributes: {
+                'db.system': 'clickhouse',
+                'db.operation': 'insert',
+                'db.clickhouse.table': args[0]?.table ?? 'unknown',
+                'db.clickhouse.format': args[0]?.format ?? 'JSONEachRow',
+              },
             },
-          },
-          () =>
-            withRetry(() => {
-              const logComment = buildLogComment();
-              args[0].clickhouse_settings = {
-                // Increase insert timeouts and buffer sizes for large batches
-                max_execution_time: 300,
-                max_insert_block_size: '500000',
-                max_http_get_redirects: '0',
-                // Ensure JSONEachRow stays efficient
-                input_format_parallel_parsing: 1,
-                // Keep long-running inserts/queries from idling out at proxies by sending progress headers
-                send_progress_in_http_headers: 1,
-                http_headers_progress_interval_ms: '50000',
-                // Ensure server holds the connection until the query is finished
-                wait_end_of_query: 1,
-                // Remove concurrent query limit for INSERT operations to prevent blocking
-                // when multiple buffers flush simultaneously
-                max_concurrent_queries_for_user: Number.parseInt(
-                  process.env.CLICKHOUSE_INSERT_QUERY_LIMIT || '50',
-                  10,
-                ),
-                // Stamp the active trace so system.query_log can be joined
-                // back to spans via log_comment. Caller can still override
-                // by setting their own log_comment in clickhouse_settings.
-                ...(logComment ? { log_comment: logComment } : {}),
-                ...args[0].clickhouse_settings,
-              };
-              return value.apply(target, args);
-            }),
-        );
-    }
-
-    if (property === 'query') {
-      return (...args: any[]) =>
-        withSpan(
-          'ch.query',
-          {
-            attributes: {
-              'db.system': 'clickhouse',
-              'db.operation': 'query',
-              'db.statement': truncateStatement(args[0]?.query),
-            },
-          },
-          () =>
-            withRetry(() => {
-              const logComment = buildLogComment();
-              if (logComment && args[0]) {
+            () =>
+              withRetry(() => {
+                const logComment = buildLogComment();
                 args[0].clickhouse_settings = {
-                  log_comment: logComment,
+                  // Increase insert timeouts and buffer sizes for large batches
+                  max_execution_time: 300,
+                  max_insert_block_size: '500000',
+                  max_http_get_redirects: '0',
+                  // Ensure JSONEachRow stays efficient
+                  input_format_parallel_parsing: 1,
+                  // Keep long-running inserts/queries from idling out at proxies by sending progress headers
+                  send_progress_in_http_headers: 1,
+                  http_headers_progress_interval_ms: '50000',
+                  // Ensure server holds the connection until the query is finished
+                  wait_end_of_query: 1,
+                  // Remove concurrent query limit for INSERT operations to prevent blocking
+                  // when multiple buffers flush simultaneously
+                  max_concurrent_queries_for_user: Number.parseInt(
+                    process.env.CLICKHOUSE_INSERT_QUERY_LIMIT || '50',
+                    10,
+                  ),
+                  // Stamp the active trace so system.query_log can be joined
+                  // back to spans via log_comment. Caller can still override
+                  // by setting their own log_comment in clickhouse_settings.
+                  ...(logComment ? { log_comment: logComment } : {}),
                   ...args[0].clickhouse_settings,
                 };
-              }
-              return value.apply(target, args);
-            }),
-        );
-    }
+                return value.apply(target, args);
+              }),
+          );
+      }
 
-    if (property === 'command') {
-      return (...args: any[]) =>
-        withSpan(
-          'ch.command',
-          {
-            attributes: {
-              'db.system': 'clickhouse',
-              'db.operation': 'command',
-              'db.statement': truncateStatement(args[0]?.query),
+      if (property === 'query') {
+        return (...args: any[]) =>
+          withSpan(
+            'ch.query',
+            {
+              attributes: {
+                'db.system': 'clickhouse',
+                'db.operation': 'query',
+                'db.statement': truncateStatement(args[0]?.query),
+              },
             },
-          },
-          () =>
-            withRetry(() => {
-              const logComment = buildLogComment();
-              if (logComment && args[0]) {
-                args[0].clickhouse_settings = {
-                  log_comment: logComment,
-                  ...args[0].clickhouse_settings,
-                };
-              }
-              return value.apply(target, args);
-            }),
-        );
-    }
+            () =>
+              withRetry(() => {
+                const logComment = buildLogComment();
+                if (logComment && args[0]) {
+                  args[0].clickhouse_settings = {
+                    log_comment: logComment,
+                    ...args[0].clickhouse_settings,
+                  };
+                }
+                return value.apply(target, args);
+              }),
+          );
+      }
 
-    return value;
-  },
-});
+      if (property === 'command') {
+        return (...args: any[]) =>
+          withSpan(
+            'ch.command',
+            {
+              attributes: {
+                'db.system': 'clickhouse',
+                'db.operation': 'command',
+                'db.statement': truncateStatement(args[0]?.query),
+              },
+            },
+            () =>
+              withRetry(() => {
+                const logComment = buildLogComment();
+                if (logComment && args[0]) {
+                  args[0].clickhouse_settings = {
+                    log_comment: logComment,
+                    ...args[0].clickhouse_settings,
+                  };
+                }
+                return value.apply(target, args);
+              }),
+          );
+      }
+
+      return value;
+    },
+  }) as T;
+}
+
+export const ch = instrumentClient(originalCh);
+
+/**
+ * MCP-scoped client: read-only `mcp_ro` user + short timeout/result caps (from
+ * originalChMcp), now ALSO wrapped with the same retry/spans/log_comment as
+ * `ch` — so agent reads routed here don't lose instrumentation or retries.
+ */
+export const chMcp = instrumentClient(originalChMcp);
+
+/** A ClickHouse client handle (the primary `ch` or the MCP-scoped `chMcp`). */
+export type ChClient = typeof ch;
+
+/**
+ * Request-scoped ClickHouse client override. When code runs inside
+ * `runWithChClient(chMcp, ...)`, every `chQuery`/`chQueryWithMeta` beneath it
+ * (however deeply nested through the services) executes on that client instead
+ * of the primary `ch` — no need to thread a client argument through each call.
+ * The MCP layer uses this so all agent-driven reads run as the read-only
+ * `mcp_ro` user, isolated from dashboard traffic. Empty (→ `ch`) everywhere else.
+ */
+const chClientStore = new AsyncLocalStorage<ChClient>();
+
+/** Run `fn` with `client` as the ambient ClickHouse client for all reads in it. */
+export function runWithChClient<T>(client: ChClient, fn: () => T): T {
+  return chClientStore.run(client, fn);
+}
+
+/** Run `fn` with the read-only MCP client (`chMcp`) as the ambient client. */
+export function runWithMcpClient<T>(fn: () => T): T {
+  return chClientStore.run(chMcp, fn);
+}
 
 export async function chQueryWithMeta<T extends Record<string, any>>(
   query: string,
   clickhouseSettings?: ClickHouseSettings,
   bypassConcurrencyLimit = false,
+  // Explicit client override. Normally left undefined — the client is taken
+  // from the ambient context (`runWithChClient`), falling back to `ch`.
+  client?: ChClient,
 ): Promise<ResponseJSON<T>> {
   const start = Date.now();
+  const activeClient = client ?? chClientStore.getStore() ?? ch;
 
   // Merge settings, allowing higher concurrent query limit for critical operations
   // to prevent profile queries from being blocked by dashboard query limits
@@ -539,7 +585,7 @@ export async function chQueryWithMeta<T extends Record<string, any>>(
       }
     : clickhouseSettings;
 
-  const res = await ch.query({
+  const res = await activeClient.query({
     query,
     clickhouse_settings: finalSettings,
   });
@@ -613,9 +659,15 @@ export async function chQuery<T extends Record<string, any>>(
   query: string,
   clickhouseSettings?: ClickHouseSettings,
   bypassConcurrencyLimit = false,
+  client?: ChClient,
 ): Promise<T[]> {
   return (
-    await chQueryWithMeta<T>(query, clickhouseSettings, bypassConcurrencyLimit)
+    await chQueryWithMeta<T>(
+      query,
+      clickhouseSettings,
+      bypassConcurrencyLimit,
+      client,
+    )
   ).data;
 }
 
