@@ -339,24 +339,33 @@ export async function startKafkaEventsConsumer(): Promise<KafkaConsumerHandle> {
                     kafkaEventsConsumedTotal.inc({
                       partition: String(batch.partition),
                     });
-                    // Mark processed ONLY after success. Best-effort: a failed
-                    // mark risks a future duplicate, never a loss. Not marked on
-                    // a handler throw either, so a retry can re-attempt.
+                    // Mark processed ONLY after success. Fire-and-forget: this
+                    // is best-effort (a failed mark risks a future duplicate,
+                    // never a loss — same as before), and awaiting doubled the
+                    // per-event Redis round-trips (EXISTS check + SET mark).
+                    // Under peak load, Redis latency compounds and blocks the
+                    // per-partition consumer loop → visible as consumer lag.
+                    // Trade-off: a duplicate arriving within the ~ms it takes
+                    // the SET to land in Redis slips through and re-processes.
+                    // SDK/producer retries land seconds later so the race window
+                    // is tiny in practice. Note there is NO ClickHouse-side
+                    // backstop for such a duplicate — event.service.ts sets
+                    // event.id = uuid() (fresh per row, deliberately not
+                    // $insert_id; see the comment there re: session_start
+                    // collision), so ReplacingMergeTree does NOT collapse
+                    // retry duplicates. This Redis dedup is the only line of
+                    // defence against retry duplicates. Not marked on a
+                    // handler throw either, so a retry can re-attempt.
                     if (dedupKey) {
-                      try {
-                        await getRedisEvent().set(
-                          dedupKey,
-                          '1',
-                          'EX',
-                          DEDUP_TTL_SECONDS,
-                        );
-                      } catch (err) {
-                        logger.warn('kafka dedup mark failed', {
-                          error: err,
-                          partition: batch.partition,
-                          offset: m.offset,
+                      getRedisEvent()
+                        .set(dedupKey, '1', 'EX', DEDUP_TTL_SECONDS)
+                        .catch((err) => {
+                          logger.warn('kafka dedup mark failed', {
+                            error: err,
+                            partition: batch.partition,
+                            offset: m.offset,
+                          });
                         });
-                      }
                     }
                   } catch (err) {
                     // Match the GroupMQ behaviour: log and ack. At-most-once on
