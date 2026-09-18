@@ -164,7 +164,15 @@ export async function up() {
       ],
       engine: 'ReplacingMergeTree(created_at)',
       orderBy: ['project_id', 'id'],
-      partitionBy: 'toYYYYMM(created_at)',
+      // NOT toYYYYMM(created_at): `created_at` is the ReplacingMergeTree version
+      // AND profile-buffer rewrites it on every upsert, so a monthly partition
+      // key (a) scatters a profile's versions across months where RMT can never
+      // collapse them, and (b) makes the id point-lookup — which has no date
+      // predicate — a candidate in EVERY partition (cost = parts × granule,
+      // growing monthly). `project_id` is stable per row and is the first
+      // sort-key column, so lookups prune to one partition. See migration 26 and
+      // https://github.com/Openpanel-dev/openpanel/issues/508
+      partitionBy: 'project_id',
       settings: {
         index_granularity: 8192,
       },
