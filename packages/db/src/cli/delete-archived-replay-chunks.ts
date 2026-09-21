@@ -7,8 +7,8 @@
  *
  * For each day that is (a) `status='archived'` in `replay_archive_days`,
  * (b) older than RETAIN_DAYS, and (c) not already `deletedAt`, it RE-VERIFIES
- * FRESH against the blobs — `index >= ch` count AND a content fingerprint on a
- * sample of sessions (CH bytes must equal Blob bytes) — and only then
+ * FRESH against the blobs — a WHOLE-DAY content proof that every chunk still in
+ * CH is present byte-identically in the day's blobs (CH ⊆ blob) — and only then
  * `DROP PARTITION` + stamps `deletedAt`. A day that fails fresh verify is
  * skipped, marked `verify_failed`, and makes the run exit non-zero (alert).
  * The stored `archived` flag is NEVER the gate on its own.
@@ -44,6 +44,11 @@ const RETAIN_DAYS = int('REPLAY_DELETE_RETAIN_DAYS', 30);
 const MAX_DAYS_PER_RUN = int('REPLAY_DELETE_MAX_DAYS_PER_RUN', 5);
 const MAX_EXEC_SEC = int('REPLAY_DELETE_MAX_EXEC_SEC', 1800);
 const LIGHT_MEMORY = int('REPLAY_DELETE_LIGHT_MEMORY_BYTES', 8_000_000_000);
+// Cap CH-side parallelism on the whole-day verify read. Decompressing zstd and
+// hashing a full day's payloads is CPU-heavy; running it unbounded on the shared
+// prod cluster spiked CPU during business hours. 0 = ClickHouse default (all
+// cores). Set a small value (e.g. 4) so an off-peak run stays gentle.
+const MAX_THREADS = int('REPLAY_DELETE_MAX_THREADS', 0);
 // SAFETY DEFAULT: drops nothing unless explicitly set to the string 'false'.
 const DRY_RUN = process.env.REPLAY_DELETE_DRY_RUN !== 'false';
 
@@ -53,6 +58,8 @@ const SETTINGS: ClickHouseSettings = {
   // Blob path contains project_id=<id>; without this CH reads it as a Hive
   // partition and invents a phantom column.
   use_hive_partitioning: 0,
+  // Throttle CPU on the heavy verify read (0 = CH default = all cores).
+  ...(MAX_THREADS > 0 ? { max_threads: MAX_THREADS } : {}),
 };
 
 function log(msg: string): void {
@@ -208,10 +215,15 @@ async function main(): Promise<number> {
     if (!v.ok) {
       log(`  SKIP ${dayStr}: ${v.reason}`);
       failed.push(dayStr);
-      await markVerifyFailed(dayStr, `delete verify failed: ${v.reason}`, {
-        chChunks: v.srcN,
-        blobChunks: v.idxN,
-      }).catch((e) => log(`  WARN: status write failed: ${String(e)}`));
+      // Only mutate the ledger on a real run — a dry-run stays read-only. A
+      // verify_failed day drops out of listDeletableDays, so a dry-run must not
+      // be able to change which days a later real run will consider.
+      if (!DRY_RUN) {
+        await markVerifyFailed(dayStr, `delete verify failed: ${v.reason}`, {
+          chChunks: v.srcN,
+          blobChunks: v.idxN,
+        }).catch((e) => log(`  WARN: status write failed: ${String(e)}`));
+      }
       continue;
     }
     if (DRY_RUN) {
