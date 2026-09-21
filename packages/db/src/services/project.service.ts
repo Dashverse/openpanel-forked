@@ -1,4 +1,5 @@
 import { cacheable, getRedisCache } from '@openpanel/redis';
+import { stampQueryContext } from '@openpanel/telemetry';
 import sqlstring from 'sqlstring';
 import { TABLE_NAMES, chQuery } from '../clickhouse/client';
 import type { Prisma, Project } from '../prisma-client';
@@ -148,27 +149,37 @@ export async function resolveClientProjectId({
   organizationId: string;
   inputProjectId: string | undefined;
 }): Promise<string> {
+  let projectId: string;
   if (clientType !== 'root') {
     if (!clientProjectId) {
       throw new Error('Client is not associated with a project');
     }
-    return clientProjectId;
+    projectId = clientProjectId;
+  } else {
+    if (!inputProjectId) {
+      throw new Error(
+        'projectId is required when using a root (organization-level) client',
+      );
+    }
+
+    const project = await db.project.findFirst({
+      where: { id: inputProjectId, organizationId },
+      select: { id: true },
+    });
+
+    if (!project) {
+      throw new Error(
+        'Project not found or does not belong to your organization',
+      );
+    }
+
+    projectId = inputProjectId;
   }
 
-  if (!inputProjectId) {
-    throw new Error(
-      'projectId is required when using a root (organization-level) client',
-    );
-  }
-
-  const project = await db.project.findFirst({
-    where: { id: inputProjectId, organizationId },
-    select: { id: true },
-  });
-
-  if (!project) {
-    throw new Error('Project not found or does not belong to your organization');
-  }
-
-  return inputProjectId;
+  // Stamp the resolved project onto the active query context so MCP ClickHouse
+  // reads carry project_id in log_comment — including root clients, whose
+  // context has no fixed project until this call resolves it (runWithMcpClient
+  // runs before the tool resolves the project). No-op outside a context scope.
+  stampQueryContext({ project_id: projectId });
+  return projectId;
 }
