@@ -144,12 +144,17 @@ function SortableSeries({
     chartEvent && showFirstTime ? (
       <button
         type="button"
-        title="Only count each user's first-ever occurrence of this event (all-time)"
-        className={cn(
-          'flex h-8 items-center gap-1 rounded-md px-2 text-sm font-medium leading-none transition-colors hover:bg-def-200',
+        aria-pressed={!!chartEvent.firstTime}
+        title={
           chartEvent.firstTime
-            ? 'bg-def-200 text-foreground'
-            : 'text-muted-foreground hover:text-foreground',
+            ? "First time only: on — counting each user's first-ever occurrence of this event (all-time). Click to turn off."
+            : "First time only: off — click to count only each user's first-ever occurrence of this event (all-time)."
+        }
+        className={cn(
+          'flex h-8 items-center gap-1 rounded-md px-2 text-sm font-medium leading-none transition-colors',
+          chartEvent.firstTime
+            ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+            : 'border border-input bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground',
         )}
         onClick={() => {
           dispatch(
