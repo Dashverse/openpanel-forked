@@ -1236,7 +1236,23 @@ export async function getChartSql({
     return sql;
   }
 
-  if (breakdowns.length > 0) {
+  if (breakdowns.length > 0 && firstTimeActive) {
+    // FIRST-TIME single-execution (breakdown). A separate breakdown_totals CTE
+    // would re-run the expensive first-time subquery a THIRD time (top_breakdowns
+    // + main + breakdown_totals). Instead derive the per-breakdown first-time
+    // denominator from the SAME gated main scan via a windowed aggregate, so the
+    // subquery is evaluated only in top_breakdowns + main. The main query groups
+    // by (date, label_1..N); uniqMerge(uniqState(profile_id)) OVER (PARTITION BY
+    // the breakdown keys) collapses those per-(date,breakdown) states back to one
+    // uniq(profile_id) per breakdown value — exactly what breakdown_totals
+    // returned for the top-N values that survive the bar filter (verified against
+    // prod CH). Only these top-N values appear in the main scan, and the bar
+    // filter keeps whole breakdown values, so the per-partition uniq matches.
+    const partitionKeys = breakdowns
+      .map((_, index) => `label_${index + 1}`)
+      .join(', ');
+    sb.select.total_unique_count = `uniqMerge(uniqState(e.profile_id)) OVER (PARTITION BY ${partitionKeys}) as total_count`;
+  } else if (breakdowns.length > 0) {
     const breakdownSelects = breakdowns
       .map((b, index) => {
         const propertyKey = getSelectPropertyKey(
@@ -1300,6 +1316,16 @@ export async function getChartSql({
 
     sb.joins.breakdown_totals = `LEFT JOIN breakdown_totals ON ${joinConditions}`;
     sb.select.total_unique_count = `any(breakdown_totals.total_count) as total_count`;
+  } else if (firstTimeActive) {
+    // FIRST-TIME single-execution (no breakdown). The separate total_unique CTE
+    // would re-run the expensive first-time subquery a SECOND time; derive the
+    // first-time-scoped denominator from the SAME gated main scan via a windowed
+    // aggregate so the subquery runs ONCE (only the main query's IN-set).
+    // uniqMerge(uniqState(profile_id)) OVER () is bit-for-bit uniq(profile_id)
+    // over the gated rows — a merged HLL across the per-bucket states (verified
+    // against prod CH: matches the old total_unique CTE value exactly).
+    sb.select.total_unique_count =
+      'uniqMerge(uniqState(e.profile_id)) OVER () as total_count';
   } else {
     const totalCountWhere = getWhereWithoutBar();
 

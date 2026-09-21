@@ -91,8 +91,18 @@ describe('getChartSql — first time for user', () => {
     expect(sql).toContain('uniq(e.profile_id) as count');
     expect(sql).toContain('(e.profile_id, e.created_at) IN (');
     expect(sql).toContain('argMinIf(e.profile_id, created_at,');
-    // total_unique CTE scans the raw table name and gets its own qualified gate.
-    expect(sql).toContain('(events.profile_id, events.created_at) IN (');
+    // SINGLE-EXECUTION: the expensive first-time subquery must appear EXACTLY
+    // once (only the main query's IN gate). The old separate total_unique CTE
+    // re-ran it a second time; the first-time denominator is now derived from
+    // the same gated scan via a windowed aggregate.
+    expect(subquerySlice(sql)).not.toBe('');
+    expect(sql.split('argMinIf(e.profile_id, created_at,').length - 1).toBe(1);
+    // No second re-scan CTE gated on the raw table name.
+    expect(sql).not.toContain('(events.profile_id, events.created_at) IN (');
+    // First-time-scoped denominator via a window over the single gated scan.
+    expect(sql).toContain(
+      'uniqMerge(uniqState(e.profile_id)) OVER () as total_count',
+    );
     expect(sql).not.toContain('events_daily_stats');
   });
 
