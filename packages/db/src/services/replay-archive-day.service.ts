@@ -139,3 +139,41 @@ export async function markVerifyFailed(
 export function listArchiveDays() {
   return db.replayArchiveDay.findMany({ orderBy: { day: 'desc' } });
 }
+
+/**
+ * Days that are CANDIDATES for CH deletion: recorded `archived`, not yet
+ * `deletedAt`, and older than the retain cutoff. Oldest first. This only lists
+ * candidates — the delete CLI re-verifies each one FRESH before dropping; the
+ * stored `archived` flag is never the deletion gate on its own.
+ */
+export function listDeletableDays(before: Date, limit: number) {
+  return db.replayArchiveDay.findMany({
+    where: { status: 'archived', deletedAt: null, day: { lt: before } },
+    orderBy: { day: 'asc' },
+    take: limit,
+  });
+}
+
+/**
+ * Record that a day's CH partition was dropped. Refreshes verifiedAt (we
+ * re-verified fresh immediately before dropping) and stamps deletedAt. Status
+ * stays 'archived' — the blob is still the record; deletedAt just means "no
+ * longer in the CH hot table".
+ */
+export async function markDeleted(
+  day: string,
+  chChunks: number,
+  blobChunks: number,
+): Promise<void> {
+  const now = new Date();
+  await db.replayArchiveDay.update({
+    where: { day: toDay(day) },
+    data: {
+      deletedAt: now,
+      verifiedAt: now,
+      chChunks: BigInt(chChunks),
+      blobChunks: BigInt(blobChunks),
+      lastRunAt: now,
+    },
+  });
+}
