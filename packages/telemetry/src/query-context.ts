@@ -43,11 +43,23 @@ export function getQueryContext(): QueryContextAttrs {
 // preserve what was already there. So an outer HTTP hook can stamp
 // project_id, and an inner tRPC middleware can add chart_type on top
 // without wiping the project_id.
-export function withQueryContext<T>(
-  attrs: QueryContextAttrs,
-  fn: () => T,
-): T {
+export function withQueryContext<T>(attrs: QueryContextAttrs, fn: () => T): T {
   const existing = getQueryContext();
   const merged: QueryContextAttrs = { ...existing, ...attrs };
   return context.with(context.active().setValue(KEY, merged), fn);
+}
+
+// Imperatively merge attrs into the query context object already active in the
+// surrounding scope, in place. Unlike withQueryContext (which scopes a fresh
+// object to a callback), this lets a value resolved AFTER the scope was entered
+// still reach log_comment for queries fired later in that same scope — e.g. the
+// MCP project id, which is only known once a tool resolves it inside
+// runWithMcpClient's context. No-op when no query context is active (the object
+// returned by getValue is the one withQueryContext stored by reference, so
+// mutating it is visible to every later getQueryContext() read in that scope).
+export function stampQueryContext(attrs: QueryContextAttrs): void {
+  const current = context.active().getValue(KEY) as
+    | QueryContextAttrs
+    | undefined;
+  if (current) Object.assign(current, attrs);
 }

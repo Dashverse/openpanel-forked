@@ -62,19 +62,22 @@ export function registerConversionTools(
       breakdown,
       filters,
     }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getConversionCore({
-          projectId,
-          startDate,
-          endDate,
-          steps,
-          windowHours,
-          groupBy,
-          breakdown,
-          filters,
-        });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getConversionCore({
+            projectId,
+            startDate,
+            endDate,
+            steps,
+            windowHours,
+            groupBy,
+            breakdown,
+            filters,
+          });
+        },
+        { tool: 'get_conversion', context },
+      ),
   );
 }

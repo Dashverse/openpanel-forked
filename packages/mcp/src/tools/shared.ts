@@ -342,13 +342,22 @@ export function toText(data: unknown): {
  */
 export async function withErrorHandling<T>(
   fn: () => Promise<T>,
+  // Attribution for observability. Stamped onto every CH query's log_comment so
+  // MCP traffic is filterable in system.query_log / SigNoz (endpoint = 'mcp',
+  // broken down by tool, client and project). Pass `{ tool, context }` from each
+  // tool registration; omitting it still tags endpoint = 'mcp'.
+  meta?: { tool?: string; context?: McpAuthContext },
 ): Promise<{ content: [{ type: 'text'; text: string }]; isError?: boolean }> {
   try {
     // Run every tool's DB work with the read-only `mcp_ro` client as the
     // ambient ClickHouse client, so all reads (however deeply nested through the
     // services) are isolated from dashboard traffic and attributed to mcp_ro —
     // without threading a client argument through each service function.
-    const result = await runWithMcpClient(fn);
+    const result = await runWithMcpClient(fn, {
+      tool: meta?.tool,
+      clientId: meta?.context?.clientId ?? undefined,
+      projectId: meta?.context?.projectId ?? undefined,
+    });
     return toText(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

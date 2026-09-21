@@ -10,6 +10,7 @@ import {
   currentSpanId,
   currentTraceId,
   getQueryContext,
+  withQueryContext,
   withSpan,
 } from '@openpanel/telemetry';
 import type { IInterval } from '@openpanel/validation';
@@ -557,9 +558,38 @@ export function runWithChClient<T>(client: ChClient, fn: () => T): T {
   return chClientStore.run(client, fn);
 }
 
-/** Run `fn` with the read-only MCP client (`chMcp`) as the ambient client. */
-export function runWithMcpClient<T>(fn: () => T): T {
-  return chClientStore.run(chMcp, fn);
+/**
+ * Optional attribution for MCP reads. Flows into the CH `log_comment` via
+ * `withQueryContext`, so `system.query_log` (and the SigNoz querylog collector)
+ * can isolate MCP traffic by `endpoint = 'mcp'` and break it down by tool
+ * (`chart_type`), client (`user_id`) and project (`project_id`). Without this
+ * the query_log has no way to tell an MCP read apart — `mcp_ro` (the CH user) is
+ * not shipped as a column.
+ */
+export interface McpQueryMeta {
+  /** The MCP tool name, e.g. `get_funnel`. Stamped as `chart_type`. */
+  tool?: string;
+  /** The MCP client id that authenticated the call. Stamped as `user_id`. */
+  clientId?: string;
+  /** The project the tool resolved to. Stamped as `project_id`. */
+  projectId?: string;
+}
+
+/**
+ * Run `fn` with the read-only MCP client (`chMcp`) as the ambient client, and
+ * tag every ClickHouse query it fires with `endpoint = 'mcp'` (plus tool/client/
+ * project when provided) so MCP load is observable in `system.query_log`.
+ */
+export function runWithMcpClient<T>(fn: () => T, meta?: McpQueryMeta): T {
+  return withQueryContext(
+    {
+      endpoint: 'mcp',
+      ...(meta?.tool ? { chart_type: meta.tool } : {}),
+      ...(meta?.clientId ? { user_id: meta.clientId } : {}),
+      ...(meta?.projectId ? { project_id: meta.projectId } : {}),
+    },
+    () => chClientStore.run(chMcp, fn),
+  );
 }
 
 export async function chQueryWithMeta<T extends Record<string, any>>(

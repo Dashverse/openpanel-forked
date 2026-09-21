@@ -53,17 +53,20 @@ export function registerFunnelTools(
       windowHours,
       groupBy,
     }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getFunnelCore({
-          projectId,
-          startDate,
-          endDate,
-          steps,
-          windowHours,
-          groupBy,
-        });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getFunnelCore({
+            projectId,
+            startDate,
+            endDate,
+            steps,
+            windowHours,
+            groupBy,
+          });
+        },
+        { tool: 'get_funnel', context },
+      ),
   );
 }

@@ -30,18 +30,21 @@ export function registerUserTools(server: McpServer, context: McpAuthContext) {
       eventLimit: z.number().int().min(1).max(500).optional(),
     },
     async ({ projectId: p, id, startDate: sd, endDate: ed, eventLimit }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getUserJourneyCore({
-          projectId,
-          organizationId: context.organizationId,
-          id,
-          startDate,
-          endDate,
-          eventLimit,
-        });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getUserJourneyCore({
+            projectId,
+            organizationId: context.organizationId,
+            id,
+            startDate,
+            endDate,
+            eventLimit,
+          });
+        },
+        { tool: 'get_user_journey', context },
+      ),
   );
 
   server.tool(
@@ -52,7 +55,9 @@ export function registerUserTools(server: McpServer, context: McpAuthContext) {
       profileId: z
         .string()
         .optional()
-        .describe('Restrict to one user (any id — resolved + identity-merged).'),
+        .describe(
+          'Restrict to one user (any id — resolved + identity-merged).',
+        ),
       events: z
         .array(z.string())
         .optional()
@@ -60,19 +65,29 @@ export function registerUserTools(server: McpServer, context: McpAuthContext) {
       ...zDateRange,
       limit: z.number().int().min(1).max(500).optional(),
     },
-    async ({ projectId: p, profileId, events, startDate: sd, endDate: ed, limit }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return listEventsCore({
-          projectId,
-          profileId,
-          events,
-          startDate,
-          endDate,
-          limit,
-        });
-      }),
+    async ({
+      projectId: p,
+      profileId,
+      events,
+      startDate: sd,
+      endDate: ed,
+      limit,
+    }) =>
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return listEventsCore({
+            projectId,
+            profileId,
+            events,
+            startDate,
+            endDate,
+            limit,
+          });
+        },
+        { tool: 'list_events', context },
+      ),
   );
 
   server.tool(
@@ -88,19 +103,29 @@ export function registerUserTools(server: McpServer, context: McpAuthContext) {
       ...zDateRange,
       limit: z.number().int().min(1).max(200).optional(),
     },
-    async ({ projectId: p, profileId, onlyReplays, startDate: sd, endDate: ed, limit }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getSessionsCore({
-          projectId,
-          profileId,
-          onlyReplays,
-          startDate,
-          endDate,
-          limit,
-        });
-      }),
+    async ({
+      projectId: p,
+      profileId,
+      onlyReplays,
+      startDate: sd,
+      endDate: ed,
+      limit,
+    }) =>
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getSessionsCore({
+            projectId,
+            profileId,
+            onlyReplays,
+            startDate,
+            endDate,
+            limit,
+          });
+        },
+        { tool: 'get_sessions', context },
+      ),
   );
 
   server.tool(
@@ -111,9 +136,12 @@ export function registerUserTools(server: McpServer, context: McpAuthContext) {
       id: z.string().describe('A profile id or anonymous/device id.'),
     },
     async ({ projectId: p, id }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        return getProfileCore({ projectId, id });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          return getProfileCore({ projectId, id });
+        },
+        { tool: 'get_profile', context },
+      ),
   );
 }

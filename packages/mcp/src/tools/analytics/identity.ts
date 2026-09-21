@@ -3,7 +3,11 @@ import { resolveIdentityCore } from '@openpanel/db';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { McpAuthContext } from '../../auth';
-import { projectIdSchema, resolveProjectId, withErrorHandling } from '../shared';
+import {
+  projectIdSchema,
+  resolveProjectId,
+  withErrorHandling,
+} from '../shared';
 
 /**
  * resolve_identity — fork-only. Maps an anonymous/device id to its canonical
@@ -25,9 +29,12 @@ export function registerIdentityTools(
         .describe('A profile id or an anonymous/device id to resolve.'),
     },
     async ({ projectId: p, id }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        return resolveIdentityCore({ projectId, id });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          return resolveIdentityCore({ projectId, id });
+        },
+        { tool: 'resolve_identity', context },
+      ),
   );
 }
