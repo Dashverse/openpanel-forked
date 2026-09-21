@@ -787,8 +787,16 @@ export async function getChartSql({
   const cohortMetadata = await fetchCohortsMetadata(cohortIds);
 
   // Check if we can use materialized view for fast queries
-  // Custom events cannot use materialized views (for now)
-  if (!customEvent && canUseMaterializedView(event, breakdowns, interval)) {
+  // Custom events cannot use materialized views (for now).
+  // First-time queries must NEVER use the pre-aggregated MV: it counts every
+  // occurrence and has no per-user first-occurrence concept, so it would
+  // silently ignore the firstTime qualifier and return full totals. Fall
+  // through to the regular path where the firstTime subquery is applied.
+  if (
+    !customEvent &&
+    !isFirstTime(event) &&
+    canUseMaterializedView(event, breakdowns, interval)
+  ) {
     return getChartSqlFromMaterializedView({
       event,
       interval,
