@@ -178,6 +178,57 @@ function buildSessionSearchWhere(search: string): string {
 }
 
 /**
+ * Session-id source for "which sessions HAVE a replay", within the `days`
+ * window. When the Azure Blob archive is NOT configured (REPLAY_BLOB_CONN
+ * empty) this is exactly the historical CH-only expression: DISTINCT session_id
+ * from the hot `session_replay_chunks` table. When the archive IS configured we
+ * UNION in the TTL-free `replay_archive_index`, so sessions whose chunks have
+ * been trimmed out of ClickHouse (kept only in the Blob) still enumerate — the
+ * list/count/has-replay flag survive a CH trim. The index is a
+ * ReplacingMergeTree keyed on (project_id, session_id, dt): read it FINAL and
+ * scope on its `dt` (Date) column (chunks scope on `started_at`).
+ */
+function buildReplayPresenceSubquery(projectId: string, days: number): string {
+  const proj = sqlstring.escape(projectId);
+  const chunks = `SELECT DISTINCT session_id
+      FROM ${TABLE_NAMES.session_replay_chunks}
+      WHERE project_id = ${proj}
+        AND started_at > now() - INTERVAL ${days} DAY
+        AND started_at <= now()`;
+  if (!REPLAY_BLOB_CONN) return chunks;
+  return `${chunks}
+      UNION DISTINCT
+      SELECT DISTINCT session_id
+      FROM ${REPLAY_ARCHIVE_INDEX} FINAL
+      WHERE project_id = ${proj}
+        AND dt > today() - ${days}
+        AND dt <= today()`;
+}
+
+/**
+ * DISTINCT day set (column `d`) that actually has replays, within `days` — used
+ * to prune session/event scans to the exact days chunks exist on. Blob OFF →
+ * the historical CH-only day set (`toDate(started_at)` over chunks). Blob ON →
+ * UNION the archived days (`dt` from `replay_archive_index` FINAL), so day-
+ * pruning still covers sessions whose chunks were trimmed from ClickHouse.
+ */
+function buildReplayDaySubquery(projectId: string, days: number): string {
+  const proj = sqlstring.escape(projectId);
+  const chunkDays = `SELECT DISTINCT toDate(started_at) AS d
+        FROM ${TABLE_NAMES.session_replay_chunks}
+        WHERE project_id = ${proj}
+          AND started_at > now() - INTERVAL ${days} DAY
+          AND started_at <= now()`;
+  if (!REPLAY_BLOB_CONN) return chunkDays;
+  return `${chunkDays}
+        UNION DISTINCT
+        SELECT DISTINCT dt AS d
+        FROM ${REPLAY_ARCHIVE_INDEX} FINAL
+        WHERE project_id = ${proj}
+          AND dt > today() - ${days}`;
+}
+
+/**
  * Replay behavior filter — "sessions that HAD an event matching X". Built as an
  * events subquery so it reuses the chart filter model (getEventFiltersWhereClause
  * builds the property WHERE against `events`) and the events sort key
@@ -191,9 +242,6 @@ function buildReplayBehaviorWhere(
   filters?: IChartEventFilter[],
 ): string {
   const proj = sqlstring.escape(projectId);
-  const chunkScope = `project_id = ${proj}
-        AND started_at > now() - INTERVAL ${days} DAY
-        AND started_at <= now()`;
   const conds = [
     `project_id = ${proj}`,
     `created_at > now() - INTERVAL ${days} DAY`,
@@ -201,12 +249,12 @@ function buildReplayBehaviorWhere(
     // data-derived trick as buildHasReplayWhere). Without this a high-frequency
     // event (e.g. showOpen) is scanned across the whole org window (360d, 100M+
     // rows). Replays are sparse/recent, so this cuts it to a handful of days.
+    // The day set includes archived days (replay_archive_index) when the Blob
+    // archive is on, so behavior filters still match sessions CH has trimmed.
     `toDate(created_at) IN (
         SELECT arrayJoin([d - 1, d])
         FROM (
-          SELECT DISTINCT toDate(started_at) AS d
-          FROM ${TABLE_NAMES.session_replay_chunks}
-          WHERE ${chunkScope}
+          ${buildReplayDaySubquery(projectId, days)}
         )
       )`,
   ];
@@ -276,22 +324,14 @@ async function getReplayLookbackDays(projectId: string): Promise<number> {
  * same window the rest of the list uses, kept so the count and list agree.
  */
 function buildHasReplayWhere(projectId: string, days: number): string {
-  const proj = sqlstring.escape(projectId);
-  const scope = `project_id = ${proj}
-        AND started_at > now() - INTERVAL ${days} DAY
-        AND started_at <= now()`;
   return `id IN (
-      SELECT DISTINCT session_id
-      FROM ${TABLE_NAMES.session_replay_chunks}
-      WHERE ${scope}
+      ${buildReplayPresenceSubquery(projectId, days)}
     )
     AND created_at > now() - INTERVAL ${days} DAY
     AND toDate(created_at) IN (
       SELECT arrayJoin([d - 1, d])
       FROM (
-        SELECT DISTINCT toDate(started_at) AS d
-        FROM ${TABLE_NAMES.session_replay_chunks}
-        WHERE ${scope}
+        ${buildReplayDaySubquery(projectId, days)}
       )
     )`;
 }
@@ -1022,13 +1062,25 @@ export async function batchSessionHasReplay(
 ): Promise<Set<string>> {
   if (sessionIds.length === 0) return new Set();
   try {
+    const proj = sqlstring.escape(projectId);
     const inList = sessionIds.map((id) => sqlstring.escape(id)).join(',');
-    const rows = await chQuery<{ session_id: string }>(
-      `SELECT DISTINCT session_id
+    // Blob ON → also consult the TTL-free archive index so sessions whose
+    // chunks have been trimmed from ClickHouse still report hasReplay=true.
+    const sql = REPLAY_BLOB_CONN
+      ? `SELECT DISTINCT session_id
        FROM ${TABLE_NAMES.session_replay_chunks}
-       WHERE project_id = ${sqlstring.escape(projectId)}
-         AND session_id IN (${inList})`,
-    );
+       WHERE project_id = ${proj}
+         AND session_id IN (${inList})
+       UNION DISTINCT
+       SELECT DISTINCT session_id
+       FROM ${REPLAY_ARCHIVE_INDEX} FINAL
+       WHERE project_id = ${proj}
+         AND session_id IN (${inList})`
+      : `SELECT DISTINCT session_id
+       FROM ${TABLE_NAMES.session_replay_chunks}
+       WHERE project_id = ${proj}
+         AND session_id IN (${inList})`;
+    const rows = await chQuery<{ session_id: string }>(sql);
     return new Set(rows.map((r) => r.session_id));
   } catch {
     return new Set();
@@ -1075,12 +1127,27 @@ export async function sessionHasReplay(
   sessionId: string,
   projectId: string,
 ): Promise<boolean> {
-  const rows = await chQuery<{ has: number }>(
-    `SELECT 1 AS has
+  const sid = sqlstring.escape(sessionId);
+  const proj = sqlstring.escape(projectId);
+  // Blob ON → "has replay" = present in the CH hot chunks OR the TTL-free
+  // archive index (so a trimmed-from-CH session still counts as having one).
+  const sql = REPLAY_BLOB_CONN
+    ? `SELECT 1 AS has
      FROM ${TABLE_NAMES.session_replay_chunks}
-     WHERE session_id = ${sqlstring.escape(sessionId)}
-       AND project_id = ${sqlstring.escape(projectId)}
-     LIMIT 1`,
-  );
+     WHERE session_id = ${sid}
+       AND project_id = ${proj}
+     LIMIT 1
+     UNION ALL
+     SELECT 1 AS has
+     FROM ${REPLAY_ARCHIVE_INDEX} FINAL
+     WHERE session_id = ${sid}
+       AND project_id = ${proj}
+     LIMIT 1`
+    : `SELECT 1 AS has
+     FROM ${TABLE_NAMES.session_replay_chunks}
+     WHERE session_id = ${sid}
+       AND project_id = ${proj}
+     LIMIT 1`;
+  const rows = await chQuery<{ has: number }>(sql);
   return rows.length > 0;
 }
