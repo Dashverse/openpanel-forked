@@ -42,7 +42,6 @@ function int(key: string, def: number): number {
 // Keep this many days hot in CH; delete strictly older ones.
 const RETAIN_DAYS = int('REPLAY_DELETE_RETAIN_DAYS', 30);
 const MAX_DAYS_PER_RUN = int('REPLAY_DELETE_MAX_DAYS_PER_RUN', 5);
-const VERIFY_SAMPLE = int('REPLAY_DELETE_VERIFY_SAMPLE', 5);
 const MAX_EXEC_SEC = int('REPLAY_DELETE_MAX_EXEC_SEC', 1800);
 const LIGHT_MEMORY = int('REPLAY_DELETE_LIGHT_MEMORY_BYTES', 8_000_000_000);
 // SAFETY DEFAULT: drops nothing unless explicitly set to the string 'false'.
@@ -64,24 +63,37 @@ function esc(v: string): string {
   return v.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-type Sample = { session_id: string; project_id: string; blob_path: string };
 type VerifyResult = {
   ok: boolean;
   empty?: boolean; // 0 chunks already in CH — nothing to drop, benign skip
-  idxN: number;
-  srcN: number;
+  idxN: number; // replay_archive_index (ledger) chunk count for the day
+  srcN: number; // CH chunk count for the day
+  missing?: number; // CH chunks NOT present byte-identically in the blob
   reason?: string;
 };
 
-// Content fingerprint over the two data columns that always exist. sum() is
-// order-independent, so CH-order vs Blob-order doesn't matter — only the bytes.
-const FP = 'sum(cityHash64(chunk_index, payload)) AS fp';
+/** The day's blob glob — every per-session `native.zst` archived for that day. */
+function dayGlob(dayStr: string): string {
+  return `dt=${dayStr}/**/*.native.zst`;
+}
 
 /**
- * Re-verify a day FRESH, immediately before dropping it: index >= CH count, then
- * a content fingerprint on VERIFY_SAMPLE sessions (CH bytes == Blob bytes). This
- * runs at delete time — the stored `archived` status is only used to pick
- * candidates, never as proof.
+ * Re-verify a day FRESH, immediately before dropping it. The gate is a
+ * WHOLE-DAY content proof read from the blob itself (not the ledger): every
+ * chunk currently in CH must be present byte-identically in the day's blobs.
+ *
+ * Why not a sample: a per-session sample only opens the sampled files, so a
+ * corrupt/missing blob for any un-sampled session (e.g. a large one) would pass
+ * and the CH partition would be dropped → silent data loss. Reading the whole
+ * day's glob (a) opens EVERY archived file, so a missing/unreadable one throws
+ * (404 → non-zero exit) instead of silently reading as empty, and (b) an
+ * all-missing day yields an empty set, so every CH chunk counts as "missing"
+ * and the day fails closed. `cityHash64(payload)` keeps the NOT IN set to a
+ * hash per row (~tens of MB), not the payload (~tens of GB). Because it is a
+ * subset test (CH ⊆ blob), a day whose blob is a legitimate SUPERSET of CH
+ * (chunks CH lost to TTL/merges) still verifies — no false failure on the 90d
+ * TTL boundary. The stored `archived` status only picks candidates, never
+ * proves anything.
  */
 async function verifyForDeletion(
   dayStr: string,
@@ -104,44 +116,46 @@ async function verifyForDeletion(
     // CH partition already empty — nothing to drop. Not a failure.
     return { ok: false, empty: true, idxN, srcN };
   }
+  // Cheap pre-filter from the ledger: if even the recorded archive count is
+  // short of what CH holds, the blob is incomplete — reject before paying for
+  // the whole-day blob read.
   if (idxN < srcN) {
-    return { ok: false, idxN, srcN, reason: `blob INCOMPLETE: index=${idxN} < ch=${srcN}` };
+    return {
+      ok: false,
+      idxN,
+      srcN,
+      reason: `blob INCOMPLETE (ledger): index=${idxN} < ch=${srcN}`,
+    };
   }
-  const samples = await chQuery<Sample>(
-    `SELECT session_id, project_id, blob_path FROM ${INDEX} FINAL
-      WHERE dt = toDate('${dayStr}') AND chunks > 0
-      ORDER BY chunks ASC LIMIT ${VERIFY_SAMPLE}`,
+  // AUTHORITATIVE gate: whole-day CH ⊆ blob content proof (see docstring).
+  const glob = dayGlob(dayStr);
+  const [miss] = await chQuery<{ n: string }>(
+    `SELECT count() AS n FROM ${TABLE}
+      WHERE toYYYYMMDD(started_at) = ${dayInt}
+        AND (session_id, chunk_index, cityHash64(payload)) NOT IN (
+          SELECT session_id, chunk_index, cityHash64(payload)
+          FROM azureBlobStorage(
+            '${CONN}', '${CONTAINER}', '${esc(glob)}', '${FORMAT}', '${COMPRESSION}')
+        )`,
     SETTINGS,
   );
-  if (samples.length === 0) {
-    return { ok: false, idxN, srcN, reason: 'no indexed sessions to fingerprint' };
+  const missing = Number(miss?.n ?? -1);
+  if (!Number.isFinite(missing) || missing < 0) {
+    return { ok: false, idxN, srcN, reason: `unreadable subset count = ${miss?.n}` };
   }
-  for (const s of samples) {
-    const [chRow] = await chQuery<{ fp: string }>(
-      `SELECT ${FP} FROM ${TABLE}
-        WHERE toYYYYMMDD(started_at) = ${dayInt}
-          AND project_id = '${esc(s.project_id)}'
-          AND session_id = '${esc(s.session_id)}'`,
-      SETTINGS,
-    );
-    const [blobRow] = await chQuery<{ fp: string }>(
-      `SELECT ${FP} FROM azureBlobStorage(
-         '${CONN}', '${CONTAINER}', '${esc(s.blob_path)}', '${FORMAT}', '${COMPRESSION}')`,
-      SETTINGS,
-    );
-    if (chRow?.fp == null || String(chRow.fp) !== String(blobRow?.fp)) {
-      return {
-        ok: false,
-        idxN,
-        srcN,
-        reason: `fingerprint MISMATCH session=${s.session_id} ch=${chRow?.fp} blob=${blobRow?.fp}`,
-      };
-    }
+  if (missing !== 0) {
+    return {
+      ok: false,
+      idxN,
+      srcN,
+      missing,
+      reason: `CONTENT MISMATCH: ${missing}/${srcN} CH chunks NOT byte-identical in blob`,
+    };
   }
   log(
-    `  verify ${dayStr}: index=${idxN} ch=${srcN} OK (+${samples.length} content-fingerprint samples)`,
+    `  verify ${dayStr}: ch=${srcN} ledger=${idxN} — whole-day CH⊆blob OK (0 missing)`,
   );
-  return { ok: true, idxN, srcN };
+  return { ok: true, idxN, srcN, missing: 0 };
 }
 
 async function dropPartition(dayInt: number): Promise<void> {
@@ -157,7 +171,7 @@ async function main(): Promise<number> {
   cutoff.setUTCDate(cutoff.getUTCDate() - RETAIN_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
   log(
-    `start dryRun=${DRY_RUN} retainDays=${RETAIN_DAYS} (delete days < ${cutoffStr}) maxDays=${MAX_DAYS_PER_RUN} sample=${VERIFY_SAMPLE}`,
+    `start dryRun=${DRY_RUN} retainDays=${RETAIN_DAYS} (delete days < ${cutoffStr}) maxDays=${MAX_DAYS_PER_RUN} verify=whole-day-CH⊆blob`,
   );
 
   const candidates = await listDeletableDays(cutoff, MAX_DAYS_PER_RUN);
