@@ -177,7 +177,18 @@ async function main(): Promise<number> {
     const v = await verifyForDeletion(dayStr, dayInt);
 
     if (v.empty) {
-      log(`  skip ${dayStr}: CH partition already empty (0 chunks)`);
+      // CH partition is already gone (90d TTL, or a prior manual/interrupted
+      // drop) — the blob is still the record, so stamp the day deleted-from-CH
+      // and move on. Without this the day stays a candidate forever (it is still
+      // `archived` with `deletedAt IS NULL`) and, since each run takes only the
+      // MAX_DAYS_PER_RUN oldest candidates, a backlog of TTL-emptied days sits
+      // permanently at the head of the queue and starves every real deletion.
+      log(`  skip ${dayStr}: CH partition already empty (0 chunks) — marking done`);
+      if (!DRY_RUN) {
+        await markDeleted(dayStr, 0, v.idxN).catch((e) =>
+          log(`  WARN: status write failed on empty-skip: ${String(e)}`),
+        );
+      }
       continue;
     }
     if (!v.ok) {
