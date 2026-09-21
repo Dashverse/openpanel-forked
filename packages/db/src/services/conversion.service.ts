@@ -32,8 +32,31 @@ import {
   getCustomEventByName,
   expandCustomEventToSQL,
 } from './custom-event.service';
+import { buildFirstTimeSubquery } from './first-time.service';
 
 const quoteCol = (col: string) => `\`${col.replace(/^`|`$/g, '')}\``;
+
+/**
+ * Event-property-only filter fragments for the first-time minIf leg (excludes
+ * profile.* / cohort filters, which reference joins the first-time subquery does
+ * not have). Shared by both conversion paths.
+ */
+function firstTimeFilterConditions(
+  event: IChartEvent,
+  projectId: string,
+): string[] {
+  return Object.values(
+    getEventFiltersWhereClause(
+      (event.filters ?? []).filter(
+        (f) =>
+          !f.name.startsWith('profile.') &&
+          f.operator !== 'inCohort' &&
+          f.operator !== 'notInCohort',
+      ),
+      projectId,
+    ),
+  );
+}
 
 export class ConversionService {
   constructor(private client: typeof ch) {}
@@ -141,6 +164,22 @@ export class ConversionService {
       const filterWhere =
         filterClauses.length > 0 ? ' AND ' + filterClauses.join(' AND ') : '';
 
+      // First-time-for-user: restrict this event's rows to each canonical
+      // person's global-first matching occurrence. `endDate` here is already the
+      // extended window for the end-event CTE, so the all-time-first can fall
+      // anywhere in the conversion window. See first-time.service.ts.
+      const firstTimeWhere = event.firstTime
+        ? ` AND (${getEventsTableForRange(startDate)}.profile_id, ${getEventsTableForRange(startDate)}.created_at) IN (${buildFirstTimeSubquery(
+            {
+              projectId,
+              eventName: event.name,
+              startDate,
+              endDate,
+              filterConditions: firstTimeFilterConditions(event, projectId),
+            },
+          )})`
+        : '';
+
       // If any filter references profile.*, join the profiles table inside the CTE.
       // For profile.properties.X paths, extract the specific key as an aliased
       // column rather than pulling the whole `properties` Map — avoids name
@@ -221,7 +260,7 @@ export class ConversionService {
           AND name = '${event.name}'
           AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
           AND created_at <= toDateTime('${formatClickhouseDate(endDate)}')
-        WHERE ${groupCol} != ''${filterWhere}${preFilterCte ? `\n          AND ${preFilterLhs} IN (SELECT ${groupCol} FROM ${preFilterCte})` : ''}
+        WHERE ${groupCol} != ''${filterWhere}${firstTimeWhere}${preFilterCte ? `\n          AND ${preFilterLhs} IN (SELECT ${groupCol} FROM ${preFilterCte})` : ''}
       )`;
     }
   }
@@ -452,6 +491,32 @@ export class ConversionService {
       `${E}.profile_id`,
     );
 
+    // First-time-for-user gates. When set on the from/to event, only that
+    // person's global-first matching occurrence of the event is collected — the
+    // open (first event) and/or finish (last event) arrays are restricted to the
+    // all-time-first row via `(profile_id, created_at) IN (<subquery>)`. Only the
+    // event's own property filters feed the minIf leg. The finish subquery uses
+    // the extended window end so a first finish inside the conversion window
+    // still qualifies. See first-time.service.ts.
+    const firstTimeOpenGate = firstEvent.firstTime
+      ? ` AND (${E}.profile_id, ${E}.created_at) IN (${buildFirstTimeSubquery({
+          projectId,
+          eventName: firstEvent.name,
+          startDate,
+          endDate,
+          filterConditions: firstTimeFilterConditions(firstEvent, projectId),
+        })})`
+      : '';
+    const firstTimeFinishGate = lastEvent.firstTime
+      ? ` AND (${E}.profile_id, ${E}.created_at) IN (${buildFirstTimeSubquery({
+          projectId,
+          eventName: lastEvent.name,
+          startDate,
+          endDate: extendedEndDate,
+          filterConditions: firstTimeFilterConditions(lastEvent, projectId),
+        })})`
+      : '';
+
     // Split-scan breakdown variant. Opens (first event) are grouped per
     // (resolved_pid, b_0) so the breakdown value comes from the START event;
     // finishes (last event) are grouped per user only, so conversion is decided
@@ -476,7 +541,7 @@ export class ConversionService {
           AND name = '${firstNameLiteral}'
           AND created_at >= ${startTs}
           AND created_at <= ${endTs}
-          AND ${E}.profile_id != ''${filteredProfilesJoin}
+          AND ${E}.profile_id != ''${firstTimeOpenGate}${filteredProfilesJoin}
         GROUP BY resolved_pid, b_0
         HAVING length(opens) > 0
       ),
@@ -489,7 +554,7 @@ export class ConversionService {
           AND name = '${lastNameLiteral}'
           AND created_at >= ${startTs}
           AND created_at <= ${extendedEndTs}
-          AND ${E}.profile_id != ''
+          AND ${E}.profile_id != ''${firstTimeFinishGate}
         GROUP BY resolved_pid
       ),
       per_user_per_bucket AS (
@@ -539,11 +604,11 @@ export class ConversionService {
           ${resolvedPid} AS resolved_pid,
           groupArrayIf(
             toDateTime64(created_at, 3),
-            name = '${firstNameLiteral}' AND created_at <= ${endTs}
+            name = '${firstNameLiteral}' AND created_at <= ${endTs}${firstTimeOpenGate}
           ) AS opens,
           groupArrayIf(
             toDateTime64(created_at, 3),
-            name = '${lastNameLiteral}'
+            name = '${lastNameLiteral}'${firstTimeFinishGate}
           ) AS finishes
         FROM ${E}${aliasJoin}
         WHERE project_id = '${projectLiteral}'
@@ -1284,6 +1349,11 @@ export async function getConversionCore(input: {
     operator: IChartEventFilter['operator'];
     value?: (string | number | boolean | null)[];
   }>;
+  /**
+   * Subset of `steps` (event names) to treat as "first time for user": the
+   * from/to event is gated on each user's global-first (all-time) occurrence.
+   */
+  firstTimeSteps?: string[];
 }) {
   // Exactly two: the engine below measures from the first event to the last and
   // ignores anything in between, so accepting 3+ would silently drop the middle
@@ -1296,6 +1366,7 @@ export async function getConversionCore(input: {
   await assertEventNamesExist(input.projectId, input.steps);
   const { timezone } = await getSettingsForProject(input.projectId);
 
+  const firstTimeSet = new Set(input.firstTimeSteps ?? []);
   const series = input.steps.map((name, index) => ({
     id: String(index + 1),
     type: 'event' as const,
@@ -1303,6 +1374,7 @@ export async function getConversionCore(input: {
     displayName: name,
     segment: 'user' as const,
     filters: [],
+    ...(firstTimeSet.has(name) ? { firstTime: true } : {}),
   }));
 
   const globalFilters = (input.filters ?? []).map((f, index) => ({

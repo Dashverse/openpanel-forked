@@ -31,6 +31,7 @@ import {
   getCustomEventByName,
   expandCustomEventToSQL,
 } from './custom-event.service';
+import { buildFirstTimeSubquery } from './first-time.service';
 
 export class FunnelService {
   constructor(private client: typeof ch) {}
@@ -564,6 +565,14 @@ export class FunnelService {
         f.operator !== 'inCohort' &&
         f.operator !== 'notInCohort',
     );
+    // First-time-for-user steps (all-time first). Supported for regular events
+    // only (a custom event has no single name to take an all-time min over) —
+    // custom-event funnels keep the standard behaviour. When present, force the
+    // slow (full-condition) path so the first-time predicate rides inside each
+    // step's windowFunnel condition rather than being stripped by the fast path.
+    const hasFirstTimeStep =
+      withClauses.length === 0 && eventSeries.some((e) => e.firstTime === true);
+
     const canPrefilterUsers =
       allFiltersIdentical &&
       eventFiltersForPrefilter.length > 0 &&
@@ -571,6 +580,7 @@ export class FunnelService {
       holdProperties.length === 0 &&
       cohortIds.length === 0 &&
       !anyFilterOnProfile &&
+      !hasFirstTimeStep &&
       withClauses.length === 0; // no custom-event CTEs
 
     // Determine group column using the actual fromClause (not hardcoded table name)
@@ -596,9 +606,41 @@ export class FunnelService {
     // were the source of the slowdown. The filtered_profiles WHERE narrows
     // input to matching users; windowFunnel only checks step membership by
     // name.
-    const funnelConditions = canPrefilterUsers
+    const funnelConditionsBase = canPrefilterUsers
       ? eventSeries.map((e) => `name = ${sqlstring.escape(e.name)}`)
       : this.getFunnelConditions(eventSeries, projectId);
+
+    // Constrain first-time steps to each person's global-first matching
+    // occurrence of that step's event: `(profile_id, created_at) IN (<all-time
+    // first subquery>)`. The subquery resolves identity itself and emits the raw
+    // (profile_id, created_at) of each surviving person's first event, so the
+    // gate composes with windowFunnel without needing an outer alias join. Only
+    // the event's own property filters feed the minIf leg. See first-time.service.ts.
+    const funnelConditions = hasFirstTimeStep
+      ? funnelConditionsBase.map((cond, i) => {
+          const ev = eventSeries[i];
+          if (!ev?.firstTime || !cond) return cond;
+          const firstTimeFilterConditions = Object.values(
+            getEventFiltersWhereClause(
+              (ev.filters ?? []).filter(
+                (f) =>
+                  !f.name.startsWith('profile.') &&
+                  f.operator !== 'inCohort' &&
+                  f.operator !== 'notInCohort',
+              ),
+              projectId,
+            ),
+          );
+          const sub = buildFirstTimeSubquery({
+            projectId,
+            eventName: ev.name,
+            startDate,
+            endDate,
+            filterConditions: firstTimeFilterConditions,
+          });
+          return `(${cond}) AND (${fromClause}.profile_id, ${fromClause}.created_at) IN (${sub})`;
+        })
+      : funnelConditionsBase;
     const step1Condition = funnelConditions[0];
 
     // Pull breakdown value from step 1's qualifying events only via anyIf().
@@ -1100,10 +1142,16 @@ export async function getFunnelCore(input: {
   steps: string[];
   windowHours?: number;
   groupBy?: 'session_id' | 'profile_id';
+  /**
+   * Subset of `steps` (event names) to treat as "first time for user": that step
+   * matches only at each user's global-first (all-time) occurrence of the event.
+   */
+  firstTimeSteps?: string[];
 }) {
   await assertEventNamesExist(input.projectId, input.steps);
   const { timezone } = await getSettingsForProject(input.projectId);
 
+  const firstTimeSet = new Set(input.firstTimeSteps ?? []);
   const series = input.steps.map((name, index) => ({
     id: String(index + 1),
     type: 'event' as const,
@@ -1111,6 +1159,7 @@ export async function getFunnelCore(input: {
     displayName: name,
     segment: 'user' as const,
     filters: [],
+    ...(firstTimeSet.has(name) ? { firstTime: true } : {}),
   }));
 
   const result = await funnelServiceMcp.getFunnel({

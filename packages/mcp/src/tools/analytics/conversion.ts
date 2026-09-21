@@ -51,6 +51,12 @@ export function registerConversionTools(
           'Optional property to break the conversion rate down by. Returns one rate per value. Built-in column: bare name (e.g. "country"); custom property: "properties.<key>" (e.g. "properties.gateway").',
         ),
       filters: zFilters,
+      firstTimeSteps: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Subset of `steps` (event names) to treat as "first time for user": the from/to event is gated on each user\'s global-first (all-time) occurrence of it. Leave empty for the normal conversion.',
+        ),
     },
     async ({
       projectId: inputProjectId,
@@ -61,6 +67,7 @@ export function registerConversionTools(
       groupBy,
       breakdown,
       filters,
+      firstTimeSteps,
     }) =>
       withErrorHandling(
         async () => {
@@ -75,6 +82,7 @@ export function registerConversionTools(
             groupBy,
             breakdown,
             filters,
+            firstTimeSteps,
           });
         },
         { tool: 'get_conversion', context },

@@ -32,6 +32,7 @@ import {
   expandCustomEventToSQL,
   getCustomEventByName,
 } from './custom-event.service';
+import { buildFirstTimeSubquery, isFirstTime } from './first-time.service';
 
 // Cache for materialized columns mapping
 let materializedColumnsCache: Record<string, string> | null = null;
@@ -584,6 +585,29 @@ function getPerUserChartSql({
   if (event.name !== '*') {
     where.eventName = `name = ${sqlstring.escape(event.name)}`;
   }
+  // First-time-for-user: restrict the per-user CTE (which scans the events table
+  // aliased `e`) to each canonical person's global-first matching occurrence.
+  if (isFirstTime(event) && event.name !== '*') {
+    const firstTimeFilterConditions = Object.values(
+      getEventFiltersWhereClause(
+        (event.filters ?? []).filter(
+          (f: IChartEventFilter) =>
+            !f.name.startsWith('profile.') &&
+            f.operator !== 'inCohort' &&
+            f.operator !== 'notInCohort',
+        ),
+        projectId,
+      ),
+    );
+    const firstTimeSubquery = buildFirstTimeSubquery({
+      projectId,
+      eventName: event.name,
+      startDate: startDate!,
+      endDate: endDate!,
+      filterConditions: firstTimeFilterConditions,
+    });
+    where.firstTime = `(e.profile_id, e.created_at) IN (${firstTimeSubquery})`;
+  }
   if (startDate) {
     where.startDate = `created_at >= toDateTime('${formatClickhouseDate(startDate)}')`;
   }
@@ -863,6 +887,57 @@ export async function getChartSql({
     sb.where.eventName = `name = ${sqlstring.escape(event.name)}`;
   }
 
+  // First-time-for-user (all-time first). Restrict every scan (main query +
+  // top_breakdowns + totals CTEs) to the rows that are each canonical person's
+  // global-first matching occurrence of this event. See first-time.service.ts.
+  //
+  // Only the event property filters feed the minIf leg (global-first-that-matches);
+  // profile.* / cohort filters are user-level and stay on the outer scan. The
+  // gate is a `(profile_id, created_at) IN (...)` tuple — qualified to the local
+  // alias per scan so it stays unambiguous even alongside cohort joins (which
+  // also carry a `profile_id`). Not supported for `*` or custom events (skipped).
+  // `one_event_per_user` builds its own alias-less subquery and returns early
+  // (below), so the `e`-qualified tuple would not resolve there — and the two
+  // are semantically redundant (both collapse to one row per user). Skip.
+  const firstTimeActive =
+    isFirstTime(event) &&
+    !customEvent &&
+    event.name !== '*' &&
+    event.segment !== 'one_event_per_user';
+  let firstTimeSubquery = '';
+  if (firstTimeActive) {
+    const firstTimeFilterConditions = Object.values(
+      getEventFiltersWhereClause(
+        (event.filters ?? []).filter(
+          (f) =>
+            !f.name.startsWith('profile.') &&
+            f.operator !== 'inCohort' &&
+            f.operator !== 'notInCohort',
+        ),
+        projectId,
+      ),
+    );
+    firstTimeSubquery = buildFirstTimeSubquery({
+      projectId,
+      eventName: event.name,
+      startDate: startDate!,
+      endDate: endDate!,
+      filterConditions: firstTimeFilterConditions,
+    });
+    // Main query + top_breakdowns both alias the events table as `e`.
+    sb.where.firstTime = `(e.profile_id, e.created_at) IN (${firstTimeSubquery})`;
+  }
+  // firstTime is removed from getWhereWithoutBar() (see below) so each CTE can
+  // qualify the tuple to its own scan: top_breakdowns aliases `e`, while
+  // breakdown_totals / total_unique scan the raw table name.
+  const firstTimeMainPredicate = firstTimeActive
+    ? ` AND (e.profile_id, e.created_at) IN (${firstTimeSubquery})`
+    : '';
+  const firstTimeTotalsPredicate = (dataSource: string): string =>
+    firstTimeActive
+      ? ` AND (${dataSource}.profile_id, ${dataSource}.created_at) IN (${firstTimeSubquery})`
+      : '';
+
   const anyFilterOnProfile = event.filters.some((filter) =>
     filter.name.startsWith('profile.'),
   );
@@ -875,6 +950,10 @@ export async function getChartSql({
   const getWhereWithoutBar = () => {
     const whereWithoutBar = { ...sb.where };
     delete whereWithoutBar.bar;
+    // firstTime is injected per-CTE with a scan-local alias (see
+    // firstTimeMainPredicate / firstTimeTotalsPredicate) rather than flowing
+    // here, because the CTEs scan the table under different aliases.
+    delete whereWithoutBar.firstTime;
     return Object.keys(whereWithoutBar).length
       ? `WHERE ${join(whereWithoutBar, ' AND ')}`
       : '';
@@ -1052,7 +1131,7 @@ export async function getChartSql({
       'top_breakdowns',
       `SELECT ${breakdownSelects}
       FROM ${dataSource} AS e
-      ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${cohortJoinsForTop ? `${cohortJoinsForTop} ` : ''}${getWhereWithoutBar()}
+      ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${cohortJoinsForTop ? `${cohortJoinsForTop} ` : ''}${getWhereWithoutBar()}${firstTimeMainPredicate}
       GROUP BY ${breakdownSelects}
       ORDER BY ${orderByCount} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
       LIMIT ${limit}`,
@@ -1195,7 +1274,7 @@ export async function getChartSql({
         ${breakdownSelects},
         uniq(${dataSourceForBreakdown}.profile_id) as total_count
        FROM ${dataSourceForBreakdown}
-       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForBreakdown ? `${cohortJoinsForBreakdown} ` : ''}${totalCountWhere}
+       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForBreakdown ? `${cohortJoinsForBreakdown} ` : ''}${totalCountWhere}${firstTimeTotalsPredicate(dataSourceForBreakdown)}
        GROUP BY ${breakdownGroupBy}`,
     );
 
@@ -1241,7 +1320,7 @@ export async function getChartSql({
       'total_unique',
       `SELECT uniq(${dataSourceForTotal}.profile_id) as total_count
        FROM ${dataSourceForTotal}
-       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForTotal ? `${cohortJoinsForTotal} ` : ''}${totalCountWhere}`,
+       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForTotal ? `${cohortJoinsForTotal} ` : ''}${totalCountWhere}${firstTimeTotalsPredicate(dataSourceForTotal)}`,
     );
 
     // CROSS JOIN (not a scalar subquery) so filter columns inside total_unique
