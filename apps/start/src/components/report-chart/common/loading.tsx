@@ -76,11 +76,11 @@ export function ReportChartLoading({ things }: { things?: boolean }) {
 
         <div
           className={cn(
-            'absolute top-3/4 opacity-0 transition-opacity text-muted-foreground',
+            'absolute top-3/4 opacity-0 transition-opacity text-muted-foreground text-center px-4',
             isSlow && 'opacity-100',
           )}
         >
-          Stay calm, its coming 🙄
+          Hang tight — larger queries can take a few seconds.
         </div>
       </div>
     </div>
