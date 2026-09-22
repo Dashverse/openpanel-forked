@@ -54,6 +54,7 @@ function SortableSeries({
   showAddFilter,
   showPerUser,
   showFirstTime,
+  customEventNames,
   isSelectManyEvents,
   children,
   ...props
@@ -64,6 +65,7 @@ function SortableSeries({
   showAddFilter: boolean;
   showPerUser: boolean;
   showFirstTime: boolean;
+  customEventNames: string[];
   isSelectManyEvents: boolean;
   children: (dragHandle: React.ReactNode) => React.ReactNode;
 } & Omit<React.HTMLAttributes<HTMLDivElement>, 'children'>) {
@@ -140,8 +142,20 @@ function SortableSeries({
   // "First time" (all-time first for user) toggle. When on, only each user's
   // FIRST-EVER occurrence of this event counts (and only if it falls in range
   // and matches the event's filters). Orthogonal to segment / per-user.
+  //
+  // The backend silently ignores firstTime for the any-event selection ('*'),
+  // the one_event_per_user segment, and custom events (see chart.service.ts
+  // firstTimeActive). Only offer the toggle for selections it actually honors so
+  // the UI never shows an on-but-ineffective state. Clearing on switch happens
+  // where the segment/event changes (below).
+  const firstTimeSupported =
+    !!chartEvent &&
+    showFirstTime &&
+    chartEvent.name !== '*' &&
+    chartEvent.segment !== 'one_event_per_user' &&
+    !customEventNames.includes(chartEvent.name);
   const firstTimeButton =
-    chartEvent && showFirstTime ? (
+    chartEvent && firstTimeSupported ? (
       <button
         type="button"
         aria-pressed={!!chartEvent.firstTime}
@@ -186,7 +200,18 @@ function SortableSeries({
                   <ReportSegment
                     value={chartEvent.segment}
                     onChange={(segment) => {
-                      dispatch(changeEvent({ ...chartEvent, segment }));
+                      dispatch(
+                        changeEvent({
+                          ...chartEvent,
+                          segment,
+                          // one_event_per_user is unsupported for firstTime;
+                          // clear a stale true so it doesn't linger.
+                          firstTime:
+                            segment === 'one_event_per_user'
+                              ? undefined
+                              : chartEvent.firstTime,
+                        }),
+                      );
                     }}
                   />
                 )}
@@ -227,6 +252,14 @@ export function ReportSeries() {
   } = useEventNames({
     projectId,
   });
+
+  // Custom-event names (from the event picker list). firstTime is unsupported
+  // for custom events server-side, so the toggle is hidden/cleared for them.
+  const customEventNames = (
+    eventNames as Array<{ name: string; isCustom?: boolean }>
+  )
+    .filter((e) => e?.isCustom)
+    .map((e) => e.name);
 
   // Distribution uses the Per-user picker instead of the segment dropdown.
   const showSegment = !['retention', 'funnel', 'distribution'].includes(
@@ -321,6 +354,7 @@ export function ReportSeries() {
                   showAddFilter={showAddFilter}
                   showPerUser={showPerUser}
                   showFirstTime={showFirstTime}
+                  customEventNames={customEventNames}
                   isSelectManyEvents={isSelectManyEvents}
                   className="rounded-lg border bg-def-100"
                 >
@@ -428,6 +462,18 @@ export function ReportSeries() {
                                       type: 'event',
                                       name: value,
                                       filters: [],
+                                      // Custom events are unsupported for
+                                      // firstTime; clear a stale true when the
+                                      // selection becomes one.
+                                      firstTime: customEventNames.includes(
+                                        value,
+                                      )
+                                        ? undefined
+                                        : (
+                                            event as IChartEventItem & {
+                                              type: 'event';
+                                            }
+                                          ).firstTime,
                                     },
                               ),
                             );
