@@ -7,11 +7,17 @@
  *
  * For each day that is (a) `status='archived'` in `replay_archive_days`,
  * (b) older than RETAIN_DAYS, and (c) not already `deletedAt`, it RE-VERIFIES
- * FRESH against the blobs — a WHOLE-DAY content proof that every chunk still in
- * CH is present byte-identically in the day's blobs (CH ⊆ blob) — and only then
- * `DROP PARTITION` + stamps `deletedAt`. A day that fails fresh verify is
- * skipped, marked `verify_failed`, and makes the run exit non-zero (alert).
- * The stored `archived` flag is NEVER the gate on its own.
+ * FRESH with a ROW-COUNT reconciliation — the archive CATALOG
+ * (replay_archive_index) must hold at least as many chunks as CH still has for
+ * the day (idx >= ch) — and only then `DROP PARTITION` + stamps `deletedAt`.
+ * Byte content is TRUSTED to the archive's own fail-loud write-time verify (it
+ * reads the blobs back — count + sample — when it writes them and only marks a
+ * day `archived` if that passes). We do NOT re-read the blobs here: reading a
+ * whole day back decompresses every payload block and OOMs on large sessions,
+ * and the archive + zstd + Azure checksums already protect the bytes. Accepted
+ * residual: a blob silently corrupted/deleted AFTER archival, which this count
+ * gate can't see. A day that fails the count check is skipped, marked
+ * `verify_failed`, exits non-zero. The `archived` flag only picks candidates.
  *
  * PREREQUISITE (operational, not enforceable here): serving-from-Blob must be
  * LIVE in prod, or a dropped day = blank replays. Keep DRY_RUN until you have
@@ -29,11 +35,8 @@ import {
 } from '../services/replay-archive-day.service';
 
 const CONN = process.env.AZURE_BLOB_CONNECTION_STRING || '';
-const CONTAINER = process.env.REPLAY_ARCHIVE_CONTAINER || 'clickhouse-export';
 const TABLE = 'session_replay_chunks';
 const INDEX = 'replay_archive_index';
-const FORMAT = 'Native';
-const COMPRESSION = 'zstd';
 
 function int(key: string, def: number): number {
   const v = Number.parseInt(process.env[key] ?? '', 10);
@@ -43,64 +46,42 @@ function int(key: string, def: number): number {
 const RETAIN_DAYS = int('REPLAY_DELETE_RETAIN_DAYS', 30);
 const MAX_DAYS_PER_RUN = int('REPLAY_DELETE_MAX_DAYS_PER_RUN', 5);
 const MAX_EXEC_SEC = int('REPLAY_DELETE_MAX_EXEC_SEC', 1800);
-const LIGHT_MEMORY = int('REPLAY_DELETE_LIGHT_MEMORY_BYTES', 8_000_000_000);
-// Cap CH-side parallelism on the whole-day verify read. Decompressing zstd and
-// hashing a full day's payloads is CPU-heavy; running it unbounded on the shared
-// prod cluster spiked CPU during business hours. 0 = ClickHouse default (all
-// cores). Set a small value (e.g. 4) so an off-peak run stays gentle.
-const MAX_THREADS = int('REPLAY_DELETE_MAX_THREADS', 0);
 // SAFETY DEFAULT: drops nothing unless explicitly set to the string 'false'.
 const DRY_RUN = process.env.REPLAY_DELETE_DRY_RUN !== 'false';
 
+// The verify is two cheap COUNT queries (CH partition + archive catalog) with no
+// blob read, so it needs no memory/thread caps.
 const SETTINGS: ClickHouseSettings = {
-  max_memory_usage: String(LIGHT_MEMORY),
   max_execution_time: MAX_EXEC_SEC,
-  // Blob path contains project_id=<id>; without this CH reads it as a Hive
-  // partition and invents a phantom column.
-  use_hive_partitioning: 0,
-  // Throttle CPU on the heavy verify read (0 = CH default = all cores).
-  ...(MAX_THREADS > 0 ? { max_threads: MAX_THREADS } : {}),
 };
 
 function log(msg: string): void {
   // eslint-disable-next-line no-console
   console.log(`[delete-replay] ${msg}`);
 }
-function esc(v: string): string {
-  return v.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-}
 
 type VerifyResult = {
   ok: boolean;
   empty?: boolean; // 0 chunks already in CH — nothing to drop, benign skip
-  idxN: number; // replay_archive_index (ledger) chunk count for the day
+  idxN: number; // replay_archive_index (catalog) chunk count for the day
   srcN: number; // CH chunk count for the day
-  missing?: number; // CH chunks NOT present byte-identically in the blob
   reason?: string;
 };
 
-/** The day's blob glob — every per-session `native.zst` archived for that day. */
-function dayGlob(dayStr: string): string {
-  return `dt=${dayStr}/**/*.native.zst`;
-}
-
 /**
- * Re-verify a day FRESH, immediately before dropping it. The gate is a
- * WHOLE-DAY content proof read from the blob itself (not the ledger): every
- * chunk currently in CH must be present byte-identically in the day's blobs.
+ * Re-verify a day immediately before dropping it, by ROW-COUNT reconciliation
+ * against the archive CATALOG (replay_archive_index): the catalog must hold at
+ * least as many chunks as ClickHouse still has for the day (idx >= ch).
  *
- * Why not a sample: a per-session sample only opens the sampled files, so a
- * corrupt/missing blob for any un-sampled session (e.g. a large one) would pass
- * and the CH partition would be dropped → silent data loss. Reading the whole
- * day's glob (a) opens EVERY archived file, so a missing/unreadable one throws
- * (404 → non-zero exit) instead of silently reading as empty, and (b) an
- * all-missing day yields an empty set, so every CH chunk counts as "missing"
- * and the day fails closed. `cityHash64(payload)` keeps the NOT IN set to a
- * hash per row (~tens of MB), not the payload (~tens of GB). Because it is a
- * subset test (CH ⊆ blob), a day whose blob is a legitimate SUPERSET of CH
- * (chunks CH lost to TTL/merges) still verifies — no false failure on the 90d
- * TTL boundary. The stored `archived` status only picks candidates, never
- * proves anything.
+ * We do NOT re-read the blobs here. Byte content is trusted to the archive's own
+ * fail-loud write-time verify (it reads the blobs back — count + sample — when
+ * it writes them, and only marks a day `archived` if that passes, exiting
+ * non-zero otherwise); zstd and Azure add their own checksums on top. Reading a
+ * whole day back at delete time decompresses every payload block and OOMs on
+ * large sessions, so the count gate is the deliberate, cheap trade. Accepted
+ * residual: a blob silently corrupted/deleted AFTER archival is not detected
+ * here. The stored `archived` status only picks candidates; this fresh count is
+ * the gate.
  */
 async function verifyForDeletion(
   dayStr: string,
@@ -123,46 +104,18 @@ async function verifyForDeletion(
     // CH partition already empty — nothing to drop. Not a failure.
     return { ok: false, empty: true, idxN, srcN };
   }
-  // Cheap pre-filter from the ledger: if even the recorded archive count is
-  // short of what CH holds, the blob is incomplete — reject before paying for
-  // the whole-day blob read.
   if (idxN < srcN) {
+    // Catalog recorded fewer chunks than CH still holds → the archive is
+    // incomplete for this day. Never drop it.
     return {
       ok: false,
       idxN,
       srcN,
-      reason: `blob INCOMPLETE (ledger): index=${idxN} < ch=${srcN}`,
+      reason: `archive INCOMPLETE: catalog=${idxN} < ch=${srcN}`,
     };
   }
-  // AUTHORITATIVE gate: whole-day CH ⊆ blob content proof (see docstring).
-  const glob = dayGlob(dayStr);
-  const [miss] = await chQuery<{ n: string }>(
-    `SELECT count() AS n FROM ${TABLE}
-      WHERE toYYYYMMDD(started_at) = ${dayInt}
-        AND (session_id, chunk_index, cityHash64(payload)) NOT IN (
-          SELECT session_id, chunk_index, cityHash64(payload)
-          FROM azureBlobStorage(
-            '${CONN}', '${CONTAINER}', '${esc(glob)}', '${FORMAT}', '${COMPRESSION}')
-        )`,
-    SETTINGS,
-  );
-  const missing = Number(miss?.n ?? -1);
-  if (!Number.isFinite(missing) || missing < 0) {
-    return { ok: false, idxN, srcN, reason: `unreadable subset count = ${miss?.n}` };
-  }
-  if (missing !== 0) {
-    return {
-      ok: false,
-      idxN,
-      srcN,
-      missing,
-      reason: `CONTENT MISMATCH: ${missing}/${srcN} CH chunks NOT byte-identical in blob`,
-    };
-  }
-  log(
-    `  verify ${dayStr}: ch=${srcN} ledger=${idxN} — whole-day CH⊆blob OK (0 missing)`,
-  );
-  return { ok: true, idxN, srcN, missing: 0 };
+  log(`  verify ${dayStr}: ch=${srcN} catalog=${idxN} — count OK (catalog >= ch)`);
+  return { ok: true, idxN, srcN };
 }
 
 async function dropPartition(dayInt: number): Promise<void> {
@@ -178,7 +131,7 @@ async function main(): Promise<number> {
   cutoff.setUTCDate(cutoff.getUTCDate() - RETAIN_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
   log(
-    `start dryRun=${DRY_RUN} retainDays=${RETAIN_DAYS} (delete days < ${cutoffStr}) maxDays=${MAX_DAYS_PER_RUN} verify=whole-day-CH⊆blob`,
+    `start dryRun=${DRY_RUN} retainDays=${RETAIN_DAYS} (delete days < ${cutoffStr}) maxDays=${MAX_DAYS_PER_RUN} verify=row-count(catalog>=ch)`,
   );
 
   const candidates = await listDeletableDays(cutoff, MAX_DAYS_PER_RUN);
