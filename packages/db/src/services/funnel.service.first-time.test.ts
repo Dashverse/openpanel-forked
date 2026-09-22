@@ -113,6 +113,65 @@ describe('FunnelService.getFunnel — first-time step', () => {
     expect(main).toContain("name = 'purchase'");
   });
 
+  it('rejects a first-time step on a time-to-convert funnel', async () => {
+    const { queries, client } = capturingClient();
+    const service = new FunnelService(client);
+
+    await expect(
+      service.getFunnel({
+        ...baseFunnelInput([
+          {
+            type: 'event',
+            id: '1',
+            name: 'signup',
+            segment: 'user',
+            filters: [],
+            firstTime: true,
+          },
+          {
+            type: 'event',
+            id: '2',
+            name: 'purchase',
+            segment: 'user',
+            filters: [],
+          },
+        ]),
+        measuring: 'time_to_convert',
+      }),
+    ).rejects.toThrow(/first time.*not supported for time-to-convert/i);
+
+    // The guard fires before any query is built/executed.
+    expect(queries.length).toBe(0);
+  });
+
+  it('allows a time-to-convert funnel with no first-time step', async () => {
+    const { queries, client } = capturingClient();
+    const service = new FunnelService(client);
+
+    await service.getFunnel({
+      ...baseFunnelInput([
+        {
+          type: 'event',
+          id: '1',
+          name: 'signup',
+          segment: 'user',
+          filters: [],
+        },
+        {
+          type: 'event',
+          id: '2',
+          name: 'purchase',
+          segment: 'user',
+          filters: [],
+        },
+      ]),
+      measuring: 'time_to_convert',
+    });
+
+    // No throw; the TTC path builds its own step CTEs.
+    expect(queries.some((q) => q.includes('first_step_events'))).toBe(true);
+  });
+
   it('emits no first-time subquery when no step is first-time', async () => {
     const { queries, client } = capturingClient();
     const service = new FunnelService(client);

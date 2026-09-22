@@ -573,6 +573,19 @@ export class FunnelService {
     const hasFirstTimeStep =
       withClauses.length === 0 && eventSeries.some((e) => e.firstTime === true);
 
+    // Time-to-convert builds its own first_step_events / last_step_events CTEs
+    // that key only on event name + date + event filters — they do NOT carry the
+    // first-time (profile_id, created_at) predicate that funnelConditions injects
+    // into the windowFunnel counts. Allowing the combination would return
+    // first-time-qualified step counts alongside unqualified TTC statistics (the
+    // same users, different populations). Reject rather than emit silently-wrong
+    // numbers; no-wrong-data.
+    if (hasFirstTimeStep && measuring === 'time_to_convert') {
+      throw new Error(
+        'The "first time" step qualifier is not supported for time-to-convert funnels. Remove the first-time qualifier or switch the measure to conversion rate.',
+      );
+    }
+
     const canPrefilterUsers =
       allFiltersIdentical &&
       eventFiltersForPrefilter.length > 0 &&
