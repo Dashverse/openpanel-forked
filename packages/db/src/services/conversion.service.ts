@@ -844,11 +844,21 @@ export class ConversionService {
     // an anon-start / identified-end funnel stitches into one user. This is a no-op
     // for projects with no aliases (coalesce keeps the raw id), so it needs no
     // project gating. Profile-level only (session-level already stitches within a
-    // session); skipped for custom events (can't resolve — would mix raw/resolved)
-    // and cohorts (cohort joins match raw profile_id). `al` is pushed first so the
-    // event CTEs can join it.
+    // session); skipped for custom events (can't resolve — would mix raw/resolved).
+    //
+    // Cohorts: keep resolution ON with cohorts WHEN THE DICT IS ON. The cohort
+    // membership CTE already resolves to canonical (buildCohortMembershipQuery
+    // with resolveIdentity=true) and the cohort JOIN keys on se.profile_id, so
+    // se.profile_id must ALSO be canonical or the LEFT ANY JOIN never matches an
+    // anon-start / identified-end person — dropping first-time / cross-identity
+    // rows. With the dict OFF we keep the old raw behavior to avoid reordering the
+    // `al` CTE before the cohort joins. Mirrors funnel.service.ts. `al` is pushed
+    // first so the event CTEs can join it.
     let resolveAliases = false;
-    if (groupCol === 'profile_id' && cohortIds.length === 0) {
+    if (
+      groupCol === 'profile_id' &&
+      (cohortIds.length === 0 || !aliasResolutionNeedsCte())
+    ) {
       const [startCustom, endCustom] = await Promise.all([
         getCustomEventByName(firstEvent.name, projectId),
         getCustomEventByName(lastEvent.name, projectId),
