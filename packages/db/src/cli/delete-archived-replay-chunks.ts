@@ -23,8 +23,8 @@
  * LIVE in prod, or a dropped day = blank replays. Keep DRY_RUN until you have
  * confirmed an old replay actually serves from Blob.
  *
- * Env: CLICKHOUSE_URL, AZURE_BLOB_CONNECTION_STRING, DATABASE_URL (required) +
- * REPLAY_DELETE_* below.
+ * Env: CLICKHOUSE_URL, DATABASE_URL (required) + REPLAY_DELETE_* below.
+ * (No Azure env — the count gate never reads the blob.)
  */
 import type { ClickHouseSettings } from '@clickhouse/client';
 import { ch, chQuery } from '../clickhouse/client';
@@ -34,7 +34,6 @@ import {
   markVerifyFailed,
 } from '../services/replay-archive-day.service';
 
-const CONN = process.env.AZURE_BLOB_CONNECTION_STRING || '';
 const TABLE = 'session_replay_chunks';
 const INDEX = 'replay_archive_index';
 
@@ -126,7 +125,6 @@ async function dropPartition(dayInt: number): Promise<void> {
 }
 
 async function main(): Promise<number> {
-  if (!CONN) throw new Error('AZURE_BLOB_CONNECTION_STRING is required');
   const cutoff = new Date();
   cutoff.setUTCDate(cutoff.getUTCDate() - RETAIN_DAYS);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
