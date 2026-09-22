@@ -13,6 +13,8 @@ export function RefetchingOverlay({ isRefetching }: RefetchingOverlayProps) {
 
   return (
     <div
+      role="status"
+      aria-label="Refreshing chart"
       className={cn(
         'absolute inset-0 z-10 flex items-center justify-center',
         'bg-background/60 backdrop-blur-[1px] rounded',
