@@ -44,6 +44,12 @@ export function registerFunnelTools(
         .describe(
           'How to count: "profile_id" = unique users across sessions (the default, and what the OpenPanel dashboard uses for its "Profile" funnel group — use this to match a dashboard report); "session_id" = within a single visit.',
         ),
+      firstTimeSteps: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Subset of `steps` (event names) to treat as "first time for user": such a step matches only at each user\'s global-first (all-time) occurrence of that event, and only if that first occurrence falls inside the range. Leave empty for the normal funnel.',
+        ),
     },
     async ({
       projectId: inputProjectId,
@@ -52,6 +58,7 @@ export function registerFunnelTools(
       steps,
       windowHours,
       groupBy,
+      firstTimeSteps,
     }) =>
       withErrorHandling(
         async () => {
@@ -64,6 +71,7 @@ export function registerFunnelTools(
             steps,
             windowHours,
             groupBy,
+            firstTimeSteps,
           });
         },
         { tool: 'get_funnel', context },

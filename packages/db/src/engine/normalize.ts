@@ -52,6 +52,8 @@ export async function normalize(
         filters: event.filters ?? [],
         displayName: event.displayName,
         property: event.property,
+        perUser: event.perUser,
+        firstTime: event.firstTime,
       } as SeriesDefinition;
     },
   );

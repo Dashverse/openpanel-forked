@@ -32,6 +32,7 @@ import {
   expandCustomEventToSQL,
   getCustomEventByName,
 } from './custom-event.service';
+import { buildFirstTimeSubquery, isFirstTime } from './first-time.service';
 
 // Cache for materialized columns mapping
 let materializedColumnsCache: Record<string, string> | null = null;
@@ -584,6 +585,29 @@ function getPerUserChartSql({
   if (event.name !== '*') {
     where.eventName = `name = ${sqlstring.escape(event.name)}`;
   }
+  // First-time-for-user: restrict the per-user CTE (which scans the events table
+  // aliased `e`) to each canonical person's global-first matching occurrence.
+  if (isFirstTime(event) && event.name !== '*') {
+    const firstTimeFilterConditions = Object.values(
+      getEventFiltersWhereClause(
+        (event.filters ?? []).filter(
+          (f: IChartEventFilter) =>
+            !f.name.startsWith('profile.') &&
+            f.operator !== 'inCohort' &&
+            f.operator !== 'notInCohort',
+        ),
+        projectId,
+      ),
+    );
+    const firstTimeSubquery = buildFirstTimeSubquery({
+      projectId,
+      eventName: event.name,
+      startDate: startDate!,
+      endDate: endDate!,
+      filterConditions: firstTimeFilterConditions,
+    });
+    where.firstTime = `(e.profile_id, e.created_at) IN (${firstTimeSubquery})`;
+  }
   if (startDate) {
     where.startDate = `created_at >= toDateTime('${formatClickhouseDate(startDate)}')`;
   }
@@ -763,8 +787,16 @@ export async function getChartSql({
   const cohortMetadata = await fetchCohortsMetadata(cohortIds);
 
   // Check if we can use materialized view for fast queries
-  // Custom events cannot use materialized views (for now)
-  if (!customEvent && canUseMaterializedView(event, breakdowns, interval)) {
+  // Custom events cannot use materialized views (for now).
+  // First-time queries must NEVER use the pre-aggregated MV: it counts every
+  // occurrence and has no per-user first-occurrence concept, so it would
+  // silently ignore the firstTime qualifier and return full totals. Fall
+  // through to the regular path where the firstTime subquery is applied.
+  if (
+    !customEvent &&
+    !isFirstTime(event) &&
+    canUseMaterializedView(event, breakdowns, interval)
+  ) {
     return getChartSqlFromMaterializedView({
       event,
       interval,
@@ -863,6 +895,57 @@ export async function getChartSql({
     sb.where.eventName = `name = ${sqlstring.escape(event.name)}`;
   }
 
+  // First-time-for-user (all-time first). Restrict every scan (main query +
+  // top_breakdowns + totals CTEs) to the rows that are each canonical person's
+  // global-first matching occurrence of this event. See first-time.service.ts.
+  //
+  // Only the event property filters feed the minIf leg (global-first-that-matches);
+  // profile.* / cohort filters are user-level and stay on the outer scan. The
+  // gate is a `(profile_id, created_at) IN (...)` tuple — qualified to the local
+  // alias per scan so it stays unambiguous even alongside cohort joins (which
+  // also carry a `profile_id`). Not supported for `*` or custom events (skipped).
+  // `one_event_per_user` builds its own alias-less subquery and returns early
+  // (below), so the `e`-qualified tuple would not resolve there — and the two
+  // are semantically redundant (both collapse to one row per user). Skip.
+  const firstTimeActive =
+    isFirstTime(event) &&
+    !customEvent &&
+    event.name !== '*' &&
+    event.segment !== 'one_event_per_user';
+  let firstTimeSubquery = '';
+  if (firstTimeActive) {
+    const firstTimeFilterConditions = Object.values(
+      getEventFiltersWhereClause(
+        (event.filters ?? []).filter(
+          (f) =>
+            !f.name.startsWith('profile.') &&
+            f.operator !== 'inCohort' &&
+            f.operator !== 'notInCohort',
+        ),
+        projectId,
+      ),
+    );
+    firstTimeSubquery = buildFirstTimeSubquery({
+      projectId,
+      eventName: event.name,
+      startDate: startDate!,
+      endDate: endDate!,
+      filterConditions: firstTimeFilterConditions,
+    });
+    // Main query + top_breakdowns both alias the events table as `e`.
+    sb.where.firstTime = `(e.profile_id, e.created_at) IN (${firstTimeSubquery})`;
+  }
+  // firstTime is removed from getWhereWithoutBar() (see below) so each CTE can
+  // qualify the tuple to its own scan: top_breakdowns aliases `e`, while
+  // breakdown_totals / total_unique scan the raw table name.
+  const firstTimeMainPredicate = firstTimeActive
+    ? ` AND (e.profile_id, e.created_at) IN (${firstTimeSubquery})`
+    : '';
+  const firstTimeTotalsPredicate = (dataSource: string): string =>
+    firstTimeActive
+      ? ` AND (${dataSource}.profile_id, ${dataSource}.created_at) IN (${firstTimeSubquery})`
+      : '';
+
   const anyFilterOnProfile = event.filters.some((filter) =>
     filter.name.startsWith('profile.'),
   );
@@ -875,6 +958,10 @@ export async function getChartSql({
   const getWhereWithoutBar = () => {
     const whereWithoutBar = { ...sb.where };
     delete whereWithoutBar.bar;
+    // firstTime is injected per-CTE with a scan-local alias (see
+    // firstTimeMainPredicate / firstTimeTotalsPredicate) rather than flowing
+    // here, because the CTEs scan the table under different aliases.
+    delete whereWithoutBar.firstTime;
     return Object.keys(whereWithoutBar).length
       ? `WHERE ${join(whereWithoutBar, ' AND ')}`
       : '';
@@ -1052,7 +1139,7 @@ export async function getChartSql({
       'top_breakdowns',
       `SELECT ${breakdownSelects}
       FROM ${dataSource} AS e
-      ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${cohortJoinsForTop ? `${cohortJoinsForTop} ` : ''}${getWhereWithoutBar()}
+      ${profilesJoinRef ? `${profilesJoinRef} ` : ''}${cohortJoinsForTop ? `${cohortJoinsForTop} ` : ''}${getWhereWithoutBar()}${firstTimeMainPredicate}
       GROUP BY ${breakdownSelects}
       ORDER BY ${orderByCount} ${sortOrder === 'asc' ? 'ASC' : 'DESC'}
       LIMIT ${limit}`,
@@ -1149,7 +1236,23 @@ export async function getChartSql({
     return sql;
   }
 
-  if (breakdowns.length > 0) {
+  if (breakdowns.length > 0 && firstTimeActive) {
+    // FIRST-TIME single-execution (breakdown). A separate breakdown_totals CTE
+    // would re-run the expensive first-time subquery a THIRD time (top_breakdowns
+    // + main + breakdown_totals). Instead derive the per-breakdown first-time
+    // denominator from the SAME gated main scan via a windowed aggregate, so the
+    // subquery is evaluated only in top_breakdowns + main. The main query groups
+    // by (date, label_1..N); uniqMerge(uniqState(profile_id)) OVER (PARTITION BY
+    // the breakdown keys) collapses those per-(date,breakdown) states back to one
+    // uniq(profile_id) per breakdown value — exactly what breakdown_totals
+    // returned for the top-N values that survive the bar filter (verified against
+    // prod CH). Only these top-N values appear in the main scan, and the bar
+    // filter keeps whole breakdown values, so the per-partition uniq matches.
+    const partitionKeys = breakdowns
+      .map((_, index) => `label_${index + 1}`)
+      .join(', ');
+    sb.select.total_unique_count = `uniqMerge(uniqState(e.profile_id)) OVER (PARTITION BY ${partitionKeys}) as total_count`;
+  } else if (breakdowns.length > 0) {
     const breakdownSelects = breakdowns
       .map((b, index) => {
         const propertyKey = getSelectPropertyKey(
@@ -1195,7 +1298,7 @@ export async function getChartSql({
         ${breakdownSelects},
         uniq(${dataSourceForBreakdown}.profile_id) as total_count
        FROM ${dataSourceForBreakdown}
-       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForBreakdown ? `${cohortJoinsForBreakdown} ` : ''}${totalCountWhere}
+       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForBreakdown ? `${cohortJoinsForBreakdown} ` : ''}${totalCountWhere}${firstTimeTotalsPredicate(dataSourceForBreakdown)}
        GROUP BY ${breakdownGroupBy}`,
     );
 
@@ -1213,6 +1316,16 @@ export async function getChartSql({
 
     sb.joins.breakdown_totals = `LEFT JOIN breakdown_totals ON ${joinConditions}`;
     sb.select.total_unique_count = `any(breakdown_totals.total_count) as total_count`;
+  } else if (firstTimeActive) {
+    // FIRST-TIME single-execution (no breakdown). The separate total_unique CTE
+    // would re-run the expensive first-time subquery a SECOND time; derive the
+    // first-time-scoped denominator from the SAME gated main scan via a windowed
+    // aggregate so the subquery runs ONCE (only the main query's IN-set).
+    // uniqMerge(uniqState(profile_id)) OVER () is bit-for-bit uniq(profile_id)
+    // over the gated rows — a merged HLL across the per-bucket states (verified
+    // against prod CH: matches the old total_unique CTE value exactly).
+    sb.select.total_unique_count =
+      'uniqMerge(uniqState(e.profile_id)) OVER () as total_count';
   } else {
     const totalCountWhere = getWhereWithoutBar();
 
@@ -1241,7 +1354,7 @@ export async function getChartSql({
       'total_unique',
       `SELECT uniq(${dataSourceForTotal}.profile_id) as total_count
        FROM ${dataSourceForTotal}
-       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForTotal ? `${cohortJoinsForTotal} ` : ''}${totalCountWhere}`,
+       ${profilesJoinRefForCTE ? `${profilesJoinRefForCTE} ` : ''}${cohortJoinsForTotal ? `${cohortJoinsForTotal} ` : ''}${totalCountWhere}${firstTimeTotalsPredicate(dataSourceForTotal)}`,
     );
 
     // CROSS JOIN (not a scalar subquery) so filter columns inside total_unique
