@@ -10,6 +10,7 @@ const mockDb = vi.hoisted(() => {
     dashboard: {
       create: vi.fn(),
       findFirst: vi.fn(),
+      findMany: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
     },
@@ -164,6 +165,7 @@ beforeEach(() => {
     id: 'dashboard-2',
   });
   mockDb.dashboard.findFirst.mockResolvedValue(DASHBOARD);
+  mockDb.dashboard.findMany.mockResolvedValue([]);
   mockDb.dashboard.update.mockResolvedValue({ ...DASHBOARD, name: 'Renamed' });
   mockDb.report.findFirst.mockResolvedValue(REPORT);
   mockDb.report.findMany.mockResolvedValue([]);
@@ -193,13 +195,19 @@ function validReport(overrides: Record<string, unknown> = {}) {
 }
 
 describe('dashboard management registration', () => {
-  it('registers only get_dashboard for read credentials', () => {
-    expect(register(READ_CONTEXT).names()).toEqual(['get_dashboard']);
+  it('registers reads (get + lists) for read credentials', () => {
+    expect(register(READ_CONTEXT).names()).toEqual([
+      'get_dashboard',
+      'list_dashboards',
+      'list_reports',
+    ]);
   });
 
   it('registers all management tools for root credentials', () => {
     expect(register().names()).toEqual([
       'get_dashboard',
+      'list_dashboards',
+      'list_reports',
       'create_dashboard',
       'update_dashboard',
       'delete_dashboard',
@@ -513,6 +521,233 @@ describe('dashboard management behavior', () => {
         maxH: 8,
       },
       update: { x: 1, y: 2, w: 4, h: 3, minW: 2, minH: 2, maxW: 8, maxH: 8 },
+    });
+  });
+});
+
+describe('dashboard and report listing', () => {
+  it('lists dashboards for a read client with a report count and deep-link', async () => {
+    mockDb.dashboard.findMany.mockResolvedValue([
+      {
+        id: 'dashboard-1',
+        name: 'Product',
+        organizationId: 'organization-1',
+        projectId: 'project-1',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        _count: { reports: 3 },
+      },
+    ]);
+    const server = register(READ_CONTEXT);
+
+    const result = await server.invoke('list_dashboards', {});
+
+    // Read clients have projectId fixed in context, so it scopes to project-1.
+    expect(mockDb.dashboard.findMany).toHaveBeenCalledWith({
+      where: { projectId: 'project-1', organizationId: 'organization-1' },
+      orderBy: { updatedAt: 'desc' },
+      include: { _count: { select: { reports: true } } },
+    });
+    expect(result.dashboards.columns).toEqual([
+      'id',
+      'name',
+      'report_count',
+      'createdAt',
+      'updatedAt',
+      'dashboard_url',
+    ]);
+    expect(result.dashboards.rows).toEqual([
+      [
+        'dashboard-1',
+        'Product',
+        3,
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        '/organization-1/project-1/dashboards/dashboard-1',
+      ],
+    ]);
+  });
+
+  it('lists reports for a dashboard for a read client', async () => {
+    mockDb.report.findMany.mockResolvedValue([
+      {
+        id: '11111111-1111-4111-8111-111111111111',
+        name: 'Signups',
+        dashboardId: 'dashboard-1',
+        chartType: 'funnel',
+        range: '30d',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      },
+    ]);
+    const server = register(READ_CONTEXT);
+
+    const result = await server.invoke('list_reports', {
+      dashboardId: 'dashboard-1',
+    });
+
+    // A dashboardId narrows the query and is verified against the project first.
+    expect(mockGetDashboardById).toHaveBeenCalledWith(
+      'dashboard-1',
+      'project-1',
+    );
+    expect(mockDb.report.findMany).toHaveBeenCalledWith({
+      where: { projectId: 'project-1', dashboardId: 'dashboard-1' },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        name: true,
+        dashboardId: true,
+        chartType: true,
+        range: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+    expect(result.reports.rows).toEqual([
+      [
+        '11111111-1111-4111-8111-111111111111',
+        'Signups',
+        'dashboard-1',
+        'funnel',
+        '30d',
+        '2026-01-01T00:00:00.000Z',
+        '2026-01-02T00:00:00.000Z',
+        '/organization-1/project-1/reports/11111111-1111-4111-8111-111111111111',
+      ],
+    ]);
+  });
+
+  it('lists all reports in the project when dashboardId is omitted', async () => {
+    mockDb.report.findMany.mockResolvedValue([]);
+    const server = register(READ_CONTEXT);
+
+    await server.invoke('list_reports', {});
+
+    expect(mockGetDashboardById).not.toHaveBeenCalled();
+    expect(mockDb.report.findMany).toHaveBeenCalledWith({
+      where: { projectId: 'project-1' },
+      orderBy: { updatedAt: 'desc' },
+      select: {
+        id: true,
+        name: true,
+        dashboardId: true,
+        chartType: true,
+        range: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+  });
+});
+
+describe('report configuration is lossless', () => {
+  // A full funnel report: window + grouping key + Hold Property Constant +
+  // a step-scoped breakdown + a per-event filter + conversion measurement.
+  const FULL_FUNNEL_REPORT = {
+    name: 'Onboarding funnel',
+    chartType: 'funnel',
+    series: [
+      {
+        type: 'event',
+        name: 'signup',
+        segment: 'event',
+        filters: [{ id: 'A', name: 'plan', operator: 'is', value: ['pro'] }],
+      },
+      {
+        type: 'event',
+        name: 'activated',
+        segment: 'event',
+        filters: [],
+      },
+    ],
+    breakdowns: [{ name: 'country', step: 2 }],
+    funnelWindow: 72,
+    funnelGroup: 'session_id',
+    holdProperties: ['country', 'plan'],
+    criteria: 'on_or_after',
+    measuring: 'time_to_convert',
+    ttcAggregation: 'p90',
+    sortOrder: 'asc',
+    comparison: 'overall',
+    interval: 'week',
+    range: '30d',
+    metric: 'sum',
+    lineType: 'monotone',
+  };
+
+  it('persists every funnel/conversion setting through create_report', async () => {
+    const server = register();
+
+    await server.invoke('create_report', {
+      projectId: 'project-1',
+      dashboardId: 'dashboard-1',
+      report: FULL_FUNNEL_REPORT,
+    });
+
+    expect(mockDb.report.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        projectId: 'project-1',
+        dashboardId: 'dashboard-1',
+        name: 'Onboarding funnel',
+        chartType: 'funnel',
+        // series → events, including the per-event filter, verbatim.
+        events: FULL_FUNNEL_REPORT.series,
+        // Breakdown step survives (it lives in the breakdowns jsonb).
+        breakdowns: [{ name: 'country', step: 2 }],
+        // Funnel-specific columns.
+        funnelWindow: 72,
+        funnelGroup: 'session_id',
+        holdProperties: ['country', 'plan'],
+        criteria: 'on_or_after',
+        // Conversion/measurement columns.
+        measuring: 'time_to_convert',
+        ttcAggregation: 'p90',
+        sortOrder: 'asc',
+        comparison: 'overall',
+        interval: 'week',
+      }),
+    });
+
+    // None of the funnel/conversion settings may be dropped from the write.
+    const persisted = mockDb.report.create.mock.calls[0]![0].data;
+    for (const key of [
+      'funnelWindow',
+      'funnelGroup',
+      'holdProperties',
+      'criteria',
+      'measuring',
+      'ttcAggregation',
+      'sortOrder',
+      'comparison',
+    ]) {
+      expect(persisted).toHaveProperty(key);
+    }
+  });
+
+  it('persists every funnel/conversion setting through update_report', async () => {
+    const server = register();
+
+    await server.invoke('update_report', {
+      projectId: 'project-1',
+      reportId: '11111111-1111-4111-8111-111111111111',
+      report: FULL_FUNNEL_REPORT,
+    });
+
+    expect(mockDb.report.update).toHaveBeenCalledWith({
+      where: { id: '11111111-1111-4111-8111-111111111111' },
+      data: expect.objectContaining({
+        events: FULL_FUNNEL_REPORT.series,
+        breakdowns: [{ name: 'country', step: 2 }],
+        funnelWindow: 72,
+        funnelGroup: 'session_id',
+        holdProperties: ['country', 'plan'],
+        criteria: 'on_or_after',
+        measuring: 'time_to_convert',
+        ttcAggregation: 'p90',
+        sortOrder: 'asc',
+        comparison: 'overall',
+      }),
     });
   });
 });

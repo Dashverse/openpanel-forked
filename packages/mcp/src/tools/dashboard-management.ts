@@ -10,7 +10,13 @@ import {
 import { zReport } from '@openpanel/validation';
 import { z } from 'zod';
 import type { McpAuthContext } from '../auth';
-import { projectIdSchema, resolveProjectId, withErrorHandling } from './shared';
+import {
+  projectIdSchema,
+  resolveProjectId,
+  table,
+  withErrorHandling,
+  zLimit,
+} from './shared';
 
 /**
  * Strict, persistable report configuration.
@@ -160,11 +166,19 @@ function reportUrl(
 /**
  * Map a validated report config onto the fork's `reports` columns.
  *
+ * This mirrors the dashboard save path (packages/trpc report router
+ * create/update) field-for-field so a report saved through MCP is byte-for-byte
+ * what the dashboard would have written — no setting is silently dropped. Every
+ * persisted column below has a matching `reports` column in the Prisma schema.
+ *
  * Fork divergence from upstream: our Report model has `hiddenSeries` (there is
  * no `visibleSeries`/`options` column), so `series` → `events` and the visible
  * set is persisted as `hiddenSeries`. Custom dates are only kept for the
  * `custom` range and cleared otherwise, so a full replacement can't leave a
  * stale window behind.
+ *
+ * `cohortFilters` is intentionally absent: it has no `reports` column and the
+ * dashboard save path doesn't persist it either — it's a chart-time-only input.
  */
 function reportData(report: z.infer<typeof reportSchema>) {
   return {
@@ -175,6 +189,7 @@ function reportData(report: z.infer<typeof reportSchema>) {
     breakdowns: report.breakdowns,
     chartType: report.chartType,
     lineType: report.lineType,
+    comparison: report.comparison ?? 'none',
     range: report.range,
     formula: report.formula ?? null,
     previous: report.previous ?? false,
@@ -184,6 +199,16 @@ function reportData(report: z.infer<typeof reportSchema>) {
     // router does.
     metric: report.metric === 'count' ? 'sum' : report.metric,
     hiddenSeries: report.hiddenSeries ?? [],
+    // Funnel-specific settings (window + grouping key) and the Hold Property
+    // Constant list — dedicated columns, previously dropped by this mapping.
+    criteria: report.criteria ?? null,
+    funnelGroup: report.funnelGroup ?? null,
+    funnelWindow: report.funnelWindow ?? null,
+    holdProperties: report.holdProperties ?? [],
+    // Conversion/measurement settings.
+    measuring: report.measuring ?? null,
+    sortOrder: report.sortOrder ?? 'desc',
+    ttcAggregation: report.ttcAggregation ?? 'avg',
     startDate: report.range === 'custom' ? report.startDate : null,
     endDate: report.range === 'custom' ? report.endDate : null,
   };
@@ -254,12 +279,20 @@ function canonicalReportConfig(report: {
   breakdowns: unknown;
   chartType: string;
   lineType: string;
+  comparison: string | null;
   range: string;
   formula: string | null;
   previous: boolean;
   unit: string | null;
   metric: string;
   hiddenSeries: unknown;
+  criteria: string | null;
+  funnelGroup: string | null;
+  funnelWindow: number | null;
+  holdProperties: unknown;
+  measuring: string | null;
+  sortOrder: string | null;
+  ttcAggregation: string | null;
   startDate: string | null;
   endDate: string | null;
 }) {
@@ -271,6 +304,7 @@ function canonicalReportConfig(report: {
     breakdowns: report.breakdowns,
     chartType: report.chartType,
     lineType: report.lineType,
+    comparison: report.comparison ?? undefined,
     range: report.range,
     startDate: report.startDate,
     endDate: report.endDate,
@@ -279,6 +313,15 @@ function canonicalReportConfig(report: {
     metric: report.metric,
     unit: report.unit ?? undefined,
     hiddenSeries: report.hiddenSeries,
+    // Funnel / conversion settings — surfaced so a get_dashboard → update_report
+    // round trip preserves them instead of resetting to defaults.
+    criteria: report.criteria ?? undefined,
+    funnelGroup: report.funnelGroup ?? undefined,
+    funnelWindow: report.funnelWindow ?? undefined,
+    holdProperties: report.holdProperties,
+    measuring: report.measuring ?? undefined,
+    sortOrder: report.sortOrder ?? undefined,
+    ttcAggregation: report.ttcAggregation ?? undefined,
   };
 }
 
@@ -322,6 +365,117 @@ export function registerDashboardManagementTools(
           layouts: reportsWithUrls.flatMap((report) =>
             report.layout ? [report.layout] : [],
           ),
+        };
+      }),
+  );
+
+  server.tool(
+    'list_dashboards',
+    'List the dashboards in the resolved project (id, name, timestamps, report count, deep-link). Read-only. Call this to discover which dashboards exist and pick a dashboardId before saving a report with create_report.',
+    {
+      projectId: projectIdSchema(context),
+      limit: zLimit(50, 200),
+    },
+    async ({ projectId: inputProjectId, limit }) =>
+      withErrorHandling(async () => {
+        const projectId = await resolveProjectId(context, inputProjectId);
+        const dashboards = await db.dashboard.findMany({
+          where: { projectId, organizationId: context.organizationId },
+          orderBy: { updatedAt: 'desc' },
+          include: { _count: { select: { reports: true } } },
+        });
+
+        const rows = dashboards.map((dashboard) => ({
+          id: dashboard.id,
+          name: dashboard.name,
+          report_count: dashboard._count?.reports ?? 0,
+          createdAt: dashboard.createdAt,
+          updatedAt: dashboard.updatedAt,
+          dashboard_url: dashboardUrl(
+            context.organizationId,
+            projectId,
+            dashboard.id,
+          ),
+        }));
+
+        return {
+          dashboards: table(rows, {
+            limit: limit ?? 50,
+            columns: [
+              'id',
+              'name',
+              'report_count',
+              'createdAt',
+              'updatedAt',
+              'dashboard_url',
+            ],
+            sortedBy: 'updatedAt',
+            unit: 'dashboards',
+          }),
+        };
+      }),
+  );
+
+  server.tool(
+    'list_reports',
+    'List saved reports for a dashboard (pass dashboardId), or every report in the project (omit dashboardId). Read-only. Returns id, name, dashboardId, chartType, range, timestamps and a deep-link.',
+    {
+      projectId: projectIdSchema(context),
+      dashboardId: z
+        .string()
+        .optional()
+        .describe(
+          'Limit to one dashboard; omit to list every report in the project',
+        ),
+      limit: zLimit(50, 200),
+    },
+    async ({ projectId: inputProjectId, dashboardId, limit }) =>
+      withErrorHandling(async () => {
+        const projectId = await resolveProjectId(context, inputProjectId);
+        if (dashboardId) {
+          await requireDashboard(projectId, dashboardId);
+        }
+        const reports = await db.report.findMany({
+          where: { projectId, ...(dashboardId ? { dashboardId } : {}) },
+          orderBy: { updatedAt: 'desc' },
+          select: {
+            id: true,
+            name: true,
+            dashboardId: true,
+            chartType: true,
+            range: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        const rows = reports.map((report) => ({
+          id: report.id,
+          name: report.name,
+          dashboardId: report.dashboardId,
+          chartType: report.chartType,
+          range: report.range,
+          createdAt: report.createdAt,
+          updatedAt: report.updatedAt,
+          report_url: reportUrl(context.organizationId, projectId, report.id),
+        }));
+
+        return {
+          reports: table(rows, {
+            limit: limit ?? 50,
+            columns: [
+              'id',
+              'name',
+              'dashboardId',
+              'chartType',
+              'range',
+              'createdAt',
+              'updatedAt',
+              'report_url',
+            ],
+            sortedBy: 'updatedAt',
+            unit: 'reports',
+          }),
         };
       }),
   );
@@ -567,12 +721,23 @@ export function registerDashboardManagementTools(
             breakdowns: report.breakdowns!,
             chartType: report.chartType,
             lineType: report.lineType,
+            comparison: report.comparison,
             range: report.range,
             formula: report.formula,
             previous: report.previous,
             unit: report.unit,
             metric: report.metric,
             hiddenSeries: report.hiddenSeries ?? [],
+            // Preserve funnel/conversion settings on the copy — these are
+            // dedicated columns that must ride along or the duplicate silently
+            // reverts to defaults.
+            criteria: report.criteria,
+            funnelGroup: report.funnelGroup,
+            funnelWindow: report.funnelWindow,
+            holdProperties: report.holdProperties ?? [],
+            measuring: report.measuring,
+            sortOrder: report.sortOrder,
+            ttcAggregation: report.ttcAggregation,
             startDate: report.startDate,
             endDate: report.endDate,
           },
