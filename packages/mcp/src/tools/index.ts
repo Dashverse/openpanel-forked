@@ -9,6 +9,7 @@ import { registerIdentityTools } from './analytics/identity';
 import { registerInsightsTools } from './analytics/insights';
 import { registerReplayTools } from './analytics/replay';
 import { registerUserTools } from './analytics/user';
+import { registerDashboardManagementTools } from './dashboard-management';
 
 /**
  * Tools are added one at a time as each `*Core` seam is re-homed onto the
@@ -33,4 +34,7 @@ export function registerAllTools(
   registerUserTools(server, context);
   // Session replay links
   registerReplayTools(server, context);
+  // Dashboards & saved reports: get_dashboard for all clients, plus the
+  // create/update/delete mutations for root clients only (gated inside).
+  registerDashboardManagementTools(server, context);
 }

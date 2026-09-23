@@ -311,6 +311,20 @@ export const zReportInput = zChartInputBase.extend({
     .describe('Series IDs hidden in the chart visualization'),
 });
 
+// Complete saved-report schema — report input plus the persisted display
+// fields, defaulted so a partial config still round-trips into the reports
+// table. Mirrors the shape the dashboard saves; consumed by the MCP dashboard
+// management tools.
+export const zReport = zReportInput.extend({
+  name: z
+    .string()
+    .default('Untitled')
+    .describe('The user-defined name for the report'),
+  lineType: zLineType
+    .default('monotone')
+    .describe('The visual style of the line in the chart'),
+});
+
 export const zChartInputAI = zReportInput
   .omit({
     startDate: true,
