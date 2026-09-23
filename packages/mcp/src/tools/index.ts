@@ -8,6 +8,7 @@ import { registerFunnelTools } from './analytics/funnel';
 import { registerIdentityTools } from './analytics/identity';
 import { registerInsightsTools } from './analytics/insights';
 import { registerReplayTools } from './analytics/replay';
+import { registerRetentionTools } from './analytics/retention';
 import { registerUserTools } from './analytics/user';
 import { registerDashboardManagementTools } from './dashboard-management';
 
@@ -25,6 +26,7 @@ export function registerAllTools(
   registerInsightsTools(server, context);
   registerActiveUsersTools(server, context);
   registerCohortTools(server, context);
+  registerRetentionTools(server, context);
   // Behaviour
   registerFunnelTools(server, context);
   registerConversionTools(server, context);
