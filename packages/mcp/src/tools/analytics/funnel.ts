@@ -50,6 +50,12 @@ export function registerFunnelTools(
         .describe(
           'Optional cohort id (from list_cohorts) to gate the funnel to that audience — only users in the cohort are counted.',
         ),
+      firstTimeSteps: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Subset of `steps` (event names) to treat as "first time for user": such a step matches only at each user\'s global-first (all-time) occurrence of that event, and only if that first occurrence falls inside the range. Leave empty for the normal funnel.',
+        ),
     },
     async ({
       projectId: inputProjectId,
@@ -59,19 +65,24 @@ export function registerFunnelTools(
       windowHours,
       groupBy,
       cohortId,
+      firstTimeSteps,
     }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getFunnelCore({
-          projectId,
-          startDate,
-          endDate,
-          steps,
-          windowHours,
-          groupBy,
-          cohortId,
-        });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getFunnelCore({
+            projectId,
+            startDate,
+            endDate,
+            steps,
+            windowHours,
+            groupBy,
+            cohortId,
+            firstTimeSteps,
+          });
+        },
+        { tool: 'get_funnel', context },
+      ),
   );
 }

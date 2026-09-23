@@ -86,6 +86,12 @@ export const zChartEvent = z.object({
     ),
   segment: zChartEventSegment,
   perUser: zChartEventPerUser.optional(),
+  firstTime: z
+    .boolean()
+    .optional()
+    .describe(
+      'First-time-for-user qualifier: when true, only each user\'s FIRST-EVER (all-time) occurrence of this event counts, and it counts only if that first-ever occurrence falls inside the selected range AND satisfies this event\'s filters (PostHog/Mixpanel "first time for user", global-first-that-matches semantics). Orthogonal to `segment` and distinct from the `one_event_per_user` segment (which picks one row per user WITHIN the range, not the all-time first).',
+    ),
   filters: z
     .array(zChartEventFilter)
     .default([])

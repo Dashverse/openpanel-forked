@@ -733,10 +733,66 @@ export async function getProfileList({
     return getSql();
   };
 
-  // do_not_merge_across_partitions_select_final is safe here: a profile's
-  // created_at (the ReplacingMergeTree version AND the partition key) is stable
-  // across updates, so all versions of a profile live in one monthly partition —
-  // FINAL can dedupe per-partition instead of merging across all of history.
+  // Two-step list for the PLAIN page (no search / no event filter / no profile.*
+  // or property filters): rank ids with a cheap non-FINAL aggregate, then hydrate
+  // only that page with FINAL.
+  //
+  // WHY: `profiles` is partitioned by project_id, so a created_at window no
+  // longer prunes partitions. The old single-query form made FINAL materialise
+  // EVERY column (including the `properties` Map) for ~104M rows before sorting
+  // → 12.5s, over the API's 10s cap. The inner query below touches only `id` +
+  // `created_at` (Delta+LZ4), so the same scan costs ~1.2s, and FINAL then runs
+  // on exactly `take` ids (a primary-key lookup). Measured on prod dashreels:
+  // 12,488ms/150s CPU → 1,223ms/15.6s CPU.
+  //
+  // This is how PostHog reads its `person` table (also ReplacingMergeTree,
+  // ORDER BY (team_id, id), no PARTITION BY): ids are selected with
+  // `GROUP BY id` + `max(version)`/argMax in a subquery and the outer read never
+  // uses FINAL. See posthog/hogql/database/schema/persons.py.
+  //
+  // The created_at predicate stays in the inner WHERE rather than a
+  // `HAVING max(created_at) >= …`: versions only ever move created_at forward,
+  // so "some version is in the window" and "the latest version is in the window"
+  // select the same ids — but WHERE also cuts the rows scanned.
+  const twoStepEligible =
+    !search &&
+    !eventNames?.length &&
+    !profileFilters.length &&
+    !eventFilters.length;
+
+  const buildTwoStepSql = (opts: { recentOnly?: boolean }) => {
+    const where = [`project_id = ${sqlstring.escape(projectId)}`];
+    if (isExternal !== undefined) {
+      where.push(`is_external = ${isExternal ? 'true' : 'false'}`);
+    }
+    if (hasSeenRange) {
+      where.push(
+        `created_at BETWEEN toDateTime(${sqlstring.escape(lastSeenStart!)}, ${sqlstring.escape(tz)}) AND toDateTime(${sqlstring.escape(lastSeenEnd!)}, ${sqlstring.escape(tz)})`,
+      );
+    } else if (opts.recentOnly) {
+      where.push('created_at >= now() - INTERVAL 1 MONTH');
+    }
+    const whereSql = where.join(' AND ');
+    // `cursor` is already the row offset ((page-1)*take from the client).
+    const inner =
+      `SELECT id FROM ${TABLE_NAMES.profiles} WHERE ${whereSql} ` +
+      `GROUP BY id ORDER BY max(created_at) ${orderDir} LIMIT ${take} OFFSET ${offset}`;
+    // is_external is re-applied on the FINAL rows so a profile that only matched
+    // on an older version can't leak into the page.
+    const outerWhere = [`project_id = ${sqlstring.escape(projectId)}`];
+    if (isExternal !== undefined) {
+      outerWhere.push(`is_external = ${isExternal ? 'true' : 'false'}`);
+    }
+    return (
+      `SELECT ${PROFILE_LIST_COLUMNS} FROM ${TABLE_NAMES.profiles} FINAL ` +
+      `WHERE ${outerWhere.join(' AND ')} AND id IN (${inner}) ` +
+      `ORDER BY created_at ${orderDir} LIMIT ${take}`
+    );
+  };
+
+  // do_not_merge_across_partitions_select_final: all versions of a profile live
+  // in one partition (partitioned by project_id, which never changes for a row),
+  // so FINAL can dedupe per-partition instead of merging across partitions.
   const settings: ClickHouseSettings = {
     do_not_merge_across_partitions_select_final: 1,
   };
@@ -769,25 +825,29 @@ export async function getProfileList({
       true,
     );
   } else if (hasSeenRange) {
-    // Explicit last-seen window: partition-pruned to the month(s), so both sort
-    // directions run in ~1.4s. No month-window fallback needed.
+    // Explicit last-seen window.
     data = await chQuery<IClickhouseProfile>(
-      buildSql({ recentOnly: false }),
+      twoStepEligible
+        ? buildTwoStepSql({ recentOnly: false })
+        : buildSql({ recentOnly: false }),
       settings,
       true,
     );
   } else if (orderDir === 'DESC') {
-    // Fast path: last month only (prunes partitions → ~0.5s vs ~20s). Fall back
-    // to the full range if it doesn't fill the page — a low-activity project, or
-    // paging past the window.
+    // Fast path: last month only. Fall back to the full range if it doesn't fill
+    // the page — a low-activity project, or paging past the window.
     data = await chQuery<IClickhouseProfile>(
-      buildSql({ recentOnly: true }),
+      twoStepEligible
+        ? buildTwoStepSql({ recentOnly: true })
+        : buildSql({ recentOnly: true }),
       settings,
       true,
     );
     if (data.length < take) {
       data = await chQuery<IClickhouseProfile>(
-        buildSql({ recentOnly: false }),
+        twoStepEligible
+          ? buildTwoStepSql({ recentOnly: false })
+          : buildSql({ recentOnly: false }),
         settings,
         true,
       );
@@ -795,10 +855,10 @@ export async function getProfileList({
   } else {
     // Ascending with no window: the month window would give "oldest within the
     // last month" (wrong — they want the oldest overall), so run unwindowed.
-    // This is the one slow path (~10s full-table FINAL dedup); the UI nudges a
-    // date range, which makes it ~1.4s.
     data = await chQuery<IClickhouseProfile>(
-      buildSql({ recentOnly: false }),
+      twoStepEligible
+        ? buildTwoStepSql({ recentOnly: false })
+        : buildSql({ recentOnly: false }),
       settings,
       true,
     );

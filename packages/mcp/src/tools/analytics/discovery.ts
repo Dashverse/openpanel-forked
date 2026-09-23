@@ -7,7 +7,11 @@ import {
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { McpAuthContext } from '../../auth';
-import { projectIdSchema, resolveProjectId, withErrorHandling } from '../shared';
+import {
+  projectIdSchema,
+  resolveProjectId,
+  withErrorHandling,
+} from '../shared';
 
 /**
  * Discovery tools — let the agent find the EXACT (case-sensitive) event names,
@@ -30,10 +34,13 @@ export function registerDiscoveryTools(
       limit: z.number().int().min(1).max(1000).optional(),
     },
     async ({ projectId: p, search, limit }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        return getEventNamesCore({ projectId, search, limit });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          return getEventNamesCore({ projectId, search, limit });
+        },
+        { tool: 'get_event_names', context },
+      ),
   );
 
   server.tool(
@@ -47,10 +54,13 @@ export function registerDiscoveryTools(
       limit: z.number().int().min(1).max(1000).optional(),
     },
     async ({ projectId: p, eventName, limit }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        return getEventPropertiesCore({ projectId, eventName, limit });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          return getEventPropertiesCore({ projectId, eventName, limit });
+        },
+        { tool: 'get_event_properties', context },
+      ),
   );
 
   server.tool(
@@ -65,9 +75,17 @@ export function registerDiscoveryTools(
       limit: z.number().int().min(1).max(1000).optional(),
     },
     async ({ projectId: p, eventName, property, limit }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, p);
-        return getPropertyValuesCore({ projectId, eventName, property, limit });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, p);
+          return getPropertyValuesCore({
+            projectId,
+            eventName,
+            property,
+            limit,
+          });
+        },
+        { tool: 'get_property_values', context },
+      ),
   );
 }

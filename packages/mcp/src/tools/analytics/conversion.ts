@@ -57,6 +57,12 @@ export function registerConversionTools(
         .describe(
           'Optional cohort id (from list_cohorts) to gate the conversion to that audience — only users in the cohort are counted.',
         ),
+      firstTimeSteps: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Subset of `steps` (event names) to treat as "first time for user": the from/to event is gated on each user\'s global-first (all-time) occurrence of it. Leave empty for the normal conversion.',
+        ),
     },
     async ({
       projectId: inputProjectId,
@@ -68,21 +74,26 @@ export function registerConversionTools(
       breakdown,
       filters,
       cohortId,
+      firstTimeSteps,
     }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getConversionCore({
-          projectId,
-          startDate,
-          endDate,
-          steps,
-          windowHours,
-          groupBy,
-          breakdown,
-          filters,
-          cohortId,
-        });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getConversionCore({
+            projectId,
+            startDate,
+            endDate,
+            steps,
+            windowHours,
+            groupBy,
+            breakdown,
+            filters,
+            cohortId,
+            firstTimeSteps,
+          });
+        },
+        { tool: 'get_conversion', context },
+      ),
   );
 }

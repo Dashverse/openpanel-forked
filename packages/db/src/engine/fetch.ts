@@ -51,6 +51,11 @@ export async function fetch(plan: Plan): Promise<ConcreteSeries[]> {
         displayName: event.displayName,
         property: event.property,
         perUser: event.perUser,
+        // First-time-for-user qualifier. Must be forwarded to getChartSql — it
+        // gates isFirstTime()/the MV fast-path skip/the firstTime subquery. If
+        // dropped here, getChartSql sees firstTime=undefined and returns full
+        // totals regardless of the UI toggle (segment 'event' AND 'user').
+        firstTime: event.firstTime,
       },
       projectId: plan.input.projectId,
       startDate: plan.input.startDate,

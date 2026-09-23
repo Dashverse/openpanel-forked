@@ -33,7 +33,11 @@ export function currentTraceId(): string | undefined {
   const span = trace.getActiveSpan();
   if (!span) return undefined;
   const ctx = span.spanContext();
-  if (!ctx || !ctx.traceId || ctx.traceId === '00000000000000000000000000000000') {
+  if (
+    !ctx ||
+    !ctx.traceId ||
+    ctx.traceId === '00000000000000000000000000000000'
+  ) {
     return undefined;
   }
   return ctx.traceId;
@@ -79,7 +83,9 @@ export async function withSpan<T>(
   optsOrFn: (SpanOptions & { attributes?: Attributes }) | WithSpanFn<T>,
   maybeFn?: WithSpanFn<T>,
 ): Promise<T> {
-  const fn = (typeof optsOrFn === 'function' ? optsOrFn : maybeFn) as WithSpanFn<T>;
+  const fn = (
+    typeof optsOrFn === 'function' ? optsOrFn : maybeFn
+  ) as WithSpanFn<T>;
   const opts = (typeof optsOrFn === 'function' ? {} : optsOrFn) as SpanOptions;
   return tracer().startActiveSpan(name, opts, async (span) => {
     try {
@@ -106,6 +112,7 @@ export async function withSpan<T>(
 export {
   getQueryContext,
   withQueryContext,
+  stampQueryContext,
   type QueryContextAttrs,
 } from './query-context';
 

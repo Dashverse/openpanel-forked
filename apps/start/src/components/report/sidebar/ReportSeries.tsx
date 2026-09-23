@@ -31,7 +31,8 @@ import type {
   IChartEventItem,
   IChartFormula,
 } from '@openpanel/validation';
-import { FilterIcon, HandIcon, PiIcon } from 'lucide-react';
+import { FilterIcon, HandIcon, HistoryIcon, PiIcon } from 'lucide-react';
+import { cn } from '@/utils/cn';
 import { ReportPerUser } from '../ReportPerUser';
 import { ReportSegment } from '../ReportSegment';
 import {
@@ -52,6 +53,8 @@ function SortableSeries({
   showSegment,
   showAddFilter,
   showPerUser,
+  showFirstTime,
+  customEventNames,
   isSelectManyEvents,
   children,
   ...props
@@ -61,6 +64,8 @@ function SortableSeries({
   showSegment: boolean;
   showAddFilter: boolean;
   showPerUser: boolean;
+  showFirstTime: boolean;
+  customEventNames: string[];
   isSelectManyEvents: boolean;
   children: (dragHandle: React.ReactNode) => React.ReactNode;
 } & Omit<React.HTMLAttributes<HTMLDivElement>, 'children'>) {
@@ -134,6 +139,47 @@ function SortableSeries({
       </PropertyPicker>
     ) : null;
 
+  // "First time" (all-time first for user) toggle. When on, only each user's
+  // FIRST-EVER occurrence of this event counts (and only if it falls in range
+  // and matches the event's filters). Orthogonal to segment / per-user.
+  //
+  // The backend silently ignores firstTime for the any-event selection ('*'),
+  // the one_event_per_user segment, and custom events (see chart.service.ts
+  // firstTimeActive). Only offer the toggle for selections it actually honors so
+  // the UI never shows an on-but-ineffective state. Clearing on switch happens
+  // where the segment/event changes (below).
+  const firstTimeSupported =
+    !!chartEvent &&
+    showFirstTime &&
+    chartEvent.name !== '*' &&
+    chartEvent.segment !== 'one_event_per_user' &&
+    !customEventNames.includes(chartEvent.name);
+  const firstTimeButton =
+    chartEvent && firstTimeSupported ? (
+      <button
+        type="button"
+        aria-pressed={!!chartEvent.firstTime}
+        title={
+          chartEvent.firstTime
+            ? "First time only: on — counting each user's first-ever occurrence of this event (all-time). Click to turn off."
+            : "First time only: off — click to count only each user's first-ever occurrence of this event (all-time)."
+        }
+        className={cn(
+          'flex h-8 items-center gap-1 rounded-md px-2 text-sm font-medium leading-none transition-colors',
+          chartEvent.firstTime
+            ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+            : 'border border-input bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+        )}
+        onClick={() => {
+          dispatch(
+            changeEvent({ ...chartEvent, firstTime: !chartEvent.firstTime }),
+          );
+        }}
+      >
+        <HistoryIcon size={12} /> First time
+      </button>
+    ) : null;
+
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...props}>
       <div className="flex flex-col gap-2 p-2 group">
@@ -146,35 +192,48 @@ function SortableSeries({
 
         {/* Aggregate-by row: the property selector sits inline with the
             aggregate; add filter stays here unless it drops below. */}
-        {chartEvent && (showSegment || showAddFilter || showPerUser) && (
-          <div className="flex flex-col">
-            <div className="flex flex-wrap">
-              {showSegment && (
-                <ReportSegment
-                  value={chartEvent.segment}
-                  onChange={(segment) => {
-                    dispatch(changeEvent({ ...chartEvent, segment }));
-                  }}
-                />
-              )}
-              {showSegment && isPropertyAgg && (
-                <EventPropertiesCombobox event={chartEvent} />
-              )}
-              {/* Per-user is only meaningful for the Distribution chart. */}
-              {showPerUser && (
-                <ReportPerUser
-                  event={chartEvent}
-                  onChange={(perUser) => {
-                    dispatch(changeEvent({ ...chartEvent, perUser }));
-                  }}
-                />
-              )}
-              {!isPropertyAgg && addFilterButton}
+        {chartEvent &&
+          (showSegment || showAddFilter || showPerUser || showFirstTime) && (
+            <div className="flex flex-col">
+              <div className="flex flex-wrap">
+                {showSegment && (
+                  <ReportSegment
+                    value={chartEvent.segment}
+                    onChange={(segment) => {
+                      dispatch(
+                        changeEvent({
+                          ...chartEvent,
+                          segment,
+                          // one_event_per_user is unsupported for firstTime;
+                          // clear a stale true so it doesn't linger.
+                          firstTime:
+                            segment === 'one_event_per_user'
+                              ? undefined
+                              : chartEvent.firstTime,
+                        }),
+                      );
+                    }}
+                  />
+                )}
+                {showSegment && isPropertyAgg && (
+                  <EventPropertiesCombobox event={chartEvent} />
+                )}
+                {/* Per-user is only meaningful for the Distribution chart. */}
+                {showPerUser && (
+                  <ReportPerUser
+                    event={chartEvent}
+                    onChange={(perUser) => {
+                      dispatch(changeEvent({ ...chartEvent, perUser }));
+                    }}
+                  />
+                )}
+                {firstTimeButton}
+                {!isPropertyAgg && addFilterButton}
+              </div>
+              {/* Add filter drops below when aggregating by a property */}
+              {isPropertyAgg && addFilterButton}
             </div>
-            {/* Add filter drops below when aggregating by a property */}
-            {isPropertyAgg && addFilterButton}
-          </div>
-        )}
+          )}
       </div>
     </div>
   );
@@ -194,11 +253,22 @@ export function ReportSeries() {
     projectId,
   });
 
+  // Custom-event names (from the event picker list). firstTime is unsupported
+  // for custom events server-side, so the toggle is hidden/cleared for them.
+  const customEventNames = (
+    eventNames as Array<{ name: string; isCustom?: boolean }>
+  )
+    .filter((e) => e?.isCustom)
+    .map((e) => e.name);
+
   // Distribution uses the Per-user picker instead of the segment dropdown.
   const showSegment = !['retention', 'funnel', 'distribution'].includes(
     chartType,
   );
   const showPerUser = chartType === 'distribution';
+  // "First time for user" is supported on trend/distribution/funnel/conversion
+  // charts (not retention, which selects many events with different semantics).
+  const showFirstTime = !['retention'].includes(chartType);
   const showAddFilter = !['retention'].includes(chartType);
   const showDisplayNameInput = !['retention'].includes(chartType);
   const isAddEventDisabled =
@@ -283,6 +353,8 @@ export function ReportSeries() {
                   showSegment={showSegment}
                   showAddFilter={showAddFilter}
                   showPerUser={showPerUser}
+                  showFirstTime={showFirstTime}
+                  customEventNames={customEventNames}
                   isSelectManyEvents={isSelectManyEvents}
                   className="rounded-lg border bg-def-100"
                 >
@@ -390,6 +462,18 @@ export function ReportSeries() {
                                       type: 'event',
                                       name: value,
                                       filters: [],
+                                      // Custom events are unsupported for
+                                      // firstTime; clear a stale true when the
+                                      // selection becomes one.
+                                      firstTime: customEventNames.includes(
+                                        value,
+                                      )
+                                        ? undefined
+                                        : (
+                                            event as IChartEventItem & {
+                                              type: 'event';
+                                            }
+                                          ).firstTime,
                                     },
                               ),
                             );
