@@ -195,12 +195,27 @@ function validReport(overrides: Record<string, unknown> = {}) {
 }
 
 describe('dashboard management registration', () => {
-  it('registers reads (get + lists) for read credentials', () => {
+  it('registers reads plus non-destructive writes for read credentials', () => {
+    // Read (self-service) tokens can manage dashboards/reports within their own
+    // project — everything except the two DELETE tools, which stay root-only.
     expect(register(READ_CONTEXT).names()).toEqual([
       'get_dashboard',
       'list_dashboards',
       'list_reports',
+      'create_dashboard',
+      'update_dashboard',
+      'create_report',
+      'update_report',
+      'duplicate_report',
+      'update_report_layout',
+      'reset_dashboard_layout',
     ]);
+  });
+
+  it('withholds the destructive delete tools from read credentials', () => {
+    const names = register(READ_CONTEXT).names();
+    expect(names).not.toContain('delete_dashboard');
+    expect(names).not.toContain('delete_report');
   });
 
   it('registers all management tools for root credentials', () => {

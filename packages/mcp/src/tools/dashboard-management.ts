@@ -480,12 +480,14 @@ export function registerDashboardManagementTools(
       }),
   );
 
-  // Everything below mutates dashboards or reports. Only root clients (the
-  // organization-level credential) may reach these — the self-service read
-  // tokens teammates hold never register them at all.
-  if (context.clientType !== 'root') {
-    return;
-  }
+  // Non-destructive mutations (create / update / duplicate / layout) are
+  // available to BOTH read and root clients — every tool resolves +
+  // ownership-checks the project (resolveProjectId → the read client's own
+  // project, or the root client's requested one), so a read token can only
+  // create/edit within its own project, never across the org. The two DELETE
+  // tools stay root-only (see the isRoot guards below) so a self-service token
+  // can't destroy a shared dashboard or report.
+  const isRoot = context.clientType === 'root';
 
   server.tool(
     'create_dashboard',
@@ -550,80 +552,86 @@ export function registerDashboardManagementTools(
       }),
   );
 
-  server.tool(
-    'delete_dashboard',
-    'Delete a dashboard. Deletion fails when reports exist unless forceDelete is true; forced deletion removes the reports first.',
-    {
-      projectId: projectIdSchema(context),
-      dashboardId: z.string().describe('The dashboard ID to delete'),
-      forceDelete: z
-        .boolean()
-        .optional()
-        .describe('Delete all reports in the dashboard before deleting it'),
-    },
-    async ({ projectId: inputProjectId, dashboardId, forceDelete }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        const dashboard = await requireDashboard(projectId, dashboardId);
+  if (isRoot) {
+    server.tool(
+      'delete_dashboard',
+      'Delete a dashboard. Deletion fails when reports exist unless forceDelete is true; forced deletion removes the reports first.',
+      {
+        projectId: projectIdSchema(context),
+        dashboardId: z.string().describe('The dashboard ID to delete'),
+        forceDelete: z
+          .boolean()
+          .optional()
+          .describe('Delete all reports in the dashboard before deleting it'),
+      },
+      async ({ projectId: inputProjectId, dashboardId, forceDelete }) =>
+        withErrorHandling(async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          const dashboard = await requireDashboard(projectId, dashboardId);
 
-        try {
-          await db.$primary().$transaction(async (transaction) => {
-            const current = await transaction.dashboard.findFirst({
-              where: { id: dashboardId, projectId },
-            });
-            if (!current) {
-              throw new Error('Dashboard not found');
-            }
+          try {
+            await db.$primary().$transaction(async (transaction) => {
+              const current = await transaction.dashboard.findFirst({
+                where: { id: dashboardId, projectId },
+              });
+              if (!current) {
+                throw new Error('Dashboard not found');
+              }
 
-            const reports = await transaction.report.findMany({
-              where: { dashboardId, projectId },
-              select: { id: true },
+              const reports = await transaction.report.findMany({
+                where: { dashboardId, projectId },
+                select: { id: true },
+              });
+              if (reports.length > 0 && !forceDelete) {
+                throw new Error(
+                  'Cannot delete dashboard with associated reports',
+                );
+              }
+
+              if (forceDelete && reports.length > 0) {
+                const reportIds = reports.map((report) => report.id);
+                // Layouts hold the foreign key to reports, so they go first —
+                // this order stays correct even if that cascade ever changes.
+                await transaction.reportLayout.deleteMany({
+                  where: { reportId: { in: reportIds } },
+                });
+                await transaction.report.deleteMany({
+                  where: { id: { in: reportIds } },
+                });
+              }
+
+              await transaction.dashboard.delete({
+                where: { id: dashboardId },
+              });
             });
-            if (reports.length > 0 && !forceDelete) {
+          } catch (error) {
+            if (
+              typeof error === 'object' &&
+              error !== null &&
+              'code' in error &&
+              error.code === 'P2003'
+            ) {
               throw new Error(
                 'Cannot delete dashboard with associated reports',
               );
             }
-
-            if (forceDelete && reports.length > 0) {
-              const reportIds = reports.map((report) => report.id);
-              // Layouts hold the foreign key to reports, so they go first —
-              // this order stays correct even if that cascade ever changes.
-              await transaction.reportLayout.deleteMany({
-                where: { reportId: { in: reportIds } },
-              });
-              await transaction.report.deleteMany({
-                where: { id: { in: reportIds } },
-              });
+            if (error instanceof Error) {
+              throw error;
             }
-
-            await transaction.dashboard.delete({ where: { id: dashboardId } });
-          });
-        } catch (error) {
-          if (
-            typeof error === 'object' &&
-            error !== null &&
-            'code' in error &&
-            error.code === 'P2003'
-          ) {
-            throw new Error('Cannot delete dashboard with associated reports');
+            throw new Error('Unknown error deleting dashboard');
           }
-          if (error instanceof Error) {
-            throw error;
-          }
-          throw new Error('Unknown error deleting dashboard');
-        }
 
-        return {
-          deleted: true,
-          dashboard: withDashboardUrl(
-            context.organizationId,
-            projectId,
-            dashboard,
-          ),
-        };
-      }),
-  );
+          return {
+            deleted: true,
+            dashboard: withDashboardUrl(
+              context.organizationId,
+              projectId,
+              dashboard,
+            ),
+          };
+        }),
+    );
+  }
 
   server.tool(
     'create_report',
@@ -677,27 +685,29 @@ export function registerDashboardManagementTools(
       }),
   );
 
-  server.tool(
-    'delete_report',
-    'Delete a saved chart report after verifying it belongs to the resolved project.',
-    {
-      projectId: projectIdSchema(context),
-      reportId: z.string().uuid().describe('The report ID to delete'),
-    },
-    async ({ projectId: inputProjectId, reportId }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        await requireReport(projectId, reportId);
-        const deleted = await db.$primary().report.delete({
-          where: { id: reportId },
-        });
+  if (isRoot) {
+    server.tool(
+      'delete_report',
+      'Delete a saved chart report after verifying it belongs to the resolved project.',
+      {
+        projectId: projectIdSchema(context),
+        reportId: z.string().uuid().describe('The report ID to delete'),
+      },
+      async ({ projectId: inputProjectId, reportId }) =>
+        withErrorHandling(async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          await requireReport(projectId, reportId);
+          const deleted = await db.$primary().report.delete({
+            where: { id: reportId },
+          });
 
-        return {
-          deleted: true,
-          report: withReportUrl(context.organizationId, projectId, deleted),
-        };
-      }),
-  );
+          return {
+            deleted: true,
+            report: withReportUrl(context.organizationId, projectId, deleted),
+          };
+        }),
+    );
+  }
 
   server.tool(
     'duplicate_report',
