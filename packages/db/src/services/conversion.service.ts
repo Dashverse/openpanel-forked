@@ -1360,6 +1360,12 @@ export async function getConversionCore(input: {
     value?: (string | number | boolean | null)[];
   }>;
   /**
+   * Optional cohort to gate the conversion by: only users in this cohort are
+   * counted (Mixpanel's "cohort as audience/filter"). Resolves via the same
+   * `inCohort` global-filter path the dashboard uses (membership CTE JOIN).
+   */
+  cohortId?: string;
+  /**
    * Subset of `steps` (event names) to treat as "first time for user": the
    * from/to event is gated on each user's global-first (all-time) occurrence.
    */
@@ -1387,12 +1393,25 @@ export async function getConversionCore(input: {
     ...(firstTimeSet.has(name) ? { firstTime: true } : {}),
   }));
 
-  const globalFilters = (input.filters ?? []).map((f, index) => ({
-    id: String(index),
-    name: f.name,
-    operator: f.operator,
-    value: f.value ?? [],
-  }));
+  const globalFilters = [
+    ...(input.filters ?? []).map((f, index) => ({
+      id: String(index),
+      name: f.name,
+      operator: f.operator,
+      value: f.value ?? [],
+    })),
+    ...(input.cohortId
+      ? [
+          {
+            id: 'cohort',
+            name: 'cohort',
+            operator: 'inCohort' as const,
+            value: [] as string[],
+            cohortId: input.cohortId,
+          },
+        ]
+      : []),
+  ];
 
   const result = await conversionServiceMcp.getConversion({
     projectId: input.projectId,

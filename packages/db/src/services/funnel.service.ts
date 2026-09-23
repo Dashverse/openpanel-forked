@@ -1156,6 +1156,12 @@ export async function getFunnelCore(input: {
   windowHours?: number;
   groupBy?: 'session_id' | 'profile_id';
   /**
+   * Optional cohort to gate the funnel by: only users in this cohort are
+   * counted (Mixpanel's "cohort as audience/filter"). Resolves via the same
+   * `inCohort` global-filter path the dashboard uses (membership CTE JOIN).
+   */
+  cohortId?: string;
+  /**
    * Subset of `steps` (event names) to treat as "first time for user": that step
    * matches only at each user's global-first (all-time) occurrence of the event.
    */
@@ -1175,12 +1181,25 @@ export async function getFunnelCore(input: {
     ...(firstTimeSet.has(name) ? { firstTime: true } : {}),
   }));
 
+  const globalFilters = input.cohortId
+    ? [
+        {
+          id: 'cohort',
+          name: 'cohort',
+          operator: 'inCohort' as const,
+          value: [] as string[],
+          cohortId: input.cohortId,
+        },
+      ]
+    : [];
+
   const result = await funnelServiceMcp.getFunnel({
     projectId: input.projectId,
     startDate: input.startDate,
     endDate: input.endDate,
     series,
     breakdowns: [],
+    globalFilters,
     chartType: 'funnel',
     interval: 'day',
     range: 'custom',

@@ -51,6 +51,12 @@ export function registerConversionTools(
           'Optional property to break the conversion rate down by. Returns one rate per value. Built-in column: bare name (e.g. "country"); custom property: "properties.<key>" (e.g. "properties.gateway").',
         ),
       filters: zFilters,
+      cohortId: z
+        .string()
+        .optional()
+        .describe(
+          'Optional cohort id (from list_cohorts) to gate the conversion to that audience — only users in the cohort are counted.',
+        ),
       firstTimeSteps: z
         .array(z.string())
         .optional()
@@ -67,6 +73,7 @@ export function registerConversionTools(
       groupBy,
       breakdown,
       filters,
+      cohortId,
       firstTimeSteps,
     }) =>
       withErrorHandling(
@@ -82,6 +89,7 @@ export function registerConversionTools(
             groupBy,
             breakdown,
             filters,
+            cohortId,
             firstTimeSteps,
           });
         },

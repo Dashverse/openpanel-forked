@@ -1,5 +1,8 @@
 import sqlstring from 'sqlstring';
+import type { IChartEventFilter, IChartInput } from '@openpanel/validation';
 import { TABLE_NAMES, chMcp } from '../clickhouse/client';
+import { executeChart } from '../engine';
+import { assertEventNamesExist } from './chart.service';
 import { getEventList } from './event.service';
 import { getProfileById } from './profile.service';
 import { getSessionList } from './session.service';
@@ -355,5 +358,217 @@ export async function getUserJourneyCore(input: {
       createdAt: e.createdAt,
       sessionId: e.sessionId,
     })),
+  };
+}
+
+/**
+ * Time-series insights for one or more events (the dashboard "insights"/linear
+ * chart), collapsed to a model-sized summary.
+ *
+ * Wraps the fork's chart engine (`executeChart` — the same pipeline the
+ * dashboard `chart.chart` tRPC procedure runs), so the numbers carry the fork's
+ * identity resolution, materialized-column routing and events-table reads.
+ * Runs on the ambient `mcp_ro` client (the MCP layer wraps every tool in
+ * `runWithMcpClient`), so all reads beneath the engine are read-only.
+ *
+ * `metric: 'count'` counts events; `metric: 'unique'` counts unique users
+ * (the two-level `user` segment). An optional `breakdown` splits each event
+ * into one series per property value; optional `filters` narrow the whole query.
+ */
+export async function getInsightsCore(input: {
+  projectId: string;
+  startDate: string;
+  endDate: string;
+  events: string[];
+  metric?: 'count' | 'unique';
+  interval?: 'day' | 'week' | 'month';
+  breakdown?: string;
+  filters?: Array<{
+    name: string;
+    operator: IChartEventFilter['operator'];
+    value?: (string | number | boolean | null)[];
+  }>;
+  /** Max series to return (relevant with a breakdown). */
+  limit?: number;
+}) {
+  await assertEventNamesExist(input.projectId, input.events);
+
+  const segment = input.metric === 'unique' ? 'user' : 'event';
+  const interval = input.interval ?? 'day';
+  const limit = Math.min(Math.max(input.limit ?? 20, 1), 100);
+
+  const series = input.events.map((name, index) => ({
+    id: String(index + 1),
+    type: 'event' as const,
+    name,
+    displayName: name,
+    segment,
+    filters: [] as IChartEventFilter[],
+  }));
+
+  const globalFilters = (input.filters ?? []).map((f, index) => ({
+    id: String(index),
+    name: f.name,
+    operator: f.operator,
+    value: f.value ?? [],
+  }));
+
+  const chart = await executeChart({
+    projectId: input.projectId,
+    chartType: 'linear',
+    interval,
+    range: 'custom',
+    startDate: input.startDate,
+    endDate: input.endDate,
+    series,
+    breakdowns: input.breakdown ? [{ id: '0', name: input.breakdown }] : [],
+    globalFilters,
+    cohortFilters: [],
+    holdProperties: [],
+    previous: false,
+    metric: 'sum',
+    limit,
+    sortOrder: 'desc',
+    measuring: 'conversion_rate',
+  } as unknown as IChartInput);
+
+  // Build a shared date axis (the engine fills gaps, so all series align).
+  const dates = chart.series[0]?.data.map((d) => d.date) ?? [];
+
+  // One row per returned series: [name, total, ...per-interval counts], ranked
+  // by total so a breakdown's head is first. The dashboard renders these as
+  // lines; here we hand back the raw per-interval numbers, capped by `limit`.
+  const rows = chart.series
+    .map((serie) => {
+      const row: Record<string, unknown> = {
+        series: serie.names.join(' / '),
+        total: serie.metrics.sum,
+      };
+      dates.forEach((date, i) => {
+        row[date] = serie.data[i]?.count ?? 0;
+      });
+      return row as { series: string; total: number } & Record<string, number>;
+    })
+    .sort((a, b) => b.total - a.total)
+    .slice(0, limit);
+
+  return {
+    events: input.events,
+    metric: input.metric ?? 'count',
+    interval,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    breakdown: input.breakdown,
+    dates,
+    overall: {
+      total: chart.metrics.sum,
+      average: chart.metrics.average,
+      min: chart.metrics.min,
+      max: chart.metrics.max,
+    },
+    series: rows,
+    seriesReturned: rows.length,
+    totalSeries: chart.series.length,
+  };
+}
+
+/**
+ * Active users per interval (DAU / WAU / MAU) over a date range, from `dau_mv`
+ * (the same materialized view the dashboard's active-users widgets read).
+ *
+ * `interval: 'day'|'week'|'month'` selects DAU/WAU/MAU. "Active user" = a
+ * distinct tracked profile id that fired at least one event in the bucket
+ * (includes anonymous/device ids, exactly like the dashboard figure).
+ * `uniqMerge` correctly merges the per-day `uniqState` states across a bucket.
+ * Optionally returns the top events over the range (a range-scoped scan of the
+ * events table, capped by the read-only client's execution limit).
+ */
+export async function getActiveUsersCore(input: {
+  projectId: string;
+  startDate: string;
+  endDate: string;
+  interval?: 'day' | 'week' | 'month';
+  includeTopEvents?: boolean;
+  topEventsLimit?: number;
+}) {
+  const interval = input.interval ?? 'day';
+  const pid = esc(input.projectId);
+  const start = esc(input.startDate.slice(0, 10));
+  const end = esc(input.endDate.slice(0, 10));
+
+  const bucketExpr =
+    interval === 'week'
+      ? 'toStartOfWeek(date)'
+      : interval === 'month'
+        ? 'toStartOfMonth(date)'
+        : 'date';
+
+  const dateRange = `date BETWEEN toDate(${start}) AND toDate(${end})`;
+
+  const seriesRes = await chMcp.query({
+    query: `SELECT ${bucketExpr} AS bucket, uniqMerge(profile_id) AS users
+      FROM ${TABLE_NAMES.dau_mv}
+      WHERE project_id = ${pid} AND ${dateRange}
+      GROUP BY bucket ORDER BY bucket ASC`,
+    format: 'JSONEachRow',
+  });
+  const seriesRows = (
+    await seriesRes.json<{ bucket: string; users: string }>()
+  ).map((r) => ({ bucket: r.bucket, users: Number(r.users) }));
+
+  // Unique users across the WHOLE range (not the sum of buckets — a user active
+  // on two days is one range-unique user but two DAUs).
+  const totalRes = await chMcp.query({
+    query: `SELECT uniqMerge(profile_id) AS users
+      FROM ${TABLE_NAMES.dau_mv}
+      WHERE project_id = ${pid} AND ${dateRange}`,
+    format: 'JSONEachRow',
+  });
+  const totalUniqueUsers = Number(
+    (await totalRes.json<{ users: string }>())[0]?.users ?? 0,
+  );
+
+  const counts = seriesRows.map((r) => r.users);
+  const peak = seriesRows.reduce<{ bucket: string; users: number } | null>(
+    (best, r) => (best === null || r.users > best.users ? r : best),
+    null,
+  );
+
+  let topEvents:
+    | Array<{ name: string; events: number; users: number }>
+    | undefined;
+  if (input.includeTopEvents) {
+    const limit = Math.min(Math.max(input.topEventsLimit ?? 10, 1), 50);
+    const topRes = await chMcp.query({
+      query: `SELECT name, count() AS events, uniqExact(profile_id) AS users
+        FROM ${TABLE_NAMES.events}
+        WHERE project_id = ${pid}
+          AND created_at BETWEEN toDate(${start}) AND toDate(${end}) + 1
+        GROUP BY name ORDER BY events DESC LIMIT ${limit}`,
+      format: 'JSONEachRow',
+    });
+    topEvents = (
+      await topRes.json<{ name: string; events: string; users: string }>()
+    ).map((r) => ({
+      name: r.name,
+      events: Number(r.events),
+      users: Number(r.users),
+    }));
+  }
+
+  return {
+    interval,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    metricName:
+      interval === 'week' ? 'WAU' : interval === 'month' ? 'MAU' : 'DAU',
+    totalUniqueUsers,
+    averageActiveUsersPerBucket:
+      counts.length > 0
+        ? Math.round(counts.reduce((a, b) => a + b, 0) / counts.length)
+        : 0,
+    peak,
+    series: seriesRows,
+    ...(topEvents ? { topEvents } : {}),
   };
 }

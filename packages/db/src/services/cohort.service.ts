@@ -114,7 +114,9 @@ export function buildEventCriteriaQuery(
 
   // Check if there are event property filters
   const hasEventPropertyFilters = filters.some(
-    (f) => f.name.startsWith('properties.') && !f.name.startsWith('profile.properties.')
+    (f) =>
+      f.name.startsWith('properties.') &&
+      !f.name.startsWith('profile.properties.'),
   );
 
   // PROPERTY criteria ("did X where flag=Y") → raw `events` with a
@@ -334,7 +336,8 @@ function getProfileFiltersWhereClause(
     switch (operator) {
       case 'is': {
         if (value.length === 1) {
-          where[id] = `${columnAccess} = ${sqlstring.escape(String(value[0]).trim())}`;
+          where[id] =
+            `${columnAccess} = ${sqlstring.escape(String(value[0]).trim())}`;
         } else {
           where[id] = `${columnAccess} IN (${value
             .map((val) => sqlstring.escape(String(val).trim()))
@@ -344,7 +347,8 @@ function getProfileFiltersWhereClause(
       }
       case 'isNot': {
         if (value.length === 1) {
-          where[id] = `${columnAccess} != ${sqlstring.escape(String(value[0]).trim())}`;
+          where[id] =
+            `${columnAccess} != ${sqlstring.escape(String(value[0]).trim())}`;
         } else {
           where[id] = `${columnAccess} NOT IN (${value
             .map((val) => sqlstring.escape(String(val).trim()))
@@ -354,25 +358,37 @@ function getProfileFiltersWhereClause(
       }
       case 'contains': {
         where[id] = `(${value
-          .map((val) => `${columnAccess} LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`)
+          .map(
+            (val) =>
+              `${columnAccess} LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`,
+          )
           .join(' OR ')})`;
         break;
       }
       case 'doesNotContain': {
         where[id] = `(${value
-          .map((val) => `${columnAccess} NOT LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`)
+          .map(
+            (val) =>
+              `${columnAccess} NOT LIKE ${sqlstring.escape(`%${String(val).trim()}%`)}`,
+          )
           .join(' OR ')})`;
         break;
       }
       case 'startsWith': {
         where[id] = `(${value
-          .map((val) => `${columnAccess} LIKE ${sqlstring.escape(`${String(val).trim()}%`)}`)
+          .map(
+            (val) =>
+              `${columnAccess} LIKE ${sqlstring.escape(`${String(val).trim()}%`)}`,
+          )
           .join(' OR ')})`;
         break;
       }
       case 'endsWith': {
         where[id] = `(${value
-          .map((val) => `${columnAccess} LIKE ${sqlstring.escape(`%${String(val).trim()}`)}`)
+          .map(
+            (val) =>
+              `${columnAccess} LIKE ${sqlstring.escape(`%${String(val).trim()}`)}`,
+          )
           .join(' OR ')})`;
         break;
       }
@@ -526,14 +542,19 @@ export async function storeCohortMembership(
   const sampleProfiles = profileIds.slice(0, 10);
   await ch.insert({
     table: TABLE_NAMES.cohort_metadata,
-    values: [{
-      project_id: projectId,
-      cohort_id: cohortId,
-      member_count: profileIds.length,
-      last_computed_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
-      sample_profiles: sampleProfiles,
-      version: version,
-    }],
+    values: [
+      {
+        project_id: projectId,
+        cohort_id: cohortId,
+        member_count: profileIds.length,
+        last_computed_at: new Date()
+          .toISOString()
+          .slice(0, 19)
+          .replace('T', ' '),
+        sample_profiles: sampleProfiles,
+        version: version,
+      },
+    ],
     format: 'JSONEachRow',
   });
 }
@@ -566,9 +587,7 @@ export async function getCohortMembers(
       ${opts?.offset ? `OFFSET ${opts.offset}` : ''}
     `;
 
-    const results = await chQuery<{ profile_id: string; total: number }>(
-      query,
-    );
+    const results = await chQuery<{ profile_id: string; total: number }>(query);
     return {
       profileIds: results.map((r) => r.profile_id),
       total: results[0]?.total || 0,
@@ -661,9 +680,7 @@ export async function countCohort(
 /**
  * Update cohort membership (for dynamic cohorts)
  */
-export async function updateCohortMembership(
-  cohortId: string,
-): Promise<void> {
+export async function updateCohortMembership(cohortId: string): Promise<void> {
   const cohort = await db.cohort.findUnique({ where: { id: cohortId } });
 
   if (!cohort || cohort.isStatic || cohort.computeOnDemand) {
@@ -678,12 +695,7 @@ export async function updateCohortMembership(
   const version = Date.now();
 
   // Store new membership
-  await storeCohortMembership(
-    cohort.projectId,
-    cohort.id,
-    profileIds,
-    version,
-  );
+  await storeCohortMembership(cohort.projectId, cohort.id, profileIds, version);
 
   // Update cache in PostgreSQL
   await db.cohort.update({
@@ -706,4 +718,104 @@ export async function getProfilesInCohort(
     limit: 100000, // Large limit for filtering
   });
   return new Set(profileIds);
+}
+
+/**
+ * List a project's cohorts for the MCP layer (the `*Core` seam).
+ *
+ * Metadata only — reads Postgres (`cohorts` table) and returns the cached
+ * `profileCount` so no ClickHouse compute is triggered. Ordered newest-first.
+ */
+export async function listCohortsCore(input: {
+  projectId: string;
+  limit?: number;
+}) {
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+  const cohorts = await db.cohort.findMany({
+    where: { projectId: input.projectId },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+  });
+
+  return {
+    cohorts: cohorts.map((c) => ({
+      id: c.id,
+      name: c.name,
+      description: c.description ?? undefined,
+      // 'event' (did event X) or 'property' (profile attribute).
+      type: (c.definition as CohortDefinition | null)?.type,
+      isStatic: c.isStatic,
+      computeOnDemand: c.computeOnDemand,
+      // Cached count; may be stale (see get_cohort for a fresh count).
+      memberCount: c.profileCount,
+      lastComputedAt: c.lastComputedAt ?? undefined,
+      createdAt: c.createdAt,
+    })),
+  };
+}
+
+/**
+ * One cohort's definition, fresh member count, and a small sample of member
+ * profile ids for the MCP layer (the `*Core` seam).
+ *
+ * Ownership is validated first (project-scoped lookup). The count comes from
+ * `getCohortCount` (cache → ClickHouse `cohort_members` for stored cohorts, or
+ * an on-demand COUNT). The sample comes from `getCohortMembers`. Both resolve
+ * to canonical persons (a user's anonymous + identified ids collapse to one),
+ * so ids match the identity-resolved funnel/conversion/profile tools. All
+ * ClickHouse reads run on the ambient `mcp_ro` client.
+ */
+export async function getCohortCore(input: {
+  projectId: string;
+  cohortId: string;
+  sampleSize?: number;
+}) {
+  const cohort = await db.cohort.findFirst({
+    where: { id: input.cohortId, projectId: input.projectId },
+  });
+  if (!cohort) {
+    throw new Error('Cohort not found');
+  }
+
+  const sampleSize = Math.min(Math.max(input.sampleSize ?? 10, 0), 100);
+
+  // Member count is the stored snapshot (same value list_cohorts and the
+  // dashboard show). A read-only tool must never trigger an on-demand recompute
+  // — for an event cohort that is a full event scan that blows the MCP read
+  // budget. `lastComputedAt` tells the caller how fresh the number is.
+  const memberCount = cohort.profileCount ?? 0;
+
+  // The sample is best-effort. Stored cohorts read a LIMIT-ed slice of
+  // cohort_members (fast); on-demand cohorts must compute full membership before
+  // slicing, which can exceed the read budget on a large cohort. Degrade to an
+  // empty sample with a note rather than failing the whole call.
+  let sampleProfileIds: string[] = [];
+  let sampleNote: string | undefined;
+  if (sampleSize > 0) {
+    try {
+      const members = await getCohortMembers(input.cohortId, input.projectId, {
+        limit: sampleSize,
+      });
+      sampleProfileIds = members.profileIds;
+    } catch {
+      sampleNote =
+        'Sample unavailable: this cohort is too large to sample within the read time budget. The member count above is the stored snapshot.';
+    }
+  }
+
+  return {
+    id: cohort.id,
+    name: cohort.name,
+    description: cohort.description ?? undefined,
+    type: (cohort.definition as CohortDefinition | null)?.type,
+    isStatic: cohort.isStatic,
+    computeOnDemand: cohort.computeOnDemand,
+    memberCount,
+    definition: cohort.definition,
+    // Canonical person ids — the same identity space as the analytics tools.
+    sampleProfileIds,
+    ...(sampleNote ? { sampleNote } : {}),
+    createdAt: cohort.createdAt,
+    lastComputedAt: cohort.lastComputedAt ?? undefined,
+  };
 }
