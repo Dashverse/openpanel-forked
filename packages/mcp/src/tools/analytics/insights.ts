@@ -68,20 +68,23 @@ export function registerInsightsTools(
       filters,
       limit,
     }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getInsightsCore({
-          projectId,
-          startDate,
-          endDate,
-          events,
-          metric,
-          interval,
-          breakdown,
-          filters,
-          limit,
-        });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getInsightsCore({
+            projectId,
+            startDate,
+            endDate,
+            events,
+            metric,
+            interval,
+            breakdown,
+            filters,
+            limit,
+          });
+        },
+        { tool: 'get_insights', context },
+      ),
   );
 }
