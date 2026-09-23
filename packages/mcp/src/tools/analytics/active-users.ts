@@ -49,17 +49,20 @@ export function registerActiveUsersTools(
       includeTopEvents,
       topEventsLimit,
     }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        const { startDate, endDate } = resolveDateRange(sd, ed);
-        return getActiveUsersCore({
-          projectId,
-          startDate,
-          endDate,
-          interval,
-          includeTopEvents,
-          topEventsLimit,
-        });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          const { startDate, endDate } = resolveDateRange(sd, ed);
+          return getActiveUsersCore({
+            projectId,
+            startDate,
+            endDate,
+            interval,
+            includeTopEvents,
+            topEventsLimit,
+          });
+        },
+        { tool: 'get_active_users', context },
+      ),
   );
 }

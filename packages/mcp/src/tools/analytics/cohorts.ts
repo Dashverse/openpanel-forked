@@ -28,10 +28,13 @@ export function registerCohortTools(
         .describe('Max cohorts to return (default 50, max 200).'),
     },
     async ({ projectId: inputProjectId, limit }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        return listCohortsCore({ projectId, limit });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          return listCohortsCore({ projectId, limit });
+        },
+        { tool: 'list_cohorts', context },
+      ),
   );
 
   server.tool(
@@ -51,9 +54,12 @@ export function registerCohortTools(
         ),
     },
     async ({ projectId: inputProjectId, cohortId, sampleSize }) =>
-      withErrorHandling(async () => {
-        const projectId = await resolveProjectId(context, inputProjectId);
-        return getCohortCore({ projectId, cohortId, sampleSize });
-      }),
+      withErrorHandling(
+        async () => {
+          const projectId = await resolveProjectId(context, inputProjectId);
+          return getCohortCore({ projectId, cohortId, sampleSize });
+        },
+        { tool: 'get_cohort', context },
+      ),
   );
 }
