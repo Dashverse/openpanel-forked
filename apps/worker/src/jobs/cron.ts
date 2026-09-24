@@ -1,6 +1,7 @@
 import type { Job } from 'bullmq';
 
 import {
+  aliasBuffer,
   eventBuffer,
   profileBuffer,
   replayBuffer,
@@ -44,6 +45,11 @@ export async function cronJob(job: Job<CronQueuePayload>) {
     case 'flushReplays': {
       return await withSpan('worker.cron.flushReplays', () =>
         replayBuffer.tryFlush(),
+      );
+    }
+    case 'flushAliases': {
+      return await withSpan('worker.cron.flushAliases', () =>
+        aliasBuffer.tryFlush(),
       );
     }
     case 'ping': {

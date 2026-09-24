@@ -1,6 +1,7 @@
 import client from 'prom-client';
 
 import {
+  aliasBuffer,
   botBuffer,
   eventBuffer,
   type FlushObservation,
@@ -80,6 +81,7 @@ for (const buffer of [
   sessionBuffer,
   replayBuffer,
   botBuffer,
+  aliasBuffer,
 ]) {
   buffer.flushObserver = handleFlushObservation;
 }
@@ -284,6 +286,17 @@ register.registerMetric(
   }),
 );
 
+register.registerMetric(
+  new client.Gauge({
+    name: `buffer_${aliasBuffer.name}_count`,
+    help: 'Number of unprocessed profile aliases',
+    async collect() {
+      const metric = await aliasBuffer.getBufferSize();
+      this.set(metric);
+    },
+  }),
+);
+
 // Per-buffer memory bytes (Redis MEMORY USAGE on the underlying key).
 // One gauge per buffer type so a dashboard can attribute Redis growth.
 // Errors are swallowed so a Redis blip on one buffer doesn't fail the whole
@@ -295,6 +308,7 @@ for (const buffer of [
   sessionBuffer,
   replayBuffer,
   botBuffer,
+  aliasBuffer,
 ]) {
   register.registerMetric(
     new client.Gauge({
