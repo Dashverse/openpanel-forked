@@ -6,7 +6,7 @@ import { strip, toObject } from '@openpanel/common';
 import { cacheable } from '@openpanel/redis';
 import type { IChartEventFilter } from '@openpanel/validation';
 
-import { profileBuffer } from '../buffers';
+import { aliasBuffer, profileBuffer } from '../buffers';
 import {
   TABLE_NAMES,
   ch,
@@ -595,7 +595,10 @@ export async function getProfileIdCluster(
   );
 }
 
-export const getProfileIdClusterCached = cacheable(getProfileIdCluster, 60 * 10);
+export const getProfileIdClusterCached = cacheable(
+  getProfileIdCluster,
+  60 * 10,
+);
 
 // Columns the profile LIST renders. `properties` IS needed here — the table's
 // Country/OS/Browser/Model/Referrer columns read from it (e.g.
@@ -1093,16 +1096,32 @@ export async function upsertAlias({
     return;
   }
 
+  const row = {
+    project_id: projectId,
+    profile_id: profileId,
+    alias,
+    created_at: formatClickhouseDate(new Date()),
+  };
+
+  // Kill switch (ALIAS_BUFFER_ENABLED): route alias writes through the batched,
+  // in-batch-deduped Redis buffer. The proxy re-emits the same mapping on every
+  // event batch, so the direct path below produced a flood of duplicate rows +
+  // tiny parts into the profile_aliases ReplacingMergeTree, driving huge merge
+  // CPU. The buffer collapses per-batch re-emissions and coalesces parts.
+  // Unset/false keeps the original direct async insert, so the buffer can be
+  // disabled instantly with an env flip + worker restart (the flush cron still
+  // drains anything already buffered).
+  if (
+    process.env.ALIAS_BUFFER_ENABLED === '1' ||
+    process.env.ALIAS_BUFFER_ENABLED === 'true'
+  ) {
+    await aliasBuffer.add(row);
+    return;
+  }
+
   await ch.insert({
     table: TABLE_NAMES.alias,
-    values: [
-      {
-        project_id: projectId,
-        profile_id: profileId,
-        alias,
-        created_at: formatClickhouseDate(new Date()),
-      },
-    ],
+    values: [row],
     format: 'JSONEachRow',
     // Aliases are written one row at a time per sign-in batch (the proxy
     // re-emits per batch). async_insert lets ClickHouse coalesce these into
