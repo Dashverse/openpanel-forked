@@ -21,6 +21,7 @@ export function ReportRetentionChart() {
       endDate,
       criteria,
       interval,
+      globalFilters,
     },
     isLazyLoading,
   } = useReportChartContext();
@@ -41,6 +42,7 @@ export function ReportRetentionChart() {
         endDate,
         criteria,
         interval,
+        filters: globalFilters ?? [],
       },
       {
         placeholderData: keepPreviousData,
@@ -67,7 +69,9 @@ export function ReportRetentionChart() {
 
   return (
     <div className="col gap-4 relative group/chart">
-      <RefetchingOverlay isRefetching={res.isPlaceholderData && res.isFetching} />
+      <RefetchingOverlay
+        isRefetching={res.isPlaceholderData && res.isFetching}
+      />
       <ChartDownloadButton type="cohort" data={res.data} />
       <AspectContainer>
         <Chart data={res.data} />

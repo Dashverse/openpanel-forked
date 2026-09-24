@@ -523,6 +523,7 @@ export const chartRouter = createTRPCRouter({
         endDate: z.string().nullish(),
         interval: zTimeInterval.default('day'),
         range: zRange,
+        filters: z.array(zChartEventFilter).default([]),
       }),
     )
     .query(async ({ input }) => {
@@ -537,6 +538,7 @@ export const chartRouter = createTRPCRouter({
         interval: input.interval,
         startDate: dates.startDate,
         endDate: dates.endDate,
+        filters: input.filters,
       });
 
       const cohortData = await chQuery<{

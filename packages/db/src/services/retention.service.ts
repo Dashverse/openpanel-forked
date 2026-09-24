@@ -1,4 +1,5 @@
 import { round } from '@openpanel/common';
+import type { IChartEventFilter } from '@openpanel/validation';
 import {
   differenceInDays,
   differenceInMonths,
@@ -16,6 +17,7 @@ import {
   getEventsTableForRange,
   resolvedPersonIdSql,
 } from '../clickhouse/client';
+import { getEventFiltersWhereClause } from './chart.service';
 
 type IGetWeekRetentionInput = {
   projectId: string;
@@ -193,6 +195,9 @@ export interface RetentionQueryInput {
   startDate: string;
   /** Absolute window end (already timezone-resolved by the caller). */
   endDate: string;
+  /** A single global filter applied to BOTH the cohort-defining ("first") event
+   *  and the return ("second") event. */
+  filters?: IChartEventFilter[];
 }
 
 function utc(date: string | Date) {
@@ -271,6 +276,26 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
     return `name IN (${event.map((e) => sqlstring.escape(e)).join(',')})`;
   };
 
+  // Property filters applied to BOTH events (single global filter). Profile-scoped
+  // and cohort filters are dropped here (the event WHERE can't resolve them);
+  // mirrors the safe pattern in funnel.service.ts. When empty, `filterSql` is ''
+  // so the generated SQL stays byte-identical to the no-filter case.
+  const filterConditions = Object.values(
+    getEventFiltersWhereClause(
+      (input.filters ?? []).filter(
+        (f) =>
+          !f.name.startsWith('profile.') &&
+          f.name !== 'has_profile' &&
+          f.operator !== 'inCohort' &&
+          f.operator !== 'notInCohort',
+      ),
+      projectId,
+    ),
+  );
+  const filterSql = filterConditions.length
+    ? `\n        ${filterConditions.map((c) => `AND (${c})`).join('\n        ')}`
+    : '';
+
   // Columns are table-qualified so the resolved expression's inner `profile_id`
   // binds to the column, not the `AS profile_id` output alias (avoids
   // NOT_AN_AGGREGATE / ambiguous identifier — the #432 trap).
@@ -293,7 +318,7 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
       FROM ${eventsTable}
       WHERE ${whereEventNameIs(firstEvent)}
         AND project_id = ${sqlstring.escape(projectId)}
-        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}')
+        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}')${filterSql}
     ),
     last_event AS
     (
@@ -304,7 +329,7 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
         FROM ${eventsTable}
         WHERE ${whereEventNameIs(secondEvent)}
         AND project_id = ${sqlstring.escape(projectId)}
-        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}
+        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}${filterSql}
     ),
     retention_matrix AS
     (
@@ -440,9 +465,24 @@ export async function getRetentionCore(input: {
   endDate: string;
   criteria?: RetentionCriteria;
   interval?: RetentionInterval;
+  /** A single global filter applied to BOTH events. */
+  filters?: Array<{
+    name: string;
+    operator: IChartEventFilter['operator'];
+    value?: (string | number | boolean | null)[];
+  }>;
 }) {
   const criteria = input.criteria ?? 'on_or_after';
   const interval = input.interval ?? 'day';
+
+  const filters: IChartEventFilter[] = (input.filters ?? []).map(
+    (f, index) => ({
+      id: String(index),
+      name: f.name,
+      operator: f.operator,
+      value: f.value ?? [],
+    }),
+  );
 
   const { sql, diffInterval } = buildRetentionQuery({
     projectId: input.projectId,
@@ -452,6 +492,7 @@ export async function getRetentionCore(input: {
     interval,
     startDate: input.startDate,
     endDate: input.endDate,
+    filters,
   });
 
   const res = await chMcp.query({ query: sql, format: 'JSONEachRow' });
