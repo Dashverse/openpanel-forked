@@ -98,6 +98,7 @@ export class AliasBuffer extends BaseBuffer {
       }
       const values = [...deduped.values()];
 
+      const chInsertStart = performance.now();
       for (const chunk of this.chunks(values, this.chunkSize)) {
         await ch.insert({
           table: TABLE_NAMES.alias,
@@ -111,6 +112,14 @@ export class AliasBuffer extends BaseBuffer {
           },
         });
       }
+
+      // Report the deduped rows actually inserted so
+      // buffer_rows_inserted_total{buffer="alias"} + the flush-duration phase
+      // breakdown populate — matching the event and replay buffers.
+      this.reportFlushStats({
+        rowsProcessed: values.length,
+        phases: { chInsertMs: performance.now() - chInsertStart },
+      });
 
       // Only trim after a successful insert so a failed flush is retried.
       await this.redis

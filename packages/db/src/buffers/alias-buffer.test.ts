@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => {
     llen: vi.fn(async () => 0),
     memory: vi.fn(async () => 0),
   };
-  const chInsert = vi.fn(async () => undefined);
+  const chInsert = vi.fn(async (_opts: any) => undefined);
   return { redis, chInsert };
 });
 
