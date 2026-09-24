@@ -12,6 +12,9 @@ export function ReportSidebar() {
   const dispatch = useDispatch();
   const { chartType } = useSelector((state) => state.report);
   const showBreakdown = chartType !== 'retention';
+  // Retention filters per-event (on each event's own "Add filter"), so the
+  // report-level global filter section doesn't apply to it.
+  const showGlobalFilters = chartType !== 'retention';
   return (
     <div className="flex flex-col gap-6">
       <div>
@@ -23,7 +26,7 @@ export function ReportSidebar() {
         />
       </div>
       <ReportSeries />
-      <ReportGlobalFilters />
+      {showGlobalFilters && <ReportGlobalFilters />}
       {(chartType === 'funnel' || chartType === 'conversion') && (
         <ReportHoldProperties />
       )}

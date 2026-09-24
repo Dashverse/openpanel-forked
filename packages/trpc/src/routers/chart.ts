@@ -6,7 +6,7 @@ import {
   type IClickhouseProfile,
   type IServiceProfile,
   TABLE_NAMES,
-  aliasResolutionNeedsCte,
+  buildRetentionQuery,
   ch,
   chQuery,
   clix,
@@ -19,12 +19,11 @@ import {
   getChartStartEndDate,
   getEventFiltersWhereClause,
   getEventMetasCached,
-  getEventsTableForRange,
   getProfilesCached,
   getSelectPropertyKey,
   getSettingsForProject,
   onlyReportEvents,
-  resolvedPersonIdSql,
+  processRetentionData,
 } from '@openpanel/db';
 import {
   type IChartEvent,
@@ -39,12 +38,6 @@ import {
 
 import { round } from '@openpanel/common';
 import { ChartEngine } from '@openpanel/db';
-import {
-  differenceInDays,
-  differenceInMonths,
-  differenceInWeeks,
-  formatISO,
-} from 'date-fns';
 import { getProjectAccess } from '../access';
 import { TRPCAccessError } from '../errors';
 import {
@@ -53,13 +46,6 @@ import {
   protectedProcedure,
   publicProcedure,
 } from '../trpc';
-
-function utc(date: string | Date) {
-  if (typeof date === 'string') {
-    return date.replace('T', ' ').slice(0, 19);
-  }
-  return formatISO(date).replace('T', ' ').slice(0, 19);
-}
 
 // Dashboard chart/funnel/conversion results are cached in Redis so that a page
 // full of report widgets does not fan out into one ClickHouse query per widget
@@ -537,134 +523,25 @@ export const chartRouter = createTRPCRouter({
         endDate: z.string().nullish(),
         interval: zTimeInterval.default('day'),
         range: zRange,
+        firstEventFilters: z.array(zChartEventFilter).default([]),
+        secondEventFilters: z.array(zChartEventFilter).default([]),
       }),
     )
     .query(async ({ input }) => {
       const { timezone } = await getSettingsForProject(input.projectId);
       const { projectId, firstEvent, secondEvent } = input;
       const dates = getChartStartEndDate(input, timezone);
-      const diffInterval = {
-        minute: () => differenceInDays(dates.endDate, dates.startDate),
-        hour: () => differenceInDays(dates.endDate, dates.startDate),
-        day: () => differenceInDays(dates.endDate, dates.startDate),
-        week: () => differenceInWeeks(dates.endDate, dates.startDate),
-        month: () => differenceInMonths(dates.endDate, dates.startDate),
-      }[input.interval]();
-      const sqlInterval = {
-        minute: 'DAY',
-        hour: 'DAY',
-        day: 'DAY',
-        week: 'WEEK',
-        month: 'MONTH',
-      }[input.interval];
-
-      const sqlToStartOf = {
-        minute: 'toDate',
-        hour: 'toDate',
-        day: 'toDate',
-        week: 'toStartOfWeek',
-        month: 'toStartOfMonth',
-      }[input.interval];
-
-      const countCriteria = input.criteria === 'on_or_after' ? '>=' : '=';
-
-      const usersSelect = range(0, diffInterval + 1)
-        .map(
-          (index) =>
-            `groupUniqArrayIf(profile_id, x_after_cohort ${countCriteria} ${index}) AS interval_${index}_users`,
-        )
-        .join(',\n');
-
-      const countsSelect = range(0, diffInterval + 1)
-        .map(
-          (index) =>
-            `length(interval_${index}_users) AS interval_${index}_user_count`,
-        )
-        .join(',\n');
-
-      const whereEventNameIs = (event: string[]) => {
-        if (event.length === 1) {
-          return `name = ${sqlstring.escape(event[0])}`;
-        }
-        return `name IN (${event.map((e) => sqlstring.escape(e)).join(',')})`;
-      };
-
-      // Retention reads raw `events` (routed to events_v2 when enabled) instead
-      // of the anon-excluding `cohort_events_mv` (materialized WHERE profile_id
-      // != device_id), and resolves each event to its canonical person so a
-      // user's anon + identified events — and logins across devices — collapse
-      // to one. `events` carries `device_id` (the profile_aliases key); the
-      // retired MV did not, which is exactly why resolution was impossible on the
-      // old source. Dict off (self-hosted / dev) -> raw profile_id: unchanged
-      // identity behaviour, but still anon-inclusive. Columns are table-qualified
-      // so the resolved expression's inner `profile_id` binds to the column, not
-      // the `AS profile_id` output alias (avoids NOT_AN_AGGREGATE / ambiguous
-      // identifier — the #432 trap).
-      const eventsTable = getEventsTableForRange(utc(dates.startDate));
-      const personSql = aliasResolutionNeedsCte()
-        ? `${eventsTable}.profile_id`
-        : resolvedPersonIdSql(
-            projectId,
-            `${eventsTable}.device_id`,
-            `${eventsTable}.profile_id`,
-          );
-
-      const cohortQuery = `
-        WITH
-        cohort_users AS (
-          SELECT
-            ${personSql} AS userID,
-            project_id,
-            ${sqlToStartOf}(created_at) AS cohort_interval
-          FROM ${eventsTable}
-          WHERE ${whereEventNameIs(firstEvent)}
-            AND project_id = ${sqlstring.escape(projectId)}
-            AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}')
-        ),
-        last_event AS
-        (
-            SELECT
-                ${personSql} AS profile_id,
-                project_id,
-                toDate(created_at) AS event_date
-            FROM ${eventsTable}
-            WHERE ${whereEventNameIs(secondEvent)}
-            AND project_id = ${sqlstring.escape(projectId)}
-            AND created_at BETWEEN toDate('${utc(dates.startDate)}') AND toDate('${utc(dates.endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}
-        ),
-        retention_matrix AS
-        (
-          SELECT
-              f.cohort_interval,
-              l.profile_id,
-              dateDiff('${sqlInterval}', f.cohort_interval, ${sqlToStartOf}(l.event_date)) AS x_after_cohort
-          FROM cohort_users AS f
-          INNER JOIN last_event AS l ON f.userID = l.profile_id
-          WHERE (l.event_date >= f.cohort_interval) 
-          AND (l.event_date <= (f.cohort_interval + INTERVAL ${diffInterval} ${sqlInterval}))
-        ),
-        interval_users AS (
-          SELECT
-            cohort_interval,
-            ${usersSelect}
-          FROM retention_matrix
-          GROUP BY cohort_interval
-        ),
-        cohort_sizes AS (
-          SELECT
-            cohort_interval,
-            COUNT(DISTINCT userID) AS total_first_event_count
-          FROM cohort_users
-          GROUP BY cohort_interval
-        )
-        SELECT
-          interval_users.cohort_interval,
-          cs.total_first_event_count,
-          ${countsSelect}
-        FROM interval_users
-        LEFT JOIN cohort_sizes AS cs ON interval_users.cohort_interval = cs.cohort_interval
-        ORDER BY interval_users.cohort_interval ASC
-      `;
+      const { sql: cohortQuery, diffInterval } = buildRetentionQuery({
+        projectId,
+        firstEvent,
+        secondEvent,
+        criteria: input.criteria,
+        interval: input.interval,
+        startDate: dates.startDate,
+        endDate: dates.endDate,
+        firstEventFilters: input.firstEventFilters,
+        secondEventFilters: input.secondEventFilters,
+      });
 
       const cohortData = await chQuery<{
         cohort_interval: string;
@@ -672,7 +549,7 @@ export const chartRouter = createTRPCRouter({
         [key: string]: any;
       }>(cohortQuery);
 
-      return processCohortData(cohortData, diffInterval);
+      return processRetentionData(cohortData, diffInterval);
     }),
 
   getProfiles: protectedProcedure
@@ -923,74 +800,3 @@ export const chartRouter = createTRPCRouter({
       return profiles;
     }),
 });
-
-function processCohortData(
-  data: Array<{
-    cohort_interval: string;
-    total_first_event_count: number;
-    [key: string]: any;
-  }>,
-  diffInterval: number,
-) {
-  if (data.length === 0) {
-    return [];
-  }
-
-  const processed = data.map((row) => {
-    const sum = row.total_first_event_count;
-    const values = range(0, diffInterval + 1).map(
-      (index) => (row[`interval_${index}_user_count`] || 0) as number,
-    );
-
-    return {
-      cohort_interval: row.cohort_interval,
-      sum,
-      values: values,
-      percentages: values.map((value) => (sum > 0 ? round(value / sum, 2) : 0)),
-    };
-  });
-
-  const averageData: {
-    totalSum: number;
-    values: Array<{ sum: number; weightedSum: number }>;
-    percentages: Array<{ sum: number; weightedSum: number }>;
-  } = {
-    totalSum: 0,
-    values: range(0, diffInterval + 1).map(() => ({ sum: 0, weightedSum: 0 })),
-    percentages: range(0, diffInterval + 1).map(() => ({
-      sum: 0,
-      weightedSum: 0,
-    })),
-  };
-
-  // Aggregate data for weighted averages, excluding zeros
-  processed.forEach((row) => {
-    averageData.totalSum += row.sum;
-    row.values.forEach((value, index) => {
-      if (value !== 0) {
-        averageData.values[index]!.sum += row.sum;
-        averageData.values[index]!.weightedSum += value * row.sum;
-      }
-    });
-    row.percentages.forEach((percentage, index) => {
-      if (percentage !== 0) {
-        averageData.percentages[index]!.sum += row.sum;
-        averageData.percentages[index]!.weightedSum += percentage * row.sum;
-      }
-    });
-  });
-
-  // Calculate weighted average values, excluding zeros
-  const averageRow = {
-    cohort_interval: 'Weighted Average',
-    sum: round(averageData.totalSum / processed.length, 0),
-    percentages: averageData.percentages.map(({ sum, weightedSum }) =>
-      sum > 0 ? round(weightedSum / sum, 2) : 0,
-    ),
-    values: averageData.values.map(({ sum, weightedSum }) =>
-      sum > 0 ? round(weightedSum / sum, 0) : 0,
-    ),
-  };
-
-  return [averageRow, ...processed];
-}

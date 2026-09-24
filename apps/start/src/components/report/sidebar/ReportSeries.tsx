@@ -185,9 +185,11 @@ function SortableSeries({
       <div className="flex flex-col gap-2 p-2 group">
         {children(dragHandle)}
 
-        {/* Filters sit directly under the event when added */}
-        {chartEvent && !isSelectManyEvents && (
-          <FiltersList event={chartEvent} />
+        {/* Filters sit directly under the event when added. For retention
+            (isSelectManyEvents) the event name is stored in filters[0], so hide
+            that entry and show only the property filters. */}
+        {chartEvent && (
+          <FiltersList event={chartEvent} hideNameFilter={isSelectManyEvents} />
         )}
 
         {/* Aggregate-by row: the property selector sits inline with the
@@ -269,7 +271,10 @@ export function ReportSeries() {
   // "First time for user" is supported on trend/distribution/funnel/conversion
   // charts (not retention, which selects many events with different semantics).
   const showFirstTime = !['retention'].includes(chartType);
-  const showAddFilter = !['retention'].includes(chartType);
+  // Retention now supports per-event property filters (applied to the cohort
+  // event and the return event independently). Its event name lives in a
+  // special filters[0] entry, so the filter list hides that (hideNameFilter).
+  const showAddFilter = true;
   const showDisplayNameInput = !['retention'].includes(chartType);
   const isAddEventDisabled =
     (chartType === 'retention' || chartType === 'conversion') &&
