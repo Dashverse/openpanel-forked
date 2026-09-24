@@ -195,9 +195,10 @@ export interface RetentionQueryInput {
   startDate: string;
   /** Absolute window end (already timezone-resolved by the caller). */
   endDate: string;
-  /** A single global filter applied to BOTH the cohort-defining ("first") event
-   *  and the return ("second") event. */
-  filters?: IChartEventFilter[];
+  /** Property filters applied only to the cohort-defining ("first") event. */
+  firstEventFilters?: IChartEventFilter[];
+  /** Property filters applied only to the return ("second") event. */
+  secondEventFilters?: IChartEventFilter[];
 }
 
 function utc(date: string | Date) {
@@ -276,25 +277,30 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
     return `name IN (${event.map((e) => sqlstring.escape(e)).join(',')})`;
   };
 
-  // Property filters applied to BOTH events (single global filter). Profile-scoped
+  // Per-event property filters: firstEventFilters constrain the cohort event,
+  // secondEventFilters constrain the return event — independently. Profile-scoped
   // and cohort filters are dropped here (the event WHERE can't resolve them);
-  // mirrors the safe pattern in funnel.service.ts. When empty, `filterSql` is ''
-  // so the generated SQL stays byte-identical to the no-filter case.
-  const filterConditions = Object.values(
-    getEventFiltersWhereClause(
-      (input.filters ?? []).filter(
-        (f) =>
-          !f.name.startsWith('profile.') &&
-          f.name !== 'has_profile' &&
-          f.operator !== 'inCohort' &&
-          f.operator !== 'notInCohort',
+  // mirrors the safe pattern in funnel.service.ts. When a side has no filters its
+  // fragment is '' so that side's SQL stays byte-identical to the no-filter case.
+  const toFilterSql = (filters: IChartEventFilter[] | undefined) => {
+    const conditions = Object.values(
+      getEventFiltersWhereClause(
+        (filters ?? []).filter(
+          (f) =>
+            !f.name.startsWith('profile.') &&
+            f.name !== 'has_profile' &&
+            f.operator !== 'inCohort' &&
+            f.operator !== 'notInCohort',
+        ),
+        projectId,
       ),
-      projectId,
-    ),
-  );
-  const filterSql = filterConditions.length
-    ? `\n        ${filterConditions.map((c) => `AND (${c})`).join('\n        ')}`
-    : '';
+    );
+    return conditions.length
+      ? `\n        ${conditions.map((c) => `AND (${c})`).join('\n        ')}`
+      : '';
+  };
+  const cohortFilterSql = toFilterSql(input.firstEventFilters);
+  const returnFilterSql = toFilterSql(input.secondEventFilters);
 
   // Columns are table-qualified so the resolved expression's inner `profile_id`
   // binds to the column, not the `AS profile_id` output alias (avoids
@@ -318,7 +324,7 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
       FROM ${eventsTable}
       WHERE ${whereEventNameIs(firstEvent)}
         AND project_id = ${sqlstring.escape(projectId)}
-        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}')${filterSql}
+        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}')${cohortFilterSql}
     ),
     last_event AS
     (
@@ -329,7 +335,7 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
         FROM ${eventsTable}
         WHERE ${whereEventNameIs(secondEvent)}
         AND project_id = ${sqlstring.escape(projectId)}
-        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}${filterSql}
+        AND created_at BETWEEN toDate('${utc(startDate)}') AND toDate('${utc(endDate)}') + INTERVAL ${diffInterval} ${sqlInterval}${returnFilterSql}
     ),
     retention_matrix AS
     (
@@ -465,8 +471,14 @@ export async function getRetentionCore(input: {
   endDate: string;
   criteria?: RetentionCriteria;
   interval?: RetentionInterval;
-  /** A single global filter applied to BOTH events. */
-  filters?: Array<{
+  /** Property filters applied only to the cohort-defining ("first") event. */
+  firstEventFilters?: Array<{
+    name: string;
+    operator: IChartEventFilter['operator'];
+    value?: (string | number | boolean | null)[];
+  }>;
+  /** Property filters applied only to the return ("second") event. */
+  secondEventFilters?: Array<{
     name: string;
     operator: IChartEventFilter['operator'];
     value?: (string | number | boolean | null)[];
@@ -475,14 +487,19 @@ export async function getRetentionCore(input: {
   const criteria = input.criteria ?? 'on_or_after';
   const interval = input.interval ?? 'day';
 
-  const filters: IChartEventFilter[] = (input.filters ?? []).map(
-    (f, index) => ({
+  const toChartFilters = (
+    filters?: Array<{
+      name: string;
+      operator: IChartEventFilter['operator'];
+      value?: (string | number | boolean | null)[];
+    }>,
+  ): IChartEventFilter[] =>
+    (filters ?? []).map((f, index) => ({
       id: String(index),
       name: f.name,
       operator: f.operator,
       value: f.value ?? [],
-    }),
-  );
+    }));
 
   const { sql, diffInterval } = buildRetentionQuery({
     projectId: input.projectId,
@@ -492,7 +509,8 @@ export async function getRetentionCore(input: {
     interval,
     startDate: input.startDate,
     endDate: input.endDate,
-    filters,
+    firstEventFilters: toChartFilters(input.firstEventFilters),
+    secondEventFilters: toChartFilters(input.secondEventFilters),
   });
 
   const res = await chMcp.query({ query: sql, format: 'JSONEachRow' });

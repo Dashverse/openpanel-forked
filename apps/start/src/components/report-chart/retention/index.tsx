@@ -21,13 +21,20 @@ export function ReportRetentionChart() {
       endDate,
       criteria,
       interval,
-      globalFilters,
     },
     isLazyLoading,
   } = useReportChartContext();
   const eventSeries = series.filter((item) => item.type === 'event');
   const firstEvent = (eventSeries[0]?.filters?.[0]?.value ?? []).map(String);
   const secondEvent = (eventSeries[1]?.filters?.[0]?.value ?? []).map(String);
+  // Retention stores the event name in filters[0] (name === 'name'); everything
+  // else on a serie is a real property filter applied to that event only.
+  const firstEventFilters = (eventSeries[0]?.filters ?? []).filter(
+    (f) => f.name !== 'name',
+  );
+  const secondEventFilters = (eventSeries[1]?.filters ?? []).filter(
+    (f) => f.name !== 'name',
+  );
   const isEnabled =
     firstEvent.length > 0 && secondEvent.length > 0 && !isLazyLoading;
   const trpc = useTRPC();
@@ -42,7 +49,8 @@ export function ReportRetentionChart() {
         endDate,
         criteria,
         interval,
-        filters: globalFilters ?? [],
+        firstEventFilters,
+        secondEventFilters,
       },
       {
         placeholderData: keepPreviousData,

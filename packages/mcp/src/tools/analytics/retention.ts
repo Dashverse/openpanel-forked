@@ -49,8 +49,11 @@ export function registerRetentionTools(
         .describe(
           '"on_or_after" (default) = a user counts as retained in bucket N if they returned in bucket N or any earlier bucket (classic cumulative retention). "on" = returned exactly in bucket N.',
         ),
-      filters: zFilters.describe(
-        'Optional property filters (AND-combined) applied to BOTH the cohort-defining (firstEvent) and the return (secondEvent) events — a single global filter, e.g. [{ name: "country", operator: "is", value: ["US"] }].',
+      firstEventFilters: zFilters.describe(
+        'Optional property filters (AND-combined) applied ONLY to the cohort-defining (firstEvent) event, e.g. [{ name: "country", operator: "is", value: ["US"] }].',
+      ),
+      secondEventFilters: zFilters.describe(
+        'Optional property filters (AND-combined) applied ONLY to the return (secondEvent) event.',
       ),
     },
     async ({
@@ -61,7 +64,8 @@ export function registerRetentionTools(
       endDate: ed,
       interval,
       criteria,
-      filters,
+      firstEventFilters,
+      secondEventFilters,
     }) =>
       withErrorHandling(
         async () => {
@@ -75,7 +79,8 @@ export function registerRetentionTools(
             endDate,
             interval,
             criteria,
-            filters,
+            firstEventFilters,
+            secondEventFilters,
           });
         },
         { tool: 'get_retention', context },
