@@ -28,7 +28,12 @@ export type ReplayRecorderConfig = {
 //   5 Input · 6 TouchMove · 7 MediaInteraction · 12 Drag
 const ACTIVE_SOURCES = new Set([1, 2, 3, 4, 5, 6, 7, 12]);
 
-const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000; // 5 min (matches PostHog)
+// Aligned with the session idle timeout (session-id-manager DEFAULT_IDLE_TIMEOUT_MS,
+// 30 min): the recorder should pause on the same "tab left idle" boundary the
+// session rotates on, not a tighter one — otherwise long non-interactive but
+// still-watched stretches (a canvas render, a video/AI generation the user is
+// watching without touching the mouse) get paused and never captured.
+const DEFAULT_IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 min
 
 // Absolute ceiling for a SINGLE event sent as its own chunk. maxPayloadBytes
 // (default 1 MB) is only the batch-split threshold — a single event that
