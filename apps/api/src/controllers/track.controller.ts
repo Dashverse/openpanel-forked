@@ -2,6 +2,10 @@ import fastJsonStableHash from 'fast-json-stable-hash';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
+import {
+  replayKafkaDroppedTotal,
+  replayKafkaProducedTotal,
+} from '@/metrics';
 import { HttpError } from '@/utils/errors';
 import { buildEventJobId } from '@/utils/event-job-id';
 import { generateId, slug } from '@openpanel/common';
@@ -20,7 +24,9 @@ import {
   getEventsGroupQueueShard,
   getQueueName,
   produceIncomingEvent,
+  produceReplayChunk,
   shouldUseKafka,
+  shouldUseReplayKafka,
 } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
 import { currentTraceparent, withQueryContext } from '@openpanel/telemetry';
@@ -303,6 +309,7 @@ async function handleTrackRequest(
         projectId,
         ip,
         ua,
+        overrideDeviceId,
       });
       break;
     }
@@ -396,11 +403,13 @@ async function handleReplay({
   projectId,
   ip,
   ua,
+  overrideDeviceId,
 }: {
   payload: ReplayPayload;
   projectId: string;
   ip: string | undefined;
   ua: string | undefined;
+  overrideDeviceId: string | undefined;
 }) {
   if (!isReplayEnabledForProject(projectId)) {
     return;
@@ -449,7 +458,7 @@ async function handleReplay({
     });
   }
 
-  await replayBuffer.add({
+  const chunk = {
     project_id: projectId,
     session_id: sessionId,
     // Empty string for older SDKs — CH column defaults to '' so the raw
@@ -461,7 +470,41 @@ async function handleReplay({
     events_count: payload.events_count,
     is_full_snapshot: payload.is_full_snapshot,
     payload: payload.payload,
-  });
+  };
+
+  // Redis-free Kafka path, flag-gated per project (REPLAY_KAFKA_PROJECT_IDS).
+  // A produce failure throws → /track errors → the SDK retries; an oversize
+  // chunk (>1MB after LZ4, usually a fat full snapshot) is dropped + counted,
+  // not shipped. Not-yet-flagged projects stay on the legacy Redis buffer.
+  if (shouldUseReplayKafka(projectId)) {
+    // Partition key = deviceId so a session's chunks stay ordered on one
+    // partition (session ⊂ device); mirrors the events device id. Falls back to
+    // session_id when no override / no IP+UA to derive from — still co-locates.
+    const deviceId =
+      overrideDeviceId ||
+      (ua && ip
+        ? generateDeviceId({
+            salt: (await getSalts()).current,
+            origin: projectId,
+            ip,
+            ua,
+          })
+        : sessionId);
+    try {
+      const result = await produceReplayChunk(chunk, deviceId);
+      if (result === 'oversize') {
+        replayKafkaDroppedTotal.inc({ reason: 'oversize' });
+      } else {
+        replayKafkaProducedTotal.inc();
+      }
+    } catch (err) {
+      replayKafkaDroppedTotal.inc({ reason: 'produce_failed' });
+      throw err; // surface to /track → SDK retry (no Redis fallback)
+    }
+    return;
+  }
+
+  await replayBuffer.add(chunk);
 }
 
 async function identify({
