@@ -14,10 +14,13 @@ export function ReplayEventItem({
   event,
   isCurrent,
   onClick,
+  timeLabel,
 }: {
   event: IServiceEvent;
   isCurrent: boolean;
   onClick: () => void;
+  // Overrides the wall-clock time (e.g. offset into the recording, "1:23").
+  timeLabel?: string;
 }) {
   const displayName =
     event.name === 'screen_view' && event.path
@@ -47,7 +50,7 @@ export function ReplayEventItem({
           </div>
         </div>
         <span className="flex-shrink-0 text-xs tabular-nums text-muted-foreground">
-          {formatTime(event.createdAt)}
+          {timeLabel ?? formatTime(event.createdAt)}
         </span>
       </div>
     </button>

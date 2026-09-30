@@ -454,6 +454,8 @@ export interface GetEventListOptions {
   // full pre-login + post-login journey. Takes precedence over `profileId`.
   profileIds?: string[];
   sessionId?: string;
+  /** Replay feed: only this tab's events (+ tab-less server/legacy events). */
+  windowId?: string;
   take: number;
   cursor?: number | Date;
   events?: string[] | null;
@@ -473,6 +475,7 @@ export async function getEventList(options: GetEventListOptions) {
     profileId,
     profileIds,
     sessionId,
+    windowId,
     events,
     filters,
     startDate,
@@ -650,6 +653,11 @@ export async function getEventList(options: GetEventListOptions) {
 
   if (sessionId) {
     sb.where.sessionId = `session_id = ${sqlstring.escape(sessionId)}`;
+  }
+
+  if (windowId !== undefined) {
+    // Tab-less events (backend, pre-window_id SDKs) belong to every tab.
+    sb.where.windowId = `(window_id = ${sqlstring.escape(windowId)} OR window_id = '')`;
   }
 
   if (startDate && endDate) {

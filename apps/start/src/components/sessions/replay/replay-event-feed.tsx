@@ -1,16 +1,28 @@
 import { useCurrentTime, useReplayContext } from '@/components/sessions/replay/replay-context';
 import { ReplayEventItem } from '@/components/sessions/replay/replay-event-item';
+import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { IServiceEvent } from '@openpanel/db';
-import { ArrowDownToLine } from 'lucide-react';
+import { ArrowDownToLine, SearchIcon } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserChrome } from './browser-chrome';
-import { getEventOffsetMs } from './replay-utils';
+import { formatDuration, getEventOffsetMs } from './replay-utils';
 
 type EventWithOffset = { event: IServiceEvent; offsetMs: number };
 
-export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEvent[]; replayLoading: boolean }) {
-  const { startTime, isReady, seek } = useReplayContext();
+export function ReplayEventFeed({
+  events,
+  replayLoading,
+  bare = false,
+}: {
+  events: IServiceEvent[];
+  replayLoading: boolean;
+  // Side-panel mode (Session Replays page): no browser chrome, adds a search
+  // box, and shows times relative to the recording instead of the clock.
+  bare?: boolean;
+}) {
+  const { startTime, isReady, seek, toDisplayMs } = useReplayContext();
+  const [query, setQuery] = useState('');
   const currentTime = useCurrentTime(100);
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -116,21 +128,23 @@ export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEve
     scrollToCurrent('nearest');
   }, [followTargetId, scrollToCurrent]);
 
+  const q = query.trim().toLowerCase();
+  const shownEvents = q
+    ? sortedEvents.filter(({ event }) =>
+        `${event.name} ${event.path ?? ''}`.toLowerCase().includes(q),
+      )
+    : sortedEvents;
+
   const jumpToCurrent = useCallback(() => {
     setFollow(true);
     scrollToCurrent('center');
   }, [setFollow, scrollToCurrent]);
 
-  return (
-    <BrowserChrome
-      url={false}
-      controls={<span className="text-lg font-medium">Timeline</span>}
-      className="h-full"
-    >
+  const body = (
       <div className="relative flex-1 min-h-0">
         <ScrollArea className="h-full" ref={scrollRootRef}>
           <div className="flex w-full flex-col">
-            {sortedEvents.map(({ event, offsetMs }) => {
+            {shownEvents.map(({ event, offsetMs }) => {
               const isCurrent = event.id === currentEventId;
               // The ref tracks the follow target (falls back to first event) so
               // scroll/pill work before playback; highlight tracks currentEventId.
@@ -144,15 +158,20 @@ export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEve
                   <ReplayEventItem
                     event={event}
                     isCurrent={isCurrent}
+                    timeLabel={
+                      bare
+                        ? formatDuration(toDisplayMs(Math.max(0, offsetMs)))
+                        : undefined
+                    }
                     // Seek to 1s BEFORE the event (PostHog) so you see the lead-up.
                     onClick={() => seek(Math.max(0, offsetMs - 1000))}
                   />
                 </div>
               );
             })}
-            {!replayLoading && sortedEvents.length === 0 && (
+            {!replayLoading && shownEvents.length === 0 && (
               <div className="py-8 text-center text-sm text-muted-foreground">
-                No events in this recording.
+                {q ? `No events match "${query}".` : 'No events in this recording.'}
               </div>
             )}
             {replayLoading &&
@@ -176,7 +195,7 @@ export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEve
 
         {/* "Jump to current" pill — appears only when the user has scrolled away
          * from the playhead. Clicking re-enables follow and recenters. */}
-        {!following && followTargetId && (
+        {!following && followTargetId && !q && (
           <button
             type="button"
             onClick={jumpToCurrent}
@@ -187,6 +206,35 @@ export function ReplayEventFeed({ events, replayLoading }: { events: IServiceEve
           </button>
         )}
       </div>
+  );
+
+  if (bare) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="border-b p-2">
+          <div className="relative">
+            <SearchIcon className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              id="replay-event-search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search events"
+              className="h-8 pl-8 text-sm"
+            />
+          </div>
+        </div>
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <BrowserChrome
+      url={false}
+      controls={<span className="text-lg font-medium">Timeline</span>}
+      className="h-full"
+    >
+      {body}
     </BrowserChrome>
   );
 }
