@@ -51,8 +51,11 @@ export async function bootCron() {
     },
     {
       name: 'firstEvent',
+      // Every 12h (00:00 + 12:00 UTC) instead of hourly — dashreels traffic and
+      // active product development are wound down, so the first_install
+      // backfill/promotion no longer needs an hourly pass.
       type: 'firstEvent',
-      pattern: '0 * * * *',
+      pattern: '0 */12 * * *',
     },
   ];
 
