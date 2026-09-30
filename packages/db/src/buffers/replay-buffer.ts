@@ -21,12 +21,27 @@ export interface IClickhouseSessionReplayChunk {
   payload: string;
 }
 
-const REPLAY_INSERT_CHUNK_SIZE = process.env.REPLAY_BUFFER_INSERT_CHUNK_SIZE
-  ? Number.parseInt(process.env.REPLAY_BUFFER_INSERT_CHUNK_SIZE, 10)
-  : 50;
-const REPLAY_INSERT_CONCURRENCY = process.env.BUFFER_CH_INSERT_CONCURRENCY
-  ? Number.parseInt(process.env.BUFFER_CH_INSERT_CONCURRENCY, 10)
-  : 5;
+/**
+ * Parse an env var as a finite positive integer, falling back to `fallback` for
+ * unset / NaN / zero / negative. A bad value must never reach `insertReplayChunks`:
+ * a non-numeric concurrency would make `Math.min(NaN, …)` spawn ZERO workers, so
+ * the insert resolves without writing and the caller then deletes the rows from
+ * Redis (silent data loss); a chunk size of 0 would spin the grouping loop
+ * forever (`i += 0`).
+ */
+function positiveIntEnv(raw: string | undefined, fallback: number): number {
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
+const REPLAY_INSERT_CHUNK_SIZE = positiveIntEnv(
+  process.env.REPLAY_BUFFER_INSERT_CHUNK_SIZE,
+  50,
+);
+const REPLAY_INSERT_CONCURRENCY = positiveIntEnv(
+  process.env.BUFFER_CH_INSERT_CONCURRENCY,
+  5,
+);
 
 function replayClickhouseSettings(): ClickHouseSettings {
   if (process.env.BUFFER_ASYNC_INSERTS) {

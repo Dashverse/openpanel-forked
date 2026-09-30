@@ -131,6 +131,35 @@ describe('produceReplayChunk', () => {
       produceReplayChunk(makeChunk(rrwebPayload(1_000)) as any, 'device_xyz'),
     ).rejects.toThrow('broker down');
   });
+
+  it('rejects with backpressure once in-flight produces reach the cap', async () => {
+    vi.stubEnv('REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES', '2');
+    // Hold every send open so the in-flight counter stays at the cap.
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    sendMock.mockImplementation(async () => {
+      await held;
+    });
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const chunk = () => makeChunk(rrwebPayload(1_000)) as any;
+
+    // Two in-flight sends occupy the cap (they never resolve until released).
+    const p1 = produceReplayChunk(chunk(), 'device_xyz');
+    const p2 = produceReplayChunk(chunk(), 'device_xyz');
+    await new Promise((r) => setTimeout(r, 0)); // let both enter the send await
+
+    // The third is rejected immediately, before it ever calls send.
+    await expect(produceReplayChunk(chunk(), 'device_xyz')).rejects.toThrow(
+      /backpressure/,
+    );
+    expect(sendMock).toHaveBeenCalledTimes(2);
+
+    // Release and let the two in-flight ones finish so nothing dangles.
+    release();
+    await Promise.all([p1, p2]);
+  });
 });
 
 describe('shouldUseReplayKafka (env-gated rollout flag)', () => {

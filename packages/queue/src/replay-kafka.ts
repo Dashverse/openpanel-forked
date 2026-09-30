@@ -42,6 +42,20 @@ const REPLAY_KAFKA_MAX_BYTES_PER_PARTITION = Number.parseInt(
   10,
 );
 
+// Admission cap on concurrent in-flight produceReplayChunk calls. maxInFlight-
+// Requests only bounds concurrent BROKER requests — KafkaJS queues the overflow
+// in an UNCAPPED pending queue, and every awaiting /track handler retains its
+// compressed payload (up to REPLAY_KAFKA_MAX_BYTES ≈ 950 KB) meanwhile. So a
+// slow/stalled broker could pile fat payloads and OOM the API (cf. the events
+// #414 producer OOM). When the cap is hit we reject IMMEDIATELY (before
+// serialize+compress) so /track returns a retryable error rather than retaining
+// yet another payload. Tunable; 0 disables the cap.
+const REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES = Number.parseInt(
+  process.env.REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES || '200',
+  10,
+);
+let inFlightProduces = 0;
+
 // ─── per-project rollout gate (mirrors shouldUseKafka in kafka.ts) ──────────
 // Empty = every replay-enabled project stays on the legacy Redis buffer. Add
 // project ids (or `*`) to move them onto Kafka. Flip via kubectl set env +
@@ -120,22 +134,37 @@ export const produceReplayChunk = async (
   chunk: IClickhouseSessionReplayChunk,
   deviceId: string,
 ): Promise<ReplayProduceResult> => {
-  const line = JSON.stringify(chunk);
-  const value = compressReplayLine(line);
-  if (value.length > REPLAY_KAFKA_MAX_BYTES) {
-    return 'oversize';
+  // Reject before spending CPU on serialize+compress when too many chunks are
+  // already in flight (bounds retained fat payloads under a broker stall).
+  if (
+    REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES > 0 &&
+    inFlightProduces >= REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES
+  ) {
+    throw new Error(
+      `replay produce backpressure: ${inFlightProduces} in-flight >= cap ${REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES}`,
+    );
   }
-  const headers: Record<string, string> = { 'content-encoding': 'lz4' };
-  const tp = currentTraceparent();
-  if (tp) {
-    headers.traceparent = tp;
+  inFlightProduces++;
+  try {
+    const line = JSON.stringify(chunk);
+    const value = compressReplayLine(line);
+    if (value.length > REPLAY_KAFKA_MAX_BYTES) {
+      return 'oversize';
+    }
+    const headers: Record<string, string> = { 'content-encoding': 'lz4' };
+    const tp = currentTraceparent();
+    if (tp) {
+      headers.traceparent = tp;
+    }
+    const p = await getReplayProducer();
+    await p.send({
+      topic: KAFKA_REPLAY_TOPIC,
+      messages: [{ key: deviceId, value, headers }],
+    });
+    return 'produced';
+  } finally {
+    inFlightProduces--;
   }
-  const p = await getReplayProducer();
-  await p.send({
-    topic: KAFKA_REPLAY_TOPIC,
-    messages: [{ key: deviceId, value, headers }],
-  });
-  return 'produced';
 };
 
 // ─── consumer factory ───────────────────────────────────────────────────────
