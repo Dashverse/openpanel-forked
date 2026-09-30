@@ -26,7 +26,7 @@ import {
 import { useQuery } from '@tanstack/react-query';
 import { PlusIcon, XIcon } from 'lucide-react';
 import {
-  parseAsInteger,
+  parseAsNumberLiteral,
   parseAsStringLiteral,
   useQueryState,
 } from 'nuqs';
@@ -35,7 +35,8 @@ import { useMemo } from 'react';
 const nuqsOptions = { history: 'push' } as const;
 
 export const REPLAY_DAY_OPTIONS = [1, 3, 7, 14, 30, 90] as const;
-const DEFAULT_REPLAY_DAYS = 7;
+type ReplayDays = (typeof REPLAY_DAY_OPTIONS)[number];
+const DEFAULT_REPLAY_DAYS: ReplayDays = 7;
 
 /** Minimum recording length presets (seconds). 0 = any. */
 const DURATION_PRESETS = [
@@ -80,9 +81,13 @@ export function useReplayListState() {
       .withDefault('newest')
       .withOptions(nuqsOptions),
   );
+  // Only the preset windows parse; a stale/edited ?days=365 falls back to the
+  // default instead of failing the API's 1–90 validation (empty list).
   const [days, setDays] = useQueryState(
     'days',
-    parseAsInteger.withDefault(DEFAULT_REPLAY_DAYS).withOptions(nuqsOptions),
+    parseAsNumberLiteral(REPLAY_DAY_OPTIONS)
+      .withDefault(DEFAULT_REPLAY_DAYS)
+      .withOptions(nuqsOptions),
   );
   const [duration, setDuration] = useQueryState(
     'len',
@@ -144,7 +149,7 @@ export function ReplayListToolbar({ state }: { state: ListState }) {
     <div className="grid grid-cols-3 gap-1.5">
       <Select
         value={String(state.days)}
-        onValueChange={(v) => state.setDays(Number(v))}
+        onValueChange={(v) => state.setDays(Number(v) as ReplayDays)}
       >
         <SelectTrigger className="h-8 px-2 text-xs" aria-label="Date range">
           <SelectValue />

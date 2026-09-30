@@ -610,62 +610,81 @@ export async function getSessionList({
     sb.where.created_at = `created_at > now() - INTERVAL ${dateIntervalInDays} DAY`;
     const where = getWhere();
     const offset = Math.max(0, cursor?.offset ?? 0);
-    const durBounds = [
-      minReplayDurationMs !== undefined
-        ? `d.dur >= ${Math.floor(minReplayDurationMs)}`
-        : '',
-      maxReplayDurationMs !== undefined
-        ? `d.dur <= ${Math.floor(maxReplayDurationMs)}`
-        : '',
-    ].filter(Boolean);
-    const order =
-      replaySort === 'duration'
-        ? 'd.dur DESC'
-        : replaySort === 'events'
-          ? 's.event_count DESC'
-          : 's.created_at DESC';
-    const rows = await chQuery<
-      IClickhouseSession & { replay_ms: string; replay_tabs: string }
-    >(
-      `SELECT s.*, toString(d.dur) AS replay_ms, toString(d.tabs) AS replay_tabs
-       FROM (
-         SELECT ${columns.join(', ')}
+    const hasDurBounds =
+      minReplayDurationMs !== undefined || maxReplayDurationMs !== undefined;
+    // Replay duration is needed only to sort or bound by it. "Most events"
+    // sorts on a sessions column, so it never touches the chunks table — and so
+    // keeps sessions whose chunks now live only in the Blob archive.
+    const needsDuration = replaySort === 'duration' || hasDurBounds;
+    const latestSessions = `SELECT ${columns.join(', ')}
          FROM ${TABLE_NAMES.sessions} FINAL
          ${where}
          ORDER BY created_at DESC, version DESC
-         LIMIT 1 BY id
-       ) AS s
-       INNER JOIN (
-         SELECT session_id, sum(active_ms) AS dur, count() AS tabs
-         FROM (
-           SELECT session_id, window_id, ${replayActiveMsExpr} AS active_ms
+         LIMIT 1 BY id`;
+
+    let rows: (IClickhouseSession & {
+      replay_ms?: string;
+      replay_tabs?: string;
+    })[];
+    if (!needsDuration) {
+      rows = await chQuery<IClickhouseSession>(
+        `SELECT * FROM (${latestSessions}) AS s
+         ORDER BY ${replaySort === 'events' ? 's.event_count DESC' : 's.created_at DESC'}, s.id
+         LIMIT ${take} OFFSET ${offset}`,
+      );
+    } else {
+      const durBounds = [
+        minReplayDurationMs !== undefined
+          ? `d.dur >= ${Math.floor(minReplayDurationMs)}`
+          : '',
+        maxReplayDurationMs !== undefined
+          ? `d.dur <= ${Math.floor(maxReplayDurationMs)}`
+          : '',
+      ].filter(Boolean);
+      // Duration bounds need a measurable duration, so they INNER JOIN the CH
+      // chunks (getSessionsCount applies the same rule — list and count agree).
+      // "Longest" without bounds LEFT JOINs: archived-only sessions (no CH
+      // chunks, d.tabs = 0) stay listed, sorted last, and get their shown
+      // duration from the archive via batchSessionReplayDuration below.
+      rows = await chQuery<
+        IClickhouseSession & { replay_ms: string; replay_tabs: string }
+      >(
+        `SELECT s.*, toString(d.dur) AS replay_ms, toString(d.tabs) AS replay_tabs
+         FROM (${latestSessions}) AS s
+         ${hasDurBounds ? 'INNER JOIN' : 'LEFT JOIN'} (
+           SELECT session_id, sum(active_ms) AS dur, count() AS tabs
            FROM (
-             ${replayWindowRowsSql(
-               TABLE_NAMES.session_replay_chunks,
-               `project_id = ${sqlstring.escape(projectId)}
-                AND started_at > now() - INTERVAL ${dateIntervalInDays + 1} DAY
-                AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
-               'session_id, window_id',
-             )}
+             SELECT session_id, window_id, ${replayActiveMsExpr} AS active_ms
+             FROM (
+               ${replayWindowRowsSql(
+                 TABLE_NAMES.session_replay_chunks,
+                 `project_id = ${sqlstring.escape(projectId)}
+                  AND started_at > now() - INTERVAL ${dateIntervalInDays + 1} DAY
+                  AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
+                 'session_id, window_id',
+               )}
+             )
+             GROUP BY session_id, window_id
            )
-           GROUP BY session_id, window_id
-         )
-         GROUP BY session_id
-       ) AS d ON d.session_id = s.id
-       ${durBounds.length ? `WHERE ${durBounds.join(' AND ')}` : ''}
-       ORDER BY ${order}, s.id
-       LIMIT ${take} OFFSET ${offset}`,
-    );
+           GROUP BY session_id
+         ) AS d ON d.session_id = s.id
+         ${durBounds.length ? `WHERE ${durBounds.join(' AND ')}` : ''}
+         ORDER BY ${replaySort === 'duration' ? '(d.tabs = 0), d.dur DESC' : replaySort === 'events' ? 's.event_count DESC' : 's.created_at DESC'}, s.id
+         LIMIT ${take} OFFSET ${offset}`,
+      );
+      precomputed = new Map(
+        rows
+          .filter((r) => Number(r.replay_tabs) > 0)
+          .map((r) => [
+            r.id,
+            {
+              durationMs: Math.max(0, Number(r.replay_ms)),
+              tabCount: Number(r.replay_tabs),
+            },
+          ]),
+      );
+    }
     data = rows;
-    precomputed = new Map(
-      rows.map((r) => [
-        r.id,
-        {
-          durationMs: Math.max(0, Number(r.replay_ms)),
-          tabCount: Number(r.replay_tabs),
-        },
-      ]),
-    );
     meta = {
       next:
         rows.length === take
@@ -703,14 +722,21 @@ export async function getSessionList({
   const map = new Map<string, IServiceProfile>(profiles.map((p) => [p.id, p]));
 
   const sessionIds = data.map((s) => s.id);
-  const [replaySet, replayDurations] = await Promise.all([
+  // Durations already computed in SQL are reused; the rest (fast path, "Most
+  // events", archived-only rows) come from batchSessionReplayDuration, which
+  // falls back to the Blob archive.
+  const needDurations = onlyReplays
+    ? sessionIds.filter((id) => !precomputed?.has(id))
+    : [];
+  const [replaySet, fetchedDurations] = await Promise.all([
     batchSessionHasReplay(sessionIds, projectId),
-    precomputed
-      ? Promise.resolve(precomputed)
-      : onlyReplays
-        ? batchSessionReplayDuration(sessionIds, projectId)
-        : Promise.resolve(undefined),
+    needDurations.length
+      ? batchSessionReplayDuration(needDurations, projectId)
+      : Promise.resolve(undefined),
   ]);
+  const replayDurations = onlyReplays
+    ? new Map([...(fetchedDurations ?? []), ...(precomputed ?? [])])
+    : undefined;
 
   const items = data.map(transformSession).map((item) => ({
     ...item,

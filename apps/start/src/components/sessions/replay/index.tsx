@@ -890,6 +890,14 @@ export function ReplayShell({
   const [selectedWindowId, setSelectedWindowId] = useState<string | null>(
     initialWindowId ?? null,
   );
+  // A shared link's timestamp applies once. Picking any tab consumes it, so
+  // switching away and back doesn't jump to the shared time again (the player
+  // remounts per tab, so InitialSeek's own once-guard resets).
+  const [linkConsumed, setLinkConsumed] = useState(false);
+  const selectWindow = (windowId: string) => {
+    setLinkConsumed(true);
+    setSelectedWindowId(windowId);
+  };
 
   // List the distinct recorders (tabs) that wrote to this session. Each is a
   // separate rrweb recording — the player must play one at a time to avoid
@@ -919,7 +927,9 @@ export function ReplayShell({
   // default tab when the link has none), and only until the user switches.
   const linkedWindowId = initialWindowId ?? defaultWindowId;
   const seekTo =
-    initialTimeSec != null && activeWindowId === linkedWindowId
+    !linkConsumed &&
+    initialTimeSec != null &&
+    activeWindowId === linkedWindowId
       ? initialTimeSec
       : undefined;
 
@@ -927,7 +937,7 @@ export function ReplayShell({
     <WindowSwitcher
       windows={windows ?? []}
       activeWindowId={activeWindowId}
-      onSelect={setSelectedWindowId}
+      onSelect={selectWindow}
     />
   );
 
