@@ -1,0 +1,158 @@
+/**
+ * Blob-primary replay: write path (Phase 2).
+ *
+ * `writeSessionReplayBlocks` takes the decompressed chunk lines of ONE Kafka
+ * batch (with each line's Kafka offset), groups them by session, appends one
+ * zstd block per session to that session's append blob, and records a reference
+ * row per block in `session_replay_blocks` — no payload in ClickHouse.
+ *
+ * block_index = the Kafka offset of the block's first chunk: monotonic per
+ * session (a session's messages are offset-ordered on one partition), unique per
+ * block, and STABLE on redelivery — so a re-delivered batch writes a ref with the
+ * same (project, session, block_index) key and ReplacingMergeTree(created_at)
+ * collapses it (the re-appended bytes are orphaned, the newest ref wins).
+ */
+import { TABLE_NAMES, ch } from '../clickhouse/client';
+import type { IClickhouseSessionReplayChunk } from '../buffers/replay-buffer';
+import {
+  appendReplayBlock,
+  compressReplayBlock,
+  replayBlockBlobPath,
+} from '../blob/replay-blocks';
+
+export interface IClickhouseSessionReplayBlock {
+  project_id: string;
+  session_id: string;
+  window_id: string;
+  block_index: number;
+  blob_path: string;
+  byte_start: number;
+  byte_end: number;
+  chunk_lo: number;
+  chunk_hi: number;
+  first_started_at: string;
+  last_started_at: string;
+  events_count: number;
+  size_bytes: number;
+  codec: string;
+}
+
+export async function insertReplayBlocks(
+  rows: IClickhouseSessionReplayBlock[],
+): Promise<void> {
+  if (rows.length === 0) return;
+  await ch.insert({
+    table: TABLE_NAMES.session_replay_blocks,
+    values: rows,
+    format: 'JSONEachRow',
+  });
+}
+
+export interface ReplayLineWithOffset {
+  /** `JSON.stringify(IClickhouseSessionReplayChunk)` — the exact CH row line. */
+  line: string;
+  /** Kafka offset of this message. */
+  offset: number;
+}
+
+export interface WriteBlocksResult {
+  blocks: number;
+  bytes: number;
+}
+
+/**
+ * Append one zstd block per session for a batch's chunk lines, then record the
+ * refs. Returns counts for metrics. Throws on any blob/CH failure so the caller
+ * does NOT resolve the Kafka offsets (the batch is redelivered — at-least-once).
+ */
+export async function writeSessionReplayBlocks(
+  items: ReplayLineWithOffset[],
+): Promise<WriteBlocksResult> {
+  if (items.length === 0) return { blocks: 0, bytes: 0 };
+
+  // Group by session, parsing each line once. (Parsing the whole line includes
+  // the fat `payload`; acceptable on the worker — see plan note on carrying
+  // metadata in Kafka headers as a future optimization.)
+  interface Group {
+    projectId: string;
+    sessionId: string;
+    windowId: string;
+    firstOffset: number;
+    chunks: { chunk: IClickhouseSessionReplayChunk; line: string }[];
+  }
+  const groups = new Map<string, Group>();
+  for (const { line, offset } of items) {
+    let chunk: IClickhouseSessionReplayChunk;
+    try {
+      chunk = JSON.parse(line) as IClickhouseSessionReplayChunk;
+    } catch {
+      continue; // malformed; CH path logs/counts it separately
+    }
+    const key = `${chunk.project_id}:${chunk.session_id}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        projectId: chunk.project_id,
+        sessionId: chunk.session_id,
+        windowId: chunk.window_id ?? '',
+        firstOffset: offset,
+        chunks: [],
+      };
+      groups.set(key, g);
+    }
+    g.firstOffset = Math.min(g.firstOffset, offset);
+    g.chunks.push({ chunk, line });
+  }
+
+  const refs: IClickhouseSessionReplayBlock[] = [];
+  let bytes = 0;
+
+  for (const g of groups.values()) {
+    // Order the block's content by (started_at, chunk_index) — the same contract
+    // the reader re-derives its synthetic seq from.
+    g.chunks.sort(
+      (a, b) =>
+        a.chunk.started_at.localeCompare(b.chunk.started_at) ||
+        a.chunk.chunk_index - b.chunk.chunk_index,
+    );
+    const first = g.chunks[0]!.chunk;
+    const last = g.chunks[g.chunks.length - 1]!.chunk;
+    const blobPath = replayBlockBlobPath(
+      g.projectId,
+      g.sessionId,
+      first.started_at,
+    );
+    const block = compressReplayBlock(g.chunks.map((c) => c.line));
+    const { byteStart, byteEnd } = await appendReplayBlock(blobPath, block);
+    bytes += block.length;
+
+    let chunkLo = Number.POSITIVE_INFINITY;
+    let chunkHi = 0;
+    let events = 0;
+    for (const { chunk } of g.chunks) {
+      chunkLo = Math.min(chunkLo, chunk.chunk_index);
+      chunkHi = Math.max(chunkHi, chunk.chunk_index);
+      events += chunk.events_count ?? 0;
+    }
+
+    refs.push({
+      project_id: g.projectId,
+      session_id: g.sessionId,
+      window_id: g.windowId,
+      block_index: g.firstOffset,
+      blob_path: blobPath,
+      byte_start: byteStart,
+      byte_end: byteEnd,
+      chunk_lo: Number.isFinite(chunkLo) ? chunkLo : 0,
+      chunk_hi: chunkHi,
+      first_started_at: first.started_at,
+      last_started_at: last.started_at,
+      events_count: events,
+      size_bytes: block.length,
+      codec: 'zstd',
+    });
+  }
+
+  await insertReplayBlocks(refs);
+  return { blocks: refs.length, bytes };
+}
