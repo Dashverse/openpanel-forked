@@ -110,6 +110,47 @@ export const operators = {
   notInCohort: 'Not in cohort',
 } as const;
 
+/**
+ * Session-level fields the Session Replays list can filter on (label shown in
+ * the UI). Each maps to a `sessions` table column in @openpanel/db.
+ */
+export const replaySessionFilterFields = {
+  country: 'Country',
+  region: 'Region',
+  city: 'City',
+  os: 'OS',
+  browser: 'Browser',
+  device: 'Device type',
+  brand: 'Device brand',
+  model: 'Device model',
+  entryPath: 'Entry page',
+  exitPath: 'Exit page',
+  referrerName: 'Referrer',
+  referrerType: 'Referrer type',
+  utmSource: 'UTM source',
+  utmMedium: 'UTM medium',
+  utmCampaign: 'UTM campaign',
+  eventCount: 'Event count',
+  screenViewCount: 'Screen views',
+  isBounce: 'Bounced',
+} as const;
+
+export type ReplaySessionFilterField = keyof typeof replaySessionFilterFields;
+
+/** Numeric fields take gte/lte; the rest take is/isNot/contains/doesNotContain. */
+export const replaySessionNumericFields: ReplaySessionFilterField[] = [
+  'eventCount',
+  'screenViewCount',
+];
+
+export const replaySortOptions = {
+  newest: 'Newest',
+  duration: 'Longest',
+  events: 'Most events',
+} as const;
+
+export type ReplaySort = keyof typeof replaySortOptions;
+
 export const chartTypes = {
   linear: 'Linear',
   bar: 'Bar',

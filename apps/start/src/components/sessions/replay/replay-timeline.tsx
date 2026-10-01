@@ -7,15 +7,33 @@ import {
 } from '@/components/ui/tooltip';
 import type { IServiceEvent } from '@openpanel/db';
 import { AnimatePresence, motion } from 'framer-motion';
+import type { ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { EventIcon } from '@/components/events/event-icon';
 import { cn } from '@/utils/cn';
 import { Loader2 } from 'lucide-react';
-import { ReplayPlayPauseButton, ReplaySpeedControl } from './replay-controls';
+import {
+  ReplayPlayPauseButton,
+  ReplaySkipButton,
+  ReplaySpeedControl,
+  ReplaySpeedMenu,
+  ReplayTime,
+} from './replay-controls';
 import { formatDuration, getEventOffsetMs } from './replay-utils';
 
-export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
+export function ReplayTimeline({
+  events,
+  variant = 'default',
+  trailing,
+}: {
+  events: IServiceEvent[];
+  // 'studio' = Session Replays page layout (scrubber over a controls row).
+  variant?: 'default' | 'studio';
+  // Extra controls placed before the speed menu (studio only).
+  trailing?: ReactNode;
+}) {
+  const studio = variant === 'studio';
   const {
     currentTimeRef,
     // Display (gap-collapsed) space — the scrubber renders in this so idle air
@@ -147,7 +165,8 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
 
     // 24px in ms — recalculated from container width; fall back to 2% of duration
     const trackWidth = trackRef.current?.offsetWidth ?? 600;
-    const thresholdMs = (24 / trackWidth) * displayDuration;
+    // Icons need ~24px apart; studio ticks only ~6px.
+    const thresholdMs = ((studio ? 6 : 24) / trackWidth) * displayDuration;
 
     const groups: { items: typeof sorted; pct: number }[] = [];
     for (const item of sorted) {
@@ -167,9 +186,13 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
     }
 
     return groups;
-  }, [eventsWithOffset, displayDuration]);
+  }, [eventsWithOffset, displayDuration, studio]);
 
-  if (!isReady || displayDuration <= 0) return null;
+  if (!isReady || displayDuration <= 0) {
+    // Studio keeps the bar's footprint while the player boots, so the layout
+    // doesn't jump when playback becomes available.
+    return studio ? <StudioControlsPlaceholder /> : null;
+  }
 
   const progressPct = Math.max(
     0,
@@ -180,12 +203,8 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
     Math.min(100, (toDisplayMs(loadedUpToMs) / displayDuration) * 100),
   );
 
-  return (
-    <TooltipProvider delayDuration={300}>
-      <div className="row items-center gap-4 p-4">
-        <ReplayPlayPauseButton />
-        <ReplaySpeedControl />
-        <div className={cn('col gap-4 flex-1 px-2 relative')}>
+  const scrubber = (
+        <div className={cn('relative', studio ? 'w-full' : 'col gap-4 flex-1 px-2')}>
           <AnimatePresence>
             {isBuffering && (
               <motion.div
@@ -294,8 +313,19 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
                     <button
                       type="button"
                       data-timeline-event
-                      className="absolute top-1/2 z-[5] flex h-6 w-6 -translate-y-1/2 items-center justify-center transition-transform hover:scale-105"
-                      style={{ left: `${group.pct}%`, marginLeft: -12 }}
+                      className={cn(
+                        'absolute top-1/2 z-[5] flex -translate-y-1/2 items-center justify-center',
+                        studio
+                          ? // Studio: a thin tick with a wider hit area — dozens of
+                            // icon bubbles would bury the track on busy sessions.
+                            'group h-5 w-3 -translate-x-1/2'
+                          : 'h-6 w-6 transition-transform hover:scale-105',
+                      )}
+                      style={
+                        studio
+                          ? { left: `${group.pct}%` }
+                          : { left: `${group.pct}%`, marginLeft: -12 }
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
                         // Seek uses the wall-clock offset, not the display one.
@@ -303,8 +333,17 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
                       }}
                       aria-label={isGroup ? `${group.items.length} events at ${formatDuration(first.offsetMs)}` : `${first.event.name} at ${formatDuration(first.offsetMs)}`}
                     >
-                      <EventIcon name={first.event.name} meta={first.event.meta} size="sm" />
-                      {isGroup && (
+                      {studio ? (
+                        <span
+                          className={cn(
+                            'block w-0.5 rounded-full bg-foreground/35 transition-colors group-hover:bg-primary',
+                            isGroup ? 'h-3.5' : 'h-2.5',
+                          )}
+                        />
+                      ) : (
+                        <EventIcon name={first.event.name} meta={first.event.meta} size="sm" />
+                      )}
+                      {!studio && isGroup && (
                         <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-foreground text-[9px] font-bold leading-none text-background">
                           {group.items.length}
                         </span>
@@ -312,7 +351,7 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
                     </button>
                   </TooltipTrigger>
                   <TooltipContent side="top" className="col gap-1.5">
-                    {group.items.map(({ event: ev, offsetMs }) => (
+                    {group.items.slice(0, 8).map(({ event: ev, offsetMs }) => (
                       <div key={ev.id} className="row items-center gap-2">
                         <EventIcon name={ev.name} meta={ev.meta} size="sm" />
                         <span className="font-medium">
@@ -323,13 +362,68 @@ export function ReplayTimeline({ events }: { events: IServiceEvent[] }) {
                         </span>
                       </div>
                     ))}
+                    {group.items.length > 8 && (
+                      <span className="text-muted-foreground">
+                        +{group.items.length - 8} more
+                      </span>
+                    )}
                   </TooltipContent>
                 </Tooltip>
               );
             })}
           </div>
         </div>
+  );
+
+  if (studio) {
+    // Mixpanel-style: full-width scrubber on top, transport + options below.
+    return (
+      <TooltipProvider delayDuration={300}>
+        <div className="col gap-1 border-t bg-background px-4 pb-2 pt-2">
+          {scrubber}
+          <div className="row flex-wrap items-center gap-1">
+            <ReplayPlayPauseButton />
+            <ReplaySkipButton direction="back" />
+            <ReplaySkipButton direction="forward" />
+            <div className="ml-2">
+              <ReplayTime />
+            </div>
+            <div className="flex-1" />
+            {trailing}
+            <ReplaySpeedMenu />
+          </div>
+        </div>
+      </TooltipProvider>
+    );
+  }
+
+  return (
+    <TooltipProvider delayDuration={300}>
+      <div className="row items-center gap-4 p-4">
+        <ReplayPlayPauseButton />
+        <ReplaySpeedControl />
+        {scrubber}
       </div>
     </TooltipProvider>
+  );
+}
+
+/** Inert copy of the studio control bar shown while the player loads. */
+function StudioControlsPlaceholder() {
+  return (
+    <div
+      className="col gap-1 border-t bg-background px-4 pb-2 pt-2"
+      aria-hidden
+    >
+      <div className="flex h-8 items-center">
+        <div className="h-1.5 w-full animate-pulse rounded-full bg-muted" />
+      </div>
+      <div className="row h-9 items-center gap-2">
+        <div className="size-8 animate-pulse rounded-md bg-muted" />
+        <div className="size-8 rounded-md bg-muted/60" />
+        <div className="size-8 rounded-md bg-muted/60" />
+        <div className="ml-2 h-4 w-24 animate-pulse rounded bg-muted" />
+      </div>
+    </div>
   );
 }

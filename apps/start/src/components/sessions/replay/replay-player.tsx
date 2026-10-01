@@ -1,5 +1,6 @@
 import { useReplayContext } from '@/components/sessions/replay/replay-context';
 import type { ReplayPlayerInstance } from '@/components/sessions/replay/replay-context';
+import { cn } from '@/utils/cn';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import 'rrweb-player/dist/style.css';
@@ -25,8 +26,18 @@ function getRecordedDimensions(
 function calcDimensions(
   box: HTMLDivElement,
   aspectRatio: number,
+  reservedBottomPx: number,
+  fill = false,
 ): { width: number; height: number; boxHeight: number } {
   const containerWidth = box.offsetWidth;
+  if (fill) {
+    // Fill mode: the box is sized by its parent (absolute inset-0), so the
+    // available height is simply the box's own height — no viewport guessing.
+    const boxHeight = Math.max(160, box.offsetHeight);
+    const height = Math.min(Math.round(containerWidth / aspectRatio), boxHeight);
+    const width = Math.min(containerWidth, Math.round(height * aspectRatio));
+    return { width, height, boxHeight };
+  }
   const isFullscreen = !!document.fullscreenElement;
   // boxHeight = the dark player box's height: from its top edge down to the
   // bottom of the viewport, minus room for the timeline strip below it. The
@@ -34,7 +45,7 @@ function calcDimensions(
   const rect = box.getBoundingClientRect();
   const boxHeight = isFullscreen
     ? window.innerHeight - 120
-    : Math.max(260, window.innerHeight - rect.top - 92);
+    : Math.max(260, window.innerHeight - rect.top - reservedBottomPx);
   const height = Math.min(Math.round(containerWidth / aspectRatio), boxHeight);
   const width = Math.min(containerWidth, Math.round(height * aspectRatio));
   return { width, height, boxHeight };
@@ -43,12 +54,19 @@ function calcDimensions(
 export function ReplayPlayer({
   events,
   skipInactive = true,
+  reservedBottomPx = 92,
+  fill = false,
 }: {
   events: Array<{ type: number; data: unknown; timestamp: number }>;
   // When true, rrweb fast-forwards through periods with no recorded
   // activity — so a mostly-idle recording (e.g. a backgrounded tab) plays
   // through in its few seconds of real activity instead of frozen minutes.
   skipInactive?: boolean;
+  // Height kept free below the player box for the controls under it.
+  reservedBottomPx?: number;
+  // Fill the parent (which must be positioned and sized) instead of sizing
+  // from the viewport. Used by the Session Replays stage.
+  fill?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // The dark player "box" that fills the pane; the video is letterboxed inside.
@@ -86,6 +104,8 @@ export function ReplayPlayer({
     const initial = calcDimensions(
       boxRef.current ?? containerRef.current,
       aspectRatio,
+      reservedBottomPx,
+      fill,
     );
     const { width, height } = initial;
     setBoxHeight(initial.boxHeight);
@@ -176,6 +196,8 @@ export function ReplayPlayer({
       const { width: w, height: h, boxHeight: bh } = calcDimensions(
         box,
         aspectRatio,
+        reservedBottomPx,
+        fill,
       );
       // Guard against a ResizeObserver feedback loop: this observer watches the
       // box, and boxHeight is derived from the box's own position, so writing it
@@ -237,7 +259,7 @@ export function ReplayPlayer({
       playerRef.current = null;
       onPlayerDestroy();
     };
-  }, [events, recordedDimensions, onPlayerReady, onPlayerDestroy, setCurrentTime, setIsPlaying, refreshDuration]);
+  }, [events, recordedDimensions, reservedBottomPx, fill, onPlayerReady, onPlayerDestroy, setCurrentTime, setIsPlaying, refreshDuration]);
 
   // Toggle skip-inactive live without recreating the player. rrweb-player is
   // a Svelte component — $set updates the reactive prop, which internally
@@ -257,8 +279,11 @@ export function ReplayPlayer({
   return (
     <div
       ref={boxRef}
-      className="relative flex w-full items-center justify-center overflow-hidden bg-neutral-950 [&_.rr-player]:!rounded-none [&_.rr-player]:!bg-transparent [&_.rr-player]:!shadow-none [&_.rr-player__frame]:!rounded-none"
-      style={boxHeight ? { height: `${boxHeight}px` } : undefined}
+      className={cn(
+        'flex w-full items-center justify-center overflow-hidden bg-neutral-950 [&_.rr-player]:!rounded-none [&_.rr-player]:!bg-transparent [&_.rr-player]:!shadow-none [&_.rr-player__frame]:!rounded-none',
+        fill ? 'absolute inset-0' : 'relative',
+      )}
+      style={!fill && boxHeight ? { height: `${boxHeight}px` } : undefined}
     >
       <div ref={containerRef} className="flex items-center justify-center" />
     </div>

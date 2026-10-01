@@ -10,6 +10,8 @@ export interface SqlBuilderObject {
   joins: Record<string, string>;
   ctes: Record<string, string>;
   limit: number | undefined;
+  /** ClickHouse `LIMIT n BY expr`, e.g. '1 BY id'. Applied before LIMIT. */
+  limitBy?: string;
   offset: number | undefined;
   fill: string | undefined;
 }
@@ -43,6 +45,7 @@ export function createSqlBuilder() {
     Object.keys(sb.groupBy).length ? `GROUP BY ${join(sb.groupBy, ', ')}` : '';
   const getOrderBy = () =>
     Object.keys(sb.orderBy).length ? `ORDER BY ${join(sb.orderBy, ', ')}` : '';
+  const getLimitBy = () => (sb.limitBy ? `LIMIT ${sb.limitBy}` : '');
   const getLimit = () => (sb.limit ? `LIMIT ${sb.limit}` : '');
   const getOffset = () => (sb.offset ? `OFFSET ${sb.offset}` : '');
   const getJoins = () =>
@@ -82,6 +85,7 @@ export function createSqlBuilder() {
         getGroupBy(),
         getHaving(),
         getOrderBy(),
+        getLimitBy(),
         getLimit(),
         getOffset(),
         getFill(),

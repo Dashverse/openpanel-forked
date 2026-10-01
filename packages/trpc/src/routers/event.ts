@@ -101,7 +101,10 @@ export const eventRouter = createTRPCRouter({
         // replay timeline needs the whole session (multi-tab), so it passes a
         // higher cap — otherwise the top-50 are all from one tab and other tabs
         // render "No events".
-        take: z.number().max(5000).optional(),
+        take: z.number().max(20000).optional(),
+        // Replay feed: scope to one tab (window) server-side, so a busy tab
+        // isn't truncated by other tabs' events sharing the take cap.
+        windowId: z.string().optional(),
       }),
     )
     .query(async ({ input: { columnVisibility, mergeIdentity, take, ...input } }) => {

@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
 import {
+  replaySessionFilterFields,
+  replaySortOptions,
+} from '@openpanel/constants';
+import {
+  getReplaySessionFilterValues,
   getSessionList,
   getSessionReplayChunksAroundTime,
   getSessionReplayChunksByIndexRange,
@@ -16,9 +21,33 @@ import { zChartEventFilter } from '@openpanel/validation';
 
 import { createTRPCRouter, protectedProcedure } from '../trpc';
 
+const zReplaySessionFilterField = z.enum(
+  Object.keys(replaySessionFilterFields) as [
+    keyof typeof replaySessionFilterFields,
+    ...(keyof typeof replaySessionFilterFields)[],
+  ],
+);
+
+// Session Replays list: session-column filters, window, sort, duration bounds.
+const zReplayListOptions = {
+  replaySessionFilters: z
+    .array(
+      z.object({
+        name: zReplaySessionFilterField,
+        operator: z.enum(['is', 'isNot', 'contains', 'doesNotContain', 'gte', 'lte']),
+        value: z.array(z.string()),
+      }),
+    )
+    .optional(),
+  replayDays: z.number().int().min(1).max(90).optional(),
+  minReplayDurationMs: z.number().int().min(0).optional(),
+  maxReplayDurationMs: z.number().int().min(0).optional(),
+};
+
 export function encodeCursor(cursor: {
   createdAt: string;
   id: string;
+  offset?: number;
 }): string {
   const json = JSON.stringify(cursor);
   return Buffer.from(json, 'utf8').toString('base64url'); // URL-safe
@@ -26,12 +55,16 @@ export function encodeCursor(cursor: {
 
 export function decodeCursor(
   encoded: string,
-): { createdAt: string; id: string } | null {
+): { createdAt: string; id: string; offset?: number } | null {
   try {
     const json = Buffer.from(encoded, 'base64url').toString('utf8');
     const obj = JSON.parse(json);
     if (typeof obj.createdAt === 'string' && typeof obj.id === 'string') {
-      return obj;
+      return {
+        createdAt: obj.createdAt,
+        id: obj.id,
+        ...(typeof obj.offset === 'number' ? { offset: obj.offset } : {}),
+      };
     }
     return null;
   } catch {
@@ -54,6 +87,15 @@ export const sessionRouter = createTRPCRouter({
         onlyReplays: z.boolean().optional(),
         replayEventNames: z.array(z.string()).optional(),
         replayEventFilters: z.array(zChartEventFilter).optional(),
+        ...zReplayListOptions,
+        replaySort: z
+          .enum(
+            Object.keys(replaySortOptions) as [
+              keyof typeof replaySortOptions,
+              ...(keyof typeof replaySortOptions)[],
+            ],
+          )
+          .optional(),
       }),
     )
     .query(async ({ input }) => {
@@ -81,10 +123,28 @@ export const sessionRouter = createTRPCRouter({
         search: z.string().optional(),
         replayEventNames: z.array(z.string()).optional(),
         replayEventFilters: z.array(zChartEventFilter).optional(),
+        ...zReplayListOptions,
       }),
     )
     .query(async ({ input }) => {
       return getSessionsCount({ ...input, onlyReplays: true });
+    }),
+
+  // Value suggestions for a session-field filter on the Session Replays tab.
+  replayFilterValues: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.string(),
+        field: zReplaySessionFilterField,
+        replayDays: z.number().int().min(1).max(90).optional(),
+      }),
+    )
+    .query(async ({ input }) => {
+      return getReplaySessionFilterValues({
+        projectId: input.projectId,
+        field: input.field,
+        days: input.replayDays,
+      });
     }),
 
   byId: protectedProcedure

@@ -4,7 +4,15 @@ import {
   useReplayContext,
 } from '@/components/sessions/replay/replay-context';
 import { Button } from '@/components/ui/button';
-import { Pause, Play } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Pause, Play, RotateCcw, RotateCw } from 'lucide-react';
 import { formatDuration } from './replay-utils';
 
 // Cycle order for the speed button (0.5× lives in SPEED_OPTIONS but isn't in
@@ -46,6 +54,65 @@ export function ReplayTime() {
     <span className="text-sm tabular-nums text-muted-foreground font-mono">
       {formatDuration(toDisplayMs(currentTime))} / {formatDuration(displayDuration)}
     </span>
+  );
+}
+
+/** Speed picker as a menu (Mixpanel-style) — all options visible at once. */
+export function ReplaySpeedMenu() {
+  const { speed, setSpeed, isReady } = useReplayContext();
+  if (!isReady) return null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 min-w-12 px-2 font-mono text-xs tabular-nums"
+          title="Playback speed"
+        >
+          {speed}×
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-28">
+        <DropdownMenuLabel className="text-xs">Playback speed</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={String(speed)}
+          onValueChange={(v) => setSpeed(Number(v))}
+        >
+          {SPEED_OPTIONS.map((s) => (
+            <DropdownMenuRadioItem key={s} value={String(s)} className="font-mono text-xs">
+              {s}×
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+const SKIP_MS = 10_000;
+
+/** Jump back / forward 10s in wall-clock time. */
+export function ReplaySkipButton({ direction }: { direction: 'back' | 'forward' }) {
+  const { seek, isReady, duration, currentTimeRef } = useReplayContext();
+  if (!isReady) return null;
+  const back = direction === 'back';
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="h-8 w-8"
+      aria-label={back ? 'Back 10 seconds' : 'Forward 10 seconds'}
+      title={back ? 'Back 10s' : 'Forward 10s'}
+      onClick={() => {
+        const t = currentTimeRef.current + (back ? -SKIP_MS : SKIP_MS);
+        seek(Math.max(0, Math.min(duration, t)));
+      }}
+    >
+      {back ? <RotateCcw className="h-4 w-4" /> : <RotateCw className="h-4 w-4" />}
+    </Button>
   );
 }
 
