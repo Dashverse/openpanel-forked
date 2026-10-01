@@ -106,6 +106,7 @@ function ReplayListRow({
     <button
       type="button"
       onClick={onSelect}
+      data-replay-id={session.id}
       aria-current={isActive ? 'true' : undefined}
       className={cn(
         'flex w-full items-center gap-3 border-b border-l-2 px-3 py-3 text-left transition-colors',
@@ -561,8 +562,35 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
     }),
     enabled: !!selectedSessionId && !listed && !listQuery.isLoading,
   });
-  const selected: ReplaySession | undefined =
-    listed ?? (byIdQuery.data as ReplaySession | undefined);
+  // Like PostHog, the player and header don't depend on the list: a linked
+  // replay that isn't on a loaded page fetches its own details. byId only has
+  // the event-span duration, so the recording length comes from replaySummary.
+  const summaryQuery = useQuery({
+    ...trpc.session.replaySummary.queryOptions({
+      sessionId: selectedSessionId ?? '',
+      projectId,
+    }),
+    enabled: !!selectedSessionId && !listed && !listQuery.isLoading,
+  });
+  const linked = byIdQuery.data as ReplaySession | undefined;
+  const linkedWithReplay: ReplaySession | undefined = linked
+    ? {
+        ...linked,
+        duration: summaryQuery.data?.durationMs ?? linked.duration,
+        replayTabCount: summaryQuery.data?.tabCount,
+      }
+    : undefined;
+  const selected: ReplaySession | undefined = listed ?? linkedWithReplay;
+
+  // A linked replay that IS in the list: scroll its row into view once.
+  const scrolledRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!listed || scrolledRef.current === listed.id) return;
+    scrolledRef.current = listed.id;
+    document
+      .querySelector(`[data-replay-id="${CSS.escape(listed.id)}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [listed]);
 
   const goTo = (index: number) => {
     const s = sessions[index];
@@ -628,11 +656,30 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
               <div className="flex h-32 items-center justify-center text-muted-foreground">
                 <Loader2Icon className="size-4 animate-spin" />
               </div>
-            ) : sessions.length === 0 ? (
-              <div className="p-6 text-center text-sm text-muted-foreground">
-                No replays match these filters.
-              </div>
             ) : (
+              <>
+                {/* Linked replay not on the loaded pages (further down, or
+                 * outside the filters/window): pin it so it's visible. */}
+                {!listed && linkedWithReplay && (
+                  <div className="border-b bg-muted/30">
+                    <div className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Opened from link
+                    </div>
+                    <ReplayListRow
+                      session={linkedWithReplay}
+                      isActive
+                      onSelect={() => {}}
+                    />
+                  </div>
+                )}
+                {sessions.length === 0 && (
+                  <div className="p-6 text-center text-sm text-muted-foreground">
+                    No replays match these filters.
+                  </div>
+                )}
+              </>
+            )}
+            {!listQuery.isLoading &&
               sessions.map((s) => (
                 <ReplayListRow
                   key={s.id}
@@ -640,8 +687,7 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
                   isActive={s.id === selectedSessionId}
                   onSelect={() => selectSession(s.id)}
                 />
-              ))
-            )}
+              ))}
 
             {listQuery.hasNextPage && (
               <button
@@ -676,7 +722,9 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
                   onNext={
                     selectedIndex >= 0 && selectedIndex < sessions.length - 1
                       ? () => goTo(selectedIndex + 1)
-                      : undefined
+                      : selectedIndex === -1 && sessions.length > 0
+                        ? () => goTo(0) // from a pinned linked replay → top of list
+                        : undefined
                   }
                 />
               }
