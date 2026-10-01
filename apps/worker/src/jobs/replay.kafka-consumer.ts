@@ -1,4 +1,8 @@
-import { insertReplayChunks } from '@openpanel/db';
+import {
+  type ReplayLineWithOffset,
+  insertReplayChunks,
+  writeSessionReplayBlocks,
+} from '@openpanel/db';
 import {
   KAFKA_REPLAY_TOPIC,
   createKafkaReplayConsumer,
@@ -12,6 +16,9 @@ import {
   withSpan,
 } from '@openpanel/telemetry';
 import {
+  replayBlocksBytesTotal,
+  replayBlocksErrorsTotal,
+  replayBlocksWrittenTotal,
   replayKafkaConsumeErrorsTotal,
   replayKafkaConsumedTotal,
   replayKafkaConsumerLag,
@@ -22,15 +29,25 @@ export interface ReplayKafkaConsumerHandle {
   stop: () => Promise<void>;
 }
 
+// Blob-primary write mode (Phase 2), env-gated so it ships inert:
+//   off  (default) — insert chunks into ClickHouse only (Phase 1 behaviour)
+//   dual           — ALSO write zstd blocks to Azure Blob + refs to CH
+//   only           — write blocks only; STOP inserting chunk payloads into CH
+// Flip via `kubectl set env` + rollout. Serving from blocks is a separate flag.
+type ReplayBlocksMode = 'off' | 'dual' | 'only';
+const REPLAY_BLOCKS_MODE: ReplayBlocksMode = ((): ReplayBlocksMode => {
+  const v = (process.env.REPLAY_BLOCKS_MODE || 'off').trim().toLowerCase();
+  return v === 'dual' || v === 'only' ? v : 'off';
+})();
+
 // Replay is MUCH simpler than the events consumer: a chunk is a self-contained
-// row appended to session_replay_chunks — there is no session read-modify-write
-// to serialize, so we don't group by key, and no ReplacingMergeTree collapse to
-// protect, so there's no dedup (Phase 1: measure duplicates, add later if any).
-// A batch is: decompress every value → collect the JSONEachRow lines → one bulk
-// insertReplayChunks → resolve the whole contiguous prefix. On a decompress or
-// insert error we DON'T resolve, so kafkajs redelivers the batch (at-least-once)
-// rather than dropping replay — a redelivery at worst duplicates a chunk (Phase
-// 1 accepted), it never loses one.
+// row — there is no session read-modify-write to serialize, so we don't group by
+// key and there's no dedup. A batch is: decompress every value → collect the
+// JSONEachRow lines → write them (CH chunks and/or blob blocks per
+// REPLAY_BLOCKS_MODE) → resolve the whole batch. On a decompress or write error
+// we DON'T resolve, so kafkajs redelivers the batch (at-least-once) rather than
+// dropping replay — a redelivery at worst duplicates (block refs collapse via
+// ReplacingMergeTree; CH chunks de-dup at serving), it never loses a chunk.
 
 // Heartbeat cadence within a large batch so a slow CH insert can't blow the
 // 30s sessionTimeout. Replay batches are small in count (few, fat messages), so
@@ -118,13 +135,18 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
       // gets its offset resolved below; a whole-batch insert failure is what we
       // refuse to resolve.
       const lines: string[] = [];
+      // (line, kafka offset) pairs for the blocks path — block_index keys off the
+      // offset of a session's first chunk (monotonic per session, dedup-stable).
+      const linesWithOffsets: ReplayLineWithOffset[] = [];
       let firstTraceparent: string | undefined;
       for (const m of batch.messages) {
         if (!m.value) {
           continue;
         }
         try {
-          lines.push(decompressReplayLine(m.value));
+          const line = decompressReplayLine(m.value);
+          lines.push(line);
+          linesWithOffsets.push({ line, offset: Number(m.offset) });
           if (!firstTraceparent) {
             const tp = m.headers?.traceparent;
             if (tp) {
@@ -147,27 +169,52 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
         // real request in SigNoz) and stamp log_comment endpoint so the insert
         // is attributable in query_log.
         const parentCtx = contextFromTraceparent(firstTraceparent);
+        const doBlocks = REPLAY_BLOCKS_MODE !== 'off';
+        const doCh = REPLAY_BLOCKS_MODE !== 'only';
         try {
           await context.with(parentCtx, () =>
             withQueryContext({ endpoint: 'worker.incomingReplay' }, () =>
               withSpan(
                 'worker.incomingReplay',
-                { attributes: { 'openpanel.replay_chunks': lines.length } },
-                () => insertReplayChunks(lines),
+                {
+                  attributes: {
+                    'openpanel.replay_chunks': lines.length,
+                    'openpanel.replay_blocks_mode': REPLAY_BLOCKS_MODE,
+                  },
+                },
+                async () => {
+                  // Blob blocks first (its ref write is idempotent via
+                  // ReplacingMergeTree); then the CH chunk insert. Either failing
+                  // means we don't resolve → the batch redelivers.
+                  if (doBlocks) {
+                    try {
+                      const { blocks, bytes } =
+                        await writeSessionReplayBlocks(linesWithOffsets);
+                      replayBlocksWrittenTotal.inc({ partition }, blocks);
+                      replayBlocksBytesTotal.inc(bytes);
+                    } catch (err) {
+                      replayBlocksErrorsTotal.inc({ partition });
+                      throw err;
+                    }
+                  }
+                  if (doCh) {
+                    await insertReplayChunks(lines);
+                  }
+                },
               ),
             ),
           );
           replayKafkaConsumedTotal.inc({ partition }, lines.length);
         } catch (err) {
           // Do NOT resolve offsets — let kafkajs redeliver the batch. Replay is
-          // loss-averse here (a redelivery duplicates at worst; Phase 1 accepts
-          // that) and a persistent CH failure should surface as lag, not
-          // silent loss.
+          // loss-averse here (a redelivery duplicates at worst) and a persistent
+          // blob/CH failure should surface as lag, not silent loss.
           replayKafkaConsumeErrorsTotal.inc({ partition });
-          logger.error('replay kafka batch insert failed', {
+          logger.error('replay kafka batch write failed', {
             error: err,
             partition: batch.partition,
             messages: batch.messages.length,
+            mode: REPLAY_BLOCKS_MODE,
           });
           return;
         }
