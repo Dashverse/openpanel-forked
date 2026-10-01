@@ -5,6 +5,7 @@ import {
   replaySortOptions,
 } from '@openpanel/constants';
 import {
+  batchSessionReplayDuration,
   getReplaySessionFilterValues,
   getSessionList,
   getSessionReplayChunksAroundTime,
@@ -151,6 +152,15 @@ export const sessionRouter = createTRPCRouter({
     .input(z.object({ sessionId: z.string(), projectId: z.string() }))
     .query(async ({ input: { sessionId, projectId } }) => {
       return sessionService.byId(sessionId, projectId);
+    }),
+
+  // Recording length + tab count for one session — for a deep-linked replay
+  // that isn't on the loaded list page (byId only has the event-span duration).
+  replaySummary: protectedProcedure
+    .input(z.object({ sessionId: z.string(), projectId: z.string() }))
+    .query(async ({ input: { sessionId, projectId } }) => {
+      const map = await batchSessionReplayDuration([sessionId], projectId);
+      return map.get(sessionId) ?? null;
     }),
 
   hasReplay: protectedProcedure
