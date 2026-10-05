@@ -32,6 +32,7 @@ import {
   expandCustomEventToSQL,
 } from './custom-event.service';
 import { buildFirstTimeSubquery } from './first-time.service';
+import { buildReplayPresenceSubqueryForRange } from './session.service';
 
 export class FunnelService {
   constructor(private client: typeof ch) {}
@@ -420,21 +421,43 @@ export class FunnelService {
     );
   }
 
-  async getFunnel({
-    projectId,
-    startDate,
-    endDate,
-    series,
-    interval,
-    funnelWindow = 24,
-    funnelGroup,
-    breakdowns = [],
-    holdProperties = [],
-    globalFilters = [],
-    measuring = 'conversion_rate',
-    limit,
-    timezone = 'UTC',
-  }: IChartInput & { timezone: string; events?: IChartEvent[] }) {
+  /**
+   * Builds the per-person funnel query shared by the chart counts (getFunnel)
+   * and the people/replays drill-down (getFunnelPeople): one row per funnel
+   * subject (+ hold-property values) with its windowFunnel `level`, registered
+   * as the `funnel` CTE on the returned `funnelQuery`. Callers add their own
+   * outer SELECT, so the drill-down lists exactly the population the chart
+   * counts.
+   *
+   * `extraSelects` appends aggregate columns to the per-subject CTE (no GROUP
+   * BY change); `extraSourceColumns` adds columns to the custom-event
+   * `combined_events` projection those aggregates need. Both are empty for the
+   * chart path, which keeps its SQL unchanged.
+   */
+  private async prepareFunnelQuery(
+    {
+      projectId,
+      startDate,
+      endDate,
+      series,
+      funnelWindow = 24,
+      funnelGroup,
+      breakdowns = [],
+      holdProperties = [],
+      globalFilters = [],
+      measuring = 'conversion_rate',
+      timezone = 'UTC',
+    }: IChartInput & { timezone: string },
+    opts: {
+      extraSelects?: (ctx: {
+        funnelConditions: string[];
+        stepConditions: string[];
+        fromClause: string;
+        group: [string, string];
+      }) => string[];
+      extraSourceColumns?: string[];
+    } = {},
+  ) {
     if (!startDate || !endDate) {
       throw new Error('startDate and endDate are required');
     }
@@ -486,12 +509,15 @@ export class FunnelService {
     // Map) to a targeted SELECT, mirroring the conversion service's
     // approach. Measured impact on a 1-day Tabahi funnel: ~7x faster, ~8x
     // less data read, no more 40s timeouts for the same query.
-    const eventsSourceSelectColumns = this.getEventsSourceSelectColumns({
-      eventSeries,
-      breakdowns,
-      holdProperties,
-      projectId,
-    });
+    const eventsSourceSelectColumns = [
+      ...this.getEventsSourceSelectColumns({
+        eventSeries,
+        breakdowns,
+        holdProperties,
+        projectId,
+      }),
+      ...(opts.extraSourceColumns ?? []),
+    ];
 
     // Get events source (handles custom events)
     const { fromClause, withClauses, needsNameFilter } =
@@ -728,7 +754,22 @@ export class FunnelService {
       funnelWindowMilliseconds,
       group,
       timezone,
-      additionalSelects: [...breakdownSelects, ...holdPropertySelects],
+      additionalSelects: [
+        ...breakdownSelects,
+        ...holdPropertySelects,
+        ...(opts.extraSelects?.({
+          funnelConditions,
+          // The fast path strips event filters from funnelConditions (they
+          // live in filtered_profiles instead), so a per-step aggregate built
+          // on them could pick an event the step's filters reject. Hand hooks
+          // the full per-step predicates as well.
+          stepConditions: canPrefilterUsers
+            ? this.getFunnelConditions(eventSeries, projectId)
+            : funnelConditions,
+          fromClause,
+          group,
+        }) ?? []),
+      ],
       additionalGroupBy: [...breakdownGroupBy, ...holdPropertyGroupBy],
       fromClause,
       needsNameFilter,
@@ -888,6 +929,40 @@ export class FunnelService {
     }
 
     funnelQuery.with('funnel', funnelCte);
+
+    return {
+      funnelQuery,
+      eventSeries,
+      breakdowns,
+      group,
+      funnelConditions,
+      fromClause,
+      resolveAliases,
+      funnelWindowSeconds,
+      startDate,
+      endDate,
+    };
+  }
+
+  async getFunnel(
+    input: IChartInput & { timezone: string; events?: IChartEvent[] },
+  ) {
+    const {
+      projectId,
+      interval,
+      measuring = 'conversion_rate',
+      limit,
+      timezone = 'UTC',
+    } = input;
+    const {
+      funnelQuery,
+      eventSeries,
+      breakdowns,
+      resolveAliases,
+      funnelWindowSeconds,
+      startDate,
+      endDate,
+    } = await this.prepareFunnelQuery(input);
 
     funnelQuery
       .select<{
@@ -1130,6 +1205,152 @@ export class FunnelService {
     }
 
     return funnelResult;
+  }
+
+  /**
+   * People behind one funnel step — the "View users" / "View replays"
+   * drill-down. Built on the SAME per-subject query as getFunnel
+   * (prepareFunnelQuery), so the population is exactly what the chart counts:
+   * completed = level >= step, dropped off = level = step (reached this step,
+   * never the next), optionally narrowed to one breakdown row.
+   *
+   * Per subject it also returns the session / window / time of their LAST
+   * qualifying event for this step, which is where a replay should open.
+   *
+   * Totals come from window functions over the whole (uncapped) population, so
+   * they match the chart even though the returned list is capped:
+   * - total: funnel rows, i.e. the chart's step count (with hold properties a
+   *   person counts once per held value, exactly like the chart)
+   * - totalPeople: distinct funnel subjects (= total without hold properties)
+   * - totalWithReplay: subjects whose step session has a recording
+   */
+  async getFunnelPeople({
+    stepIndex,
+    showDropoffs,
+    breakdownValues = [],
+    onlyWithReplay = false,
+    maxPeople,
+    ...input
+  }: IChartInput & {
+    timezone: string;
+    stepIndex: number;
+    showDropoffs: boolean;
+    breakdownValues?: (string | number | null)[];
+    onlyWithReplay?: boolean;
+    // List cap. Deliberately not `limit` — that is the chart's breakdown-series
+    // cap (IChartInput.limit) and stays with the chart input.
+    maxPeople?: number;
+  }) {
+    const stepCount = onlyReportEvents(input.series).length;
+    if (!Number.isInteger(stepIndex) || stepIndex < 0 || stepIndex >= stepCount) {
+      throw new Error('stepIndex is out of range for this funnel');
+    }
+
+    // events_v2 has no window_id column (it predates the column); when the
+    // range routes there the replay simply opens on its default tab.
+    const hasWindowColumn =
+      getEventsTableForRange(input.startDate) !== TABLE_NAMES.events_v2;
+
+    const { funnelQuery, breakdowns, group, startDate, endDate } =
+      await this.prepareFunnelQuery(input, {
+        extraSourceColumns: hasWindowColumn ? ['window_id'] : [],
+        extraSelects: ({ stepConditions, fromClause, group }) => {
+          const cond = stepConditions[stepIndex]!;
+          const at = `${fromClause}.created_at`;
+          return [
+            `argMaxIf(${fromClause}.session_id, ${at}, ${cond}) AS step_session`,
+            `argMaxIf(${hasWindowColumn ? `${fromClause}.window_id` : "''"}, ${at}, ${cond}) AS step_window`,
+            `maxIf(${at}, ${cond}) AS step_at`,
+            // Session-grouped funnels key on session_id, so carry the person
+            // separately. Profile-grouped funnels ARE the (resolved) person.
+            ...(group[1] === 'profile_id'
+              ? []
+              : [`argMax(${fromClause}.profile_id, ${at}) AS person_id`]),
+          ];
+        },
+      });
+
+    const subject = group[1];
+    const peopleWhere = [
+      'level != 0',
+      showDropoffs ? `level = ${stepIndex + 1}` : `level >= ${stepIndex + 1}`,
+      ...breakdowns.flatMap((_, index) => {
+        const value = breakdownValues[index];
+        return value === undefined || value === null
+          ? []
+          : [`toString(b_${index}) = ${sqlstring.escape(String(value))}`];
+      }),
+    ];
+
+    // One row per funnel subject. With hold properties a subject has one funnel
+    // row per held value; keep the latest step occurrence across them and
+    // remember how many chart rows it stands for.
+    funnelQuery.with(
+      'funnel_people',
+      `SELECT ${subject} AS subject,
+         ${subject === 'profile_id' ? 'any(profile_id)' : 'argMax(person_id, step_at)'} AS person,
+         argMax(step_session, step_at) AS sess,
+         argMax(step_window, step_at) AS win,
+         max(step_at) AS last_at,
+         count() AS row_count
+       FROM funnel
+       WHERE ${peopleWhere.join(' AND ')}
+       GROUP BY subject`,
+    );
+    funnelQuery.with(
+      'funnel_people_replay',
+      `SELECT *, sess != '' AND sess IN (${buildReplayPresenceSubqueryForRange(input.projectId, startDate, endDate)}) AS has_replay
+       FROM funnel_people`,
+    );
+
+    funnelQuery
+      .select<{
+        person: string;
+        sess: string;
+        win: string;
+        at_ms: number;
+        has_replay: number;
+        total: number;
+        total_people: number;
+        total_with_replay: number;
+      }>([
+        'person',
+        'sess',
+        'win',
+        'toUnixTimestamp64Milli(toDateTime64(last_at, 3)) AS at_ms',
+        'has_replay',
+        'sum(row_count) OVER () AS total',
+        'count() OVER () AS total_people',
+        'sum(has_replay) OVER () AS total_with_replay',
+      ])
+      .from('funnel_people_replay');
+
+    // Replays-only: rank recorded subjects first instead of filtering them in
+    // WHERE, so the window totals still come back when nobody has a replay.
+    if (onlyWithReplay) {
+      funnelQuery.orderBy('has_replay', 'DESC');
+    }
+    funnelQuery
+      .orderBy('last_at', 'DESC')
+      .limit(maxPeople ?? (onlyWithReplay ? 200 : 1000));
+
+    const rows = await funnelQuery.execute();
+    const first = rows[0];
+
+    return {
+      total: Number(first?.total ?? 0),
+      totalPeople: Number(first?.total_people ?? 0),
+      totalWithReplay: Number(first?.total_with_replay ?? 0),
+      people: rows
+        .filter((row) => !onlyWithReplay || Number(row.has_replay) === 1)
+        .map((row) => ({
+          profileId: row.person,
+          sessionId: row.sess,
+          windowId: row.win,
+          stepAt: Number(row.at_ms),
+          hasReplay: Number(row.has_replay) === 1,
+        })),
+    };
   }
 }
 

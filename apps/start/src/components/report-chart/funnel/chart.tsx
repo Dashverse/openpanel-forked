@@ -12,7 +12,12 @@ import {
 import { pushModal } from '@/modals';
 import type { RouterOutputs } from '@/trpc/client';
 import { cn } from '@/utils/cn';
-import { ChevronRightIcon, InfoIcon, UsersIcon } from 'lucide-react';
+import {
+  ChevronRightIcon,
+  InfoIcon,
+  MonitorPlayIcon,
+  UsersIcon,
+} from 'lucide-react';
 
 import { alphabetIds } from '@openpanel/constants';
 
@@ -140,30 +145,39 @@ function useInspectFunnelStep() {
       startDate,
       endDate,
       range,
-      interval,
       series: reportSeries,
       breakdowns: reportBreakdowns,
       previous,
       funnelWindow,
       funnelGroup,
+      holdProperties,
+      globalFilters,
+      measuring,
+      cohortFilters,
+      sortOrder,
+      ttcAggregation,
     },
   } = useReportChartContext();
 
   return (
     step: Props['data']['current']['steps'][number],
     stepIndex: number,
+    view: 'users' | 'replays',
+    // Values of the clicked breakdown row (BreakdownTable), in breakdown order.
+    breakdownValues?: string[],
   ) => {
     if (!projectId || !step.event.id) return;
 
-    // For funnels, we need to pass the step index so the modal can query
-    // users who completed at least that step in the funnel sequence
+    // Pass the SAME report fields the chart's own query uses (funnel/index.tsx),
+    // so the people/replays list is built from exactly the population the chart
+    // counted.
     pushModal('ViewChartUsers', {
       type: 'funnel',
       report: {
         projectId,
         series: reportSeries,
         breakdowns: reportBreakdowns || [],
-        interval: interval || 'day',
+        interval: 'day',
         startDate,
         endDate,
         range,
@@ -172,8 +186,17 @@ function useInspectFunnelStep() {
         metric: 'sum',
         funnelWindow,
         funnelGroup,
+        limit: 20,
+        holdProperties,
+        globalFilters,
+        measuring,
+        cohortFilters,
+        sortOrder,
+        ttcAggregation,
       },
-      stepIndex, // Pass the step index for funnel queries
+      stepIndex,
+      view,
+      breakdownValues,
     });
   };
 }
@@ -309,25 +332,46 @@ export function Tables({
             },
             {
               name: '',
-              render: (item) => (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 w-8 p-0"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const stepIndex = steps.findIndex(
-                      (s) => s.event.id === item.event.id,
-                    );
-                    handleInspectStep(item, stepIndex);
-                  }}
-                  title="View users who completed this step"
-                >
-                  <UsersIcon size={16} />
-                </Button>
-              ),
+              render: (item) => {
+                const stepIndex = steps.findIndex(
+                  (s) => s.event.id === item.event.id,
+                );
+                return (
+                  <div className="row items-center justify-end">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 w-8 p-0"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleInspectStep(item, stepIndex, 'users', breakdowns);
+                      }}
+                      title="View users who completed this step"
+                    >
+                      <UsersIcon size={16} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 w-8 p-0"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleInspectStep(
+                          item,
+                          stepIndex,
+                          'replays',
+                          breakdowns,
+                        );
+                      }}
+                      title="View replays of users at this step"
+                    >
+                      <MonitorPlayIcon size={16} />
+                    </Button>
+                  </div>
+                );
+              },
               className: 'text-right',
-              width: '48px',
+              width: '80px',
             },
           ]}
         />
@@ -454,16 +498,42 @@ export function BreakdownTable({
                               )}
                             </div>
                           </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-8 w-8 shrink-0 p-0"
-                            onClick={() => handleInspectStep(step, stepIndex)}
-                            aria-label={`View users who completed ${step.event.displayName}`}
-                            title="View users who completed this step"
-                          >
-                            <UsersIcon size={16} />
-                          </Button>
+                          <div className="flex shrink-0 items-center">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 w-8 shrink-0 p-0"
+                              onClick={() =>
+                                handleInspectStep(
+                                  step,
+                                  stepIndex,
+                                  'users',
+                                  funnel.breakdowns,
+                                )
+                              }
+                              aria-label={`View users who completed ${step.event.displayName}`}
+                              title="View users who completed this step"
+                            >
+                              <UsersIcon size={16} />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 w-8 shrink-0 p-0"
+                              onClick={() =>
+                                handleInspectStep(
+                                  step,
+                                  stepIndex,
+                                  'replays',
+                                  funnel.breakdowns,
+                                )
+                              }
+                              aria-label={`View replays of users at ${step.event.displayName}`}
+                              title="View replays of users at this step"
+                            >
+                              <MonitorPlayIcon size={16} />
+                            </Button>
+                          </div>
                         </div>
                       ) : (
                         <span className="text-muted-foreground">—</span>

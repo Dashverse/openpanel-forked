@@ -310,30 +310,45 @@ function displayToWallOffset(
   return sorted.at(-1)?.end ?? displayMs;
 }
 
+// Lead-up before a linked absolute moment (`initialAtMs`), so the viewer sees
+// what the user was doing right before it (e.g. before a funnel drop-off).
+const INITIAL_AT_LEAD_MS = 3000;
+
 /**
  * Seeks once to a shared link's timestamp (display seconds) after the player is
  * ready and the tab's segments are known. Leaves playback paused there.
+ * `initialAtMs` (an absolute epoch-ms moment) takes precedence: it seeks to a
+ * few seconds before that wall-clock time.
  */
 function InitialSeek({
   initialTimeSec,
+  initialAtMs,
   segments,
 }: {
   initialTimeSec?: number;
+  initialAtMs?: number;
   segments?: { startMs: number; endMs: number }[];
 }) {
   const { isReady, startTime, seek } = useReplayContext();
   const done = useRef(false);
   useEffect(() => {
-    if (done.current || initialTimeSec == null || initialTimeSec <= 0) return;
+    if (done.current) return;
+    const hasAt = initialAtMs != null && initialAtMs > 0;
+    if (!hasAt && (initialTimeSec == null || initialTimeSec <= 0)) return;
     if (!isReady || startTime == null || segments === undefined) return;
     done.current = true;
-    const displayMs = initialTimeSec * 1000;
+    if (hasAt) {
+      // seek() takes a wall-clock offset from the recording start.
+      seek(Math.max(0, initialAtMs! - startTime - INITIAL_AT_LEAD_MS));
+      return;
+    }
+    const displayMs = initialTimeSec! * 1000;
     seek(
       segments.length > 0
         ? displayToWallOffset(displayMs, segments, startTime)
         : displayMs,
     );
-  }, [initialTimeSec, isReady, startTime, segments, seek]);
+  }, [initialTimeSec, initialAtMs, isReady, startTime, segments, seek]);
   return null;
 }
 
@@ -376,9 +391,13 @@ function ReplayContent({
   header,
   userPanel,
   initialTimeSec,
+  initialAtMs,
 }: {
   // Seek here (display seconds) once loaded — from a shared link.
   initialTimeSec?: number;
+  // Or to this absolute moment (epoch ms, minus a short lead-up). Wins over
+  // initialTimeSec.
+  initialAtMs?: number;
   // 'studio' = Session Replays page (Mixpanel-style: header, dark stage,
   // controls bar, Activity/User side panel). 'default' = session detail page.
   layout?: 'default' | 'studio';
@@ -604,7 +623,11 @@ function ReplayContent({
         <ActiveReplayWindowContext.Provider value={windowId}>
         <SeekBridge controlsRef={controlsRef} />
         <ReplaySegmentsBootstrap segments={segments} />
-        <InitialSeek initialTimeSec={initialTimeSec} segments={segments} />
+        <InitialSeek
+          initialTimeSec={initialTimeSec}
+          initialAtMs={initialAtMs}
+          segments={segments}
+        />
         <div
           ref={containerRef}
           id="replay"
@@ -871,10 +894,13 @@ export function ReplayShell({
   userPanel,
   initialWindowId,
   initialTimeSec,
+  initialAtMs,
 }: {
   // From a shared link: open this tab, at this display time (seconds).
   initialWindowId?: string;
   initialTimeSec?: number;
+  // Or at this absolute moment (epoch ms) — wins over initialTimeSec.
+  initialAtMs?: number;
   sessionId: string;
   projectId: string;
   showEventFeed?: boolean;
@@ -926,12 +952,10 @@ export function ReplayShell({
   // The shared timestamp applies only to the tab it was taken on (or the
   // default tab when the link has none), and only until the user switches.
   const linkedWindowId = initialWindowId ?? defaultWindowId;
-  const seekTo =
-    !linkConsumed &&
-    initialTimeSec != null &&
-    activeWindowId === linkedWindowId
-      ? initialTimeSec
-      : undefined;
+  const linkActive = !linkConsumed && activeWindowId === linkedWindowId;
+  const seekTo = linkActive && initialTimeSec != null ? initialTimeSec : undefined;
+  const seekToAtMs =
+    linkActive && initialAtMs != null ? initialAtMs : undefined;
 
   const switcher = (
     <WindowSwitcher
@@ -956,6 +980,7 @@ export function ReplayShell({
       header={studioHeader}
       userPanel={userPanel}
       initialTimeSec={seekTo}
+      initialAtMs={seekToAtMs}
     />
   );
 
