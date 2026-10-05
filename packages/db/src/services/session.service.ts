@@ -342,20 +342,55 @@ function clampReplayDays(days?: number): number | undefined {
  * scope on its `dt` (Date) column (chunks scope on `started_at`).
  */
 function buildReplayPresenceSubquery(projectId: string, days: number): string {
+  return replayPresenceUnion(
+    projectId,
+    `started_at > now() - INTERVAL ${days} DAY
+        AND started_at <= now()`,
+    `dt > today() - ${days}
+        AND dt <= today()`,
+  );
+}
+
+/**
+ * Same session-id source as buildReplayPresenceSubquery, scoped to an absolute
+ * date range (padded by `padDays` either side, so a session whose recording
+ * started before/after the range edge still counts) instead of "last N days".
+ * Used by the funnel replays drill-down, whose range comes from the chart.
+ */
+export function buildReplayPresenceSubqueryForRange(
+  projectId: string,
+  startDate: string,
+  endDate: string,
+  padDays = 2,
+): string {
+  const start = sqlstring.escape(formatClickhouseDate(startDate));
+  const end = sqlstring.escape(formatClickhouseDate(endDate));
+  return replayPresenceUnion(
+    projectId,
+    `started_at >= toDateTime(${start}) - INTERVAL ${padDays} DAY
+        AND started_at <= toDateTime(${end}) + INTERVAL ${padDays} DAY`,
+    `dt >= toDate(toDateTime(${start})) - ${padDays}
+        AND dt <= toDate(toDateTime(${end})) + ${padDays}`,
+  );
+}
+
+function replayPresenceUnion(
+  projectId: string,
+  chunkWindow: string,
+  archiveWindow: string,
+): string {
   const proj = sqlstring.escape(projectId);
   const chunks = `SELECT DISTINCT session_id
       FROM ${TABLE_NAMES.session_replay_chunks}
       WHERE project_id = ${proj}
-        AND started_at > now() - INTERVAL ${days} DAY
-        AND started_at <= now()`;
+        AND ${chunkWindow}`;
   if (!REPLAY_BLOB_CONN) return chunks;
   return `${chunks}
       UNION DISTINCT
       SELECT DISTINCT session_id
       FROM ${REPLAY_ARCHIVE_INDEX} FINAL
       WHERE project_id = ${proj}
-        AND dt > today() - ${days}
-        AND dt <= today()`;
+        AND ${archiveWindow}`;
 }
 
 /**

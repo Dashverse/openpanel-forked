@@ -22,14 +22,13 @@ import {
   getProfilesCached,
   getSelectPropertyKey,
   getSettingsForProject,
-  onlyReportEvents,
   processRetentionData,
 } from '@openpanel/db';
 import {
-  type IChartEvent,
   zChartEvent,
   zChartEventFilter,
   zChartInput,
+  zChartInputBase,
   zChartSeries,
   zCriteria,
   zRange,
@@ -109,6 +108,38 @@ const chartCacher = cacheMiddleware(CHART_CACHE_TTL, {
       ? omit(CHART_KEY_OMIT, raw)
       : raw,
 });
+
+// Funnel step drill-down input: the chart's own input (so the people query is
+// built exactly like the counts) plus which step / side / breakdown row.
+const zFunnelStepPeopleInput = zChartInputBase.extend({
+  stepIndex: z.number().int().min(0).describe('0-based index of the funnel step'),
+  showDropoffs: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'If true, people who reached this step but not the next. If false, people who completed at least this step.',
+    ),
+  breakdownValues: z
+    .array(z.string().nullable())
+    .optional()
+    .describe('Values of the clicked breakdown row, in breakdown order'),
+});
+
+async function getFunnelStepPeople(
+  input: z.infer<typeof zFunnelStepPeopleInput>,
+  opts: { onlyWithReplay: boolean; maxPeople: number },
+) {
+  const { timezone } = await getSettingsForProject(input.projectId);
+  // Same date resolution as the `funnel` procedure so the range matches the chart.
+  const currentPeriod = getChartStartEndDate(input, timezone);
+  return funnelService.getFunnelPeople({
+    ...input,
+    ...currentPeriod,
+    timezone,
+    ...opts,
+  });
+}
 
 export const chartRouter = createTRPCRouter({
   projectCard: protectedProcedure
@@ -637,166 +668,66 @@ export const chartRouter = createTRPCRouter({
       return profiles;
     }),
 
+  // "View users" on a funnel step. The list comes from the SAME per-person
+  // query as the chart counts (funnelService.getFunnelPeople → getFunnel's
+  // builder): same global filters, hold properties, cohorts, identity
+  // resolution, first-time qualifiers and breakdown row — so `total` always
+  // equals the step's completed / dropped-off count.
   getFunnelProfiles: protectedProcedure
-    .input(
-      z.object({
-        projectId: z.string(),
-        startDate: z.string().nullish(),
-        endDate: z.string().nullish(),
-        series: zChartSeries,
-        stepIndex: z.number().describe('0-based index of the funnel step'),
-        showDropoffs: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe(
-            'If true, show users who dropped off at this step. If false, show users who completed at least this step.',
-          ),
-        funnelWindow: z.number().optional(),
-        funnelGroup: z.string().optional(),
-        breakdowns: z.array(z.object({ name: z.string() })).optional(),
-        range: zRange,
-      }),
-    )
+    .input(zFunnelStepPeopleInput)
     .query(async ({ input }) => {
-      const { timezone } = await getSettingsForProject(input.projectId);
-      const {
-        projectId,
-        series,
-        stepIndex,
-        showDropoffs = false,
-        funnelWindow,
-        funnelGroup,
-        breakdowns = [],
-      } = input;
-
-      const { startDate, endDate } = getChartStartEndDate(input, timezone);
-
-      // stepIndex is 0-based, but level is 1-based, so we need level >= stepIndex + 1
-      const targetLevel = stepIndex + 1;
-
-      const eventSeries = onlyReportEvents(series);
-
-      if (eventSeries.length === 0) {
-        throw new Error('At least one event series is required');
-      }
-
-      const funnelWindowSeconds = (funnelWindow || 24) * 3600;
-      const funnelWindowMilliseconds = funnelWindowSeconds * 1000;
-
-      // Resolve events source (handles custom events) and funnel group column
-      const { fromClause, withClauses, needsNameFilter } =
-        await funnelService.buildEventsSource(
-          eventSeries as IChartEvent[],
-          projectId,
-          startDate,
-          endDate,
-        );
-
-      // Identity-merge: resolve anon profile_id -> canonical via profile_aliases so
-      // the user list keys on the SAME canonical id the count funnel (getFunnel) uses.
-      // Without this, the list emitted raw/session ids that don't match profiles.id,
-      // so getProfilesCached dropped them all -> "No users found" even when the
-      // dropoff count was > 0. Profile-level only (no cohorts in this procedure).
-      const resolveAliases = funnelGroup !== 'session_id';
-      const group = funnelService.resolveFunnelGroup(
-        funnelGroup,
-        fromClause,
-        resolveAliases,
-        projectId,
-      );
-      const groupedByProfile = group[1] === 'profile_id';
-
-      // When grouped by profile_id, the group column is already aliased to
-      // profile_id; only add a separate profile_id select in session-grouped mode.
-      const funnelCte = funnelService.buildFunnelCte({
-        projectId,
-        startDate,
-        endDate,
-        eventSeries: eventSeries as IChartEvent[],
-        funnelWindowMilliseconds,
-        group,
-        timezone,
-        additionalSelects: groupedByProfile
-          ? []
-          : [`${fromClause}.profile_id AS profile_id`],
-        additionalGroupBy: groupedByProfile ? [] : ['profile_id'],
-        fromClause,
-        needsNameFilter,
+      const { people, total, totalPeople } = await getFunnelStepPeople(input, {
+        onlyWithReplay: false,
+        // "View Users" is a preview list — cap it. getProfilesCached inlines
+        // every id into its Redis cache key, so tens of thousands of ids blew
+        // up with "ERR key name too long".
+        maxPeople: 1000,
       });
 
-      // Check for profile filters and add profile join if needed
-      const profileFilters = funnelService.getProfileFilters(
-        eventSeries as IChartEvent[],
-      );
-      if (profileFilters.length > 0) {
-        const fieldsToSelect = uniq(
-          profileFilters.map((f) => f.split('.')[0]),
-        ).join(', ');
-        funnelCte.leftJoin(
-          `(SELECT id, ${fieldsToSelect} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = ${sqlstring.escape(projectId)}) as profile`,
-          `profile.id = ${fromClause}.profile_id`,
-        );
-      }
+      const ids = people.map((p) => p.profileId).filter(Boolean);
+      const profiles = ids.length
+        ? await getProfilesCached(ids, input.projectId)
+        : [];
+      // Keep the query's order (most recent step first).
+      const byId = new Map(profiles.map((p) => [p.id, p]));
+      return {
+        total,
+        totalPeople,
+        profiles: uniq(ids)
+          .map((id) => byId.get(id))
+          .filter((p): p is IServiceProfile => !!p),
+      };
+    }),
 
-      // Build main query
-      const query = clix(ch, timezone);
+  // "View replays" on a funnel step: the same population as getFunnelProfiles,
+  // narrowed to people whose step session has a recording, each with the
+  // session / tab / time of the step so the player can open right there.
+  getFunnelReplays: protectedProcedure
+    .input(zFunnelStepPeopleInput)
+    .query(async ({ input }) => {
+      const { people, total, totalPeople, totalWithReplay } =
+        await getFunnelStepPeople(input, {
+          onlyWithReplay: true,
+          maxPeople: 200,
+        });
 
-      // Register custom-event CTEs (if any) on the outer query
-      for (const withClause of withClauses) {
-        query.with(withClause.name, withClause.query);
-      }
-
-      // Identity-merge alias map — mirrors getFunnel (funnel.service.ts:782-791). Join
-      // each event's profile_id to its canonical id so resolveFunnelGroup's coalesce
-      // collapses anon -> identified, yielding real profiles.id values. One scan of
-      // profile_aliases; a no-op for projects with no aliases (coalesce keeps raw id).
-      if (resolveAliases) {
-        funnelCte.leftJoin('al', `al.alias = ${fromClause}.device_id`);
-        query.with(
-          'al',
-          clix(ch, timezone)
-            .select(['alias', 'argMax(profile_id, created_at) AS canonical'])
-            .from(TABLE_NAMES.alias)
-            .where('project_id', '=', projectId)
-            .groupBy(['alias']),
-        );
-      }
-
-      query.with('funnel', funnelCte);
-
-      // Get distinct profile IDs
-      query
-        .select(['DISTINCT profile_id'])
-        .from('funnel')
-        .where('level', '!=', 0);
-
-      if (showDropoffs) {
-        // Show users who dropped off at this step (completed this step but not the next)
-        query.where('level', '=', targetLevel);
-      } else {
-        // Show users who completed at least this step
-        query.where('level', '>=', targetLevel);
-      }
-
-      // "View Users" is a preview list — cap it. Large cohorts (e.g. all completers)
-      // returned tens of thousands of ids, which getProfilesCached inlines into the
-      // Redis cache key -> multi-MB key -> "ERR key name too long". Top 1000 for now;
-      // pagination can extend this later.
-      query.limit(1000);
-
-      const profileIdsResult = (await query.execute()) as {
-        profile_id: string;
-      }[];
-
-      if (profileIdsResult.length === 0) {
-        return [];
-      }
-
-      // Fetch profile details
-      const ids = profileIdsResult.map((p) => p.profile_id).filter(Boolean);
-      const profiles = await getProfilesCached(ids, projectId);
-
-      return profiles;
+      const ids = people.map((p) => p.profileId).filter(Boolean);
+      const profiles = ids.length
+        ? await getProfilesCached(ids, input.projectId)
+        : [];
+      const byId = new Map(profiles.map((p) => [p.id, p]));
+      return {
+        total,
+        totalPeople,
+        totalWithReplay,
+        replays: people.map((p) => ({
+          profileId: p.profileId,
+          // null when the person has no profiles row (e.g. never identified).
+          profile: byId.get(p.profileId) ?? null,
+          sessionId: p.sessionId,
+          windowId: p.windowId,
+          stepAt: p.stepAt,
+        })),
+      };
     }),
 });

@@ -10,12 +10,14 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useTRPC } from '@/integrations/trpc/react';
-import type { IChartData } from '@/trpc/client';
+import type { IChartData, RouterOutputs } from '@/trpc/client';
 import { cn } from '@/utils/cn';
+import { formatDateTime } from '@/utils/date';
 import { getProfileName } from '@/utils/getters';
 import type { IChartInput } from '@openpanel/validation';
 import { useQuery } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { PlayIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { popModal } from '.';
 import { ModalHeader } from './Modal/Container';
@@ -286,93 +288,234 @@ function ChartUsersView({ chartData, report, date }: ChartUsersViewProps) {
 interface FunnelUsersViewProps {
   report: IChartInput;
   stepIndex: number;
+  view?: 'users' | 'replays';
+  breakdownValues?: string[];
 }
 
-function FunnelUsersView({ report, stepIndex }: FunnelUsersViewProps) {
+function SegmentedButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'px-3 py-1.5 text-sm rounded-md transition-colors',
+        active
+          ? 'bg-primary text-primary-foreground'
+          : 'bg-muted text-muted-foreground hover:bg-muted/80',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function FunnelUsersView({
+  report,
+  stepIndex,
+  view: initialView = 'users',
+  breakdownValues,
+}: FunnelUsersViewProps) {
   const trpc = useTRPC();
   const [showDropoffs, setShowDropoffs] = useState(false);
+  const [view, setView] = useState<'users' | 'replays'>(initialView);
+
+  // The chart's own input + the step / side / breakdown row, so the list is
+  // built from the same query as the chart counts.
+  const input = {
+    ...report,
+    stepIndex,
+    showDropoffs,
+    breakdownValues,
+  };
 
   const profilesQuery = useQuery(
-    trpc.chart.getFunnelProfiles.queryOptions(
-      {
-        projectId: report.projectId,
-        startDate: report.startDate!,
-        endDate: report.endDate!,
-        range: report.range,
-        series: report.series,
-        stepIndex: stepIndex,
-        showDropoffs: showDropoffs,
-        funnelWindow: report.funnelWindow,
-        funnelGroup: report.funnelGroup,
-        breakdowns: report.breakdowns,
-      },
-      {
-        enabled: stepIndex !== undefined,
-      },
-    ),
+    trpc.chart.getFunnelProfiles.queryOptions(input, {
+      enabled: view === 'users',
+    }),
+  );
+  const replaysQuery = useQuery(
+    trpc.chart.getFunnelReplays.queryOptions(input, {
+      enabled: view === 'replays',
+    }),
   );
 
-  const profiles = profilesQuery.data ?? [];
+  const profiles = profilesQuery.data?.profiles ?? [];
   const isLastStep = stepIndex === report.series.length - 1;
+  const stepLabel = `step ${stepIndex + 1} of ${report.series.length}`;
+  const breakdownLabel = breakdownValues?.length
+    ? ` (${breakdownValues.join(' / ')})`
+    : '';
 
   return (
     <ScrollableModal
       header={
         <div className="flex flex-col gap-2">
           <ModalHeader
-            title="View Users"
+            title={view === 'users' ? 'View Users' : 'View Replays'}
             text={
-              showDropoffs
-                ? `Users who dropped off after step ${stepIndex + 1} of ${report.series.length}`
-                : `Users who completed step ${stepIndex + 1} of ${report.series.length} in the funnel`
+              (showDropoffs
+                ? `${view === 'users' ? 'Users' : 'Replays of users'} who dropped off after ${stepLabel}`
+                : `${view === 'users' ? 'Users' : 'Replays of users'} who completed ${stepLabel} in the funnel`) +
+              breakdownLabel
             }
           />
-          {!isLastStep && (
+          <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowDropoffs(false)}
-                className={cn(
-                  'px-3 py-1.5 text-sm rounded-md transition-colors',
-                  !showDropoffs
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-muted text-muted-foreground hover:bg-muted/80',
-                )}
+              <SegmentedButton
+                active={view === 'users'}
+                onClick={() => setView('users')}
               >
-                Completed
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowDropoffs(true)}
-                className={cn(
-                  'px-3 py-1.5 text-sm rounded-md transition-colors',
-                  showDropoffs
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-muted text-muted-foreground hover:bg-muted/80',
-                )}
+                Users
+              </SegmentedButton>
+              <SegmentedButton
+                active={view === 'replays'}
+                onClick={() => setView('replays')}
               >
-                Dropped Off
-              </button>
+                Replays
+              </SegmentedButton>
             </div>
-          )}
-          {profiles.length >= 1000 && (
+            {!isLastStep && (
+              <div className="flex items-center gap-2">
+                <SegmentedButton
+                  active={!showDropoffs}
+                  onClick={() => setShowDropoffs(false)}
+                >
+                  Completed
+                </SegmentedButton>
+                <SegmentedButton
+                  active={showDropoffs}
+                  onClick={() => setShowDropoffs(true)}
+                >
+                  Dropped Off
+                </SegmentedButton>
+              </div>
+            )}
+          </div>
+          {view === 'users' && profilesQuery.data && (
             <p className="text-sm text-muted-foreground">
-              Showing the first 1,000 users (preview limit).
+              {profilesQuery.data.total.toLocaleString()}{' '}
+              {showDropoffs ? 'dropped off' : 'completed'}
+              {profiles.length < profilesQuery.data.totalPeople &&
+                ` · ${profiles.length.toLocaleString()} shown (most recent first)`}
+            </p>
+          )}
+          {view === 'replays' && replaysQuery.data && (
+            <p className="text-sm text-muted-foreground">
+              {replaysQuery.data.totalWithReplay.toLocaleString()} of{' '}
+              {replaysQuery.data.totalPeople.toLocaleString()}{' '}
+              {showDropoffs ? 'dropped' : 'completed'} users have a replay
+              {replaysQuery.data.replays.length <
+                replaysQuery.data.totalWithReplay &&
+                ` · showing the ${replaysQuery.data.replays.length.toLocaleString()} most recent`}
+              . Only recorded (web) sessions have replays.
             </p>
           )}
         </div>
       }
     >
       <div className="flex flex-col gap-4">
-        {profilesQuery.isLoading ? (
+        {view === 'users' ? (
+          profilesQuery.isLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <div className="text-muted-foreground">Loading users...</div>
+            </div>
+          ) : (
+            <ProfileList profiles={profiles} />
+          )
+        ) : replaysQuery.isLoading ? (
           <div className="flex items-center justify-center py-8">
-            <div className="text-muted-foreground">Loading users...</div>
+            <div className="text-muted-foreground">Loading replays...</div>
           </div>
         ) : (
-          <ProfileList profiles={profiles} />
+          <FunnelReplayList
+            replays={replaysQuery.data?.replays ?? []}
+            showDropoffs={showDropoffs}
+          />
         )}
       </div>
     </ScrollableModal>
+  );
+}
+
+type FunnelReplay =
+  RouterOutputs['chart']['getFunnelReplays']['replays'][number];
+
+function FunnelReplayList({
+  replays,
+  showDropoffs,
+}: {
+  replays: FunnelReplay[];
+  showDropoffs: boolean;
+}) {
+  if (replays.length === 0) {
+    return (
+      <div className="col items-center gap-1 px-6 py-8 text-center">
+        <div className="font-medium">No replays for these users</div>
+        <div className="text-sm text-muted-foreground">
+          None of their sessions at this step were recorded. Only web sessions
+          with session replay enabled are recorded.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="col gap-[5px] p-5">
+      {replays.map((replay) => (
+        <div
+          key={`${replay.profileId}:${replay.sessionId}`}
+          className="row items-center gap-3 rounded-lg border bg-card p-2"
+        >
+          {replay.profile ? (
+            <ProfileAvatar {...replay.profile} />
+          ) : (
+            <ProfileAvatar />
+          )}
+          <div className="col min-w-0 flex-1">
+            <div className="truncate font-medium">
+              {replay.profile
+                ? getProfileName(replay.profile)
+                : replay.profileId}
+            </div>
+            {replay.stepAt > 0 && (
+              <div className="text-sm text-muted-foreground">
+                {showDropoffs ? 'Dropped off at step' : 'Reached step'} at{' '}
+                {formatDateTime(new Date(replay.stepAt))}
+              </div>
+            )}
+          </div>
+          <ProjectLink
+            preload={false}
+            href="/session-replays"
+            search={
+              {
+                session: replay.sessionId,
+                ...(replay.windowId ? { tab: replay.windowId } : {}),
+                ...(replay.stepAt > 0 ? { at: replay.stepAt } : {}),
+              } as any
+            }
+            className="row shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey || e.shiftKey) {
+                return;
+              }
+              popModal();
+            }}
+          >
+            <PlayIcon className="size-3.5" />
+            Watch
+          </ProjectLink>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -388,13 +531,21 @@ type ViewChartUsersProps =
       type: 'funnel';
       report: IChartInput;
       stepIndex: number;
+      view?: 'users' | 'replays';
+      // Values of the clicked breakdown row, in breakdown order.
+      breakdownValues?: string[];
     };
 
 // Main component that routes to the appropriate view
 export default function ViewChartUsers(props: ViewChartUsersProps) {
   if (props.type === 'funnel') {
     return (
-      <FunnelUsersView report={props.report} stepIndex={props.stepIndex} />
+      <FunnelUsersView
+        report={props.report}
+        stepIndex={props.stepIndex}
+        view={props.view}
+        breakdownValues={props.breakdownValues}
+      />
     );
   }
 

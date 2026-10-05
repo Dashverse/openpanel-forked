@@ -479,6 +479,9 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
   // Shared-link position: which tab, and the display time in seconds.
   const [linkedTab, setLinkedTab] = useQueryState('tab', parseAsString);
   const [linkedTime, setLinkedTime] = useQueryState('t', parseAsInteger);
+  // Absolute moment to open at (epoch ms) — e.g. a funnel step from the
+  // funnel "View replays" drill-down. Wins over `t` when both are set.
+  const [linkedAt, setLinkedAt] = useQueryState('at', parseAsInteger);
   const activeFilterCount =
     replayEventNames.length +
     replayEventFilters.length +
@@ -488,6 +491,7 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
   const selectSession = (id: string) => {
     void setLinkedTab(null);
     void setLinkedTime(null);
+    void setLinkedAt(null);
     void setSelectedSessionId(id);
   };
 
@@ -715,6 +719,7 @@ export function SessionReplaysView({ projectId }: { projectId: string }) {
               layout="studio"
               initialWindowId={linkedTab ?? undefined}
               initialTimeSec={linkedTime ?? undefined}
+              initialAtMs={linkedAt ?? undefined}
               header={
                 <ReplayHeader
                   session={selected}
