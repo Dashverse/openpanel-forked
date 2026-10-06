@@ -118,7 +118,7 @@ export function Chart({ data, absoluteData, absoluteUnit }: Props) {
 
   const CustomLegend = useCallback(() => {
     return (
-      <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs mt-4 -mb-2">
+      <div className="flex max-h-[2.75rem] flex-wrap justify-center gap-x-4 gap-y-1 overflow-y-auto text-xs mt-4 -mb-2">
         {series.map((serie) => (
           <div
             className="flex items-center gap-1"
