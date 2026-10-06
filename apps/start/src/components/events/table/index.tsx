@@ -290,7 +290,21 @@ export const EventsTable = ({ query, emptyRangeLabel }: Props) => {
       return LOADING_DATA;
     }
 
-    return query.data?.pages?.flatMap((p) => p.data) ?? [];
+    // The pagination cursor is inclusive (`created_at <= cursor`), so the
+    // boundary event is the last row of one page and the first row of the next.
+    // Dedupe by id so it doesn't render twice.
+    const flat = query.data?.pages?.flatMap((p) => p.data) ?? [];
+    const seen = new Set<string>();
+    return flat.filter((event) => {
+      if (!event.id) {
+        return true;
+      }
+      if (seen.has(event.id)) {
+        return false;
+      }
+      seen.add(event.id);
+      return true;
+    });
   }, [query.data, isLoading]);
 
   const { columnVisibility, setColumnVisibility, columnOrder, setColumnOrder } =

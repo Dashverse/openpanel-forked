@@ -107,61 +107,73 @@ export const eventRouter = createTRPCRouter({
         windowId: z.string().optional(),
       }),
     )
-    .query(async ({ input: { columnVisibility, mergeIdentity, take, ...input } }) => {
-      // Resolve the canonical + anonymous-alias id set once (cached). Passed as a
-      // literal `profile_id IN (...)` list — resolving inline as a subquery would
-      // re-scan the 36M-row profile_aliases table on every page/paginate.
-      const profileIds =
-        mergeIdentity && input.profileId
-          ? await getProfileIdClusterCached(input.projectId, input.profileId)
-          : undefined;
+    .query(
+      async ({
+        input: { columnVisibility, mergeIdentity, take, ...input },
+      }) => {
+        // Resolve the canonical + anonymous-alias id set once (cached). Passed as a
+        // literal `profile_id IN (...)` list — resolving inline as a subquery would
+        // re-scan the 36M-row profile_aliases table on every page/paginate.
+        const profileIds =
+          mergeIdentity && input.profileId
+            ? await getProfileIdClusterCached(input.projectId, input.profileId)
+            : undefined;
 
-      const items = await getEventList({
-        ...input,
-        profileIds,
-        take: take ?? 50,
-        cursor: input.cursor ? new Date(input.cursor) : undefined,
-        select: {
-          ...columnVisibility,
-          city: columnVisibility?.country ?? true,
-          path: columnVisibility?.name ?? true,
-          duration: columnVisibility?.name ?? true,
-          projectId: false,
-          revenue: true,
-        },
-      });
+        const effectiveTake = take ?? 50;
+        const items = await getEventList({
+          ...input,
+          profileIds,
+          take: effectiveTake,
+          cursor: input.cursor ? new Date(input.cursor) : undefined,
+          select: {
+            ...columnVisibility,
+            city: columnVisibility?.country ?? true,
+            path: columnVisibility?.name ?? true,
+            duration: columnVisibility?.name ?? true,
+            projectId: false,
+            revenue: true,
+          },
+        });
 
-      // Hacky join to get profile for entire session
-      // TODO: Replace this with a join on the session table
-      const map = new Map<string, IServiceProfile>(); // sessionId -> profileId
-      for (const item of items) {
-        if (item.sessionId && item.profile?.isExternal === true) {
-          map.set(item.sessionId, item.profile);
-        }
-      }
-
-      for (const item of items) {
-        const profile = map.get(item.sessionId);
-        if (profile && (item.profile?.isExternal === false || !item.profile)) {
-          item.profile = clone(profile);
-          if (item?.profile?.firstName) {
-            item.profile.firstName = `* ${item.profile.firstName}`;
+        // Hacky join to get profile for entire session
+        // TODO: Replace this with a join on the session table
+        const map = new Map<string, IServiceProfile>(); // sessionId -> profileId
+        for (const item of items) {
+          if (item.sessionId && item.profile?.isExternal === true) {
+            map.set(item.sessionId, item.profile);
           }
         }
-      }
 
-      const lastItem = items[items.length - 1];
+        for (const item of items) {
+          const profile = map.get(item.sessionId);
+          if (
+            profile &&
+            (item.profile?.isExternal === false || !item.profile)
+          ) {
+            item.profile = clone(profile);
+            if (item?.profile?.firstName) {
+              item.profile.firstName = `* ${item.profile.firstName}`;
+            }
+          }
+        }
 
-      return {
-        data: items,
-        meta: {
-          next:
-            items.length > 0 && lastItem
-              ? lastItem.createdAt.toISOString()
-              : null,
-        },
-      };
-    }),
+        const lastItem = items[items.length - 1];
+
+        return {
+          data: items,
+          meta: {
+            // Only advance the cursor while pages come back full. The cursor is
+            // inclusive (`created_at <= cursor`), so returning a non-null `next`
+            // on a short/final page would re-request the boundary (oldest) event
+            // forever — an endless infinite-scroll loop.
+            next:
+              items.length === effectiveTake && lastItem
+                ? lastItem.createdAt.toISOString()
+                : null,
+          },
+        };
+      },
+    ),
   conversionNames: protectedProcedure
     .input(z.object({ projectId: z.string() }))
     .query(async ({ input: { projectId } }) => {
@@ -237,8 +249,10 @@ export const eventRouter = createTRPCRouter({
       return {
         data: items,
         meta: {
+          // Stop once a page is short — the inclusive cursor would otherwise
+          // re-request the boundary event forever (infinite-scroll loop).
           next:
-            items.length > 0 && lastItem
+            items.length === 50 && lastItem
               ? lastItem.createdAt.toISOString()
               : null,
         },
