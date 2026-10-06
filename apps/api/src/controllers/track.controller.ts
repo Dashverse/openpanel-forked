@@ -309,7 +309,6 @@ async function handleTrackRequest(
         projectId,
         ip,
         ua,
-        overrideDeviceId,
       });
       break;
     }
@@ -403,13 +402,11 @@ async function handleReplay({
   projectId,
   ip,
   ua,
-  overrideDeviceId,
 }: {
   payload: ReplayPayload;
   projectId: string;
   ip: string | undefined;
   ua: string | undefined;
-  overrideDeviceId: string | undefined;
 }) {
   if (!isReplayEnabledForProject(projectId)) {
     return;
@@ -477,28 +474,27 @@ async function handleReplay({
   // chunk (>1MB after LZ4, usually a fat full snapshot) is dropped + counted,
   // not shipped. Not-yet-flagged projects stay on the legacy Redis buffer.
   if (shouldUseReplayKafka(projectId)) {
-    // Partition key = deviceId so a session's chunks stay ordered on one
-    // partition (session ⊂ device); mirrors the events device id. Falls back to
-    // session_id when no override / no IP+UA to derive from — still co-locates.
-    const deviceId =
-      overrideDeviceId ||
-      (ua && ip
-        ? generateDeviceId({
-            salt: (await getSalts()).current,
-            origin: projectId,
-            ip,
-            ua,
-          })
-        : sessionId);
+    // Partition key = sessionId so a session's chunks stay ordered on one
+    // partition. (deviceId would work too, but for replay it's always just the
+    // IP+UA hash — the payload carries no device override — and the read path
+    // re-sorts by (started_at, chunk_index) regardless, so sessionId is the
+    // simpler, better-distributed key and skips the getSalts()/hash work.)
     try {
-      const result = await produceReplayChunk(chunk, deviceId);
+      const result = await produceReplayChunk(chunk, sessionId);
       if (result === 'oversize') {
         replayKafkaDroppedTotal.inc({ reason: 'oversize' });
       } else {
         replayKafkaProducedTotal.inc();
       }
     } catch (err) {
-      replayKafkaDroppedTotal.inc({ reason: 'produce_failed' });
+      // Separate admission-cap backpressure (the SDK retries → not a confirmed
+      // drop) from a genuine produce failure, so dropped_total stays a
+      // trustworthy loss signal (there is no Redis fallback on this path).
+      const reason =
+        err instanceof Error && err.message.includes('backpressure')
+          ? 'backpressure'
+          : 'produce_failed';
+      replayKafkaDroppedTotal.inc({ reason });
       throw err; // surface to /track → SDK retry (no Redis fallback)
     }
     return;

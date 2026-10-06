@@ -79,7 +79,7 @@ export async function insertReplayChunks(rawLines: string[]): Promise<void> {
       format: 'JSONEachRow',
       clickhouse_settings: settings,
     });
-  const concurrency = Math.max(1, REPLAY_INSERT_CONCURRENCY);
+  const concurrency = REPLAY_INSERT_CONCURRENCY; // positiveIntEnv already guarantees >= 1
   if (concurrency <= 1 || groups.length === 1) {
     for (const g of groups) await runOne(g);
     return;

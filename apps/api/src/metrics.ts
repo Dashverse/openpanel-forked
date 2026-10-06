@@ -20,3 +20,6 @@ export const replayKafkaDroppedTotal = new client.Counter({
 // real drop (prom-client emits no series for a labelled counter until inc()).
 replayKafkaDroppedTotal.inc({ reason: 'oversize' }, 0);
 replayKafkaDroppedTotal.inc({ reason: 'produce_failed' }, 0);
+// `backpressure` = admission-cap rejection; the SDK retries, so it is NOT a
+// confirmed drop — kept separate from produce_failed so the loss signal is clean.
+replayKafkaDroppedTotal.inc({ reason: 'backpressure' }, 0);
