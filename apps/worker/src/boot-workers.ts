@@ -52,15 +52,11 @@ function getEnabledQueues(): QueueName[] {
     logger.info('No ENABLED_QUEUES specified, starting all queues', {
       totalEventShards: EVENTS_GROUP_QUEUES_SHARDS,
     });
-    return [
-      'events',
-      'sessions',
-      'cron',
-      'notification',
-      'misc',
-      'import',
-      'replay',
-    ];
+    // `replay` is deliberately NOT in the default set: it must be enabled
+    // explicitly (ENABLED_QUEUES=…,replay). Its start is fail-fast, so if it
+    // auto-started on a pod whose replay hub isn't provisioned it would
+    // crash-loop the whole pod, taking its other queues down with it.
+    return ['events', 'sessions', 'cron', 'notification', 'misc', 'import'];
   }
 
   const queues = enabledQueuesEnv

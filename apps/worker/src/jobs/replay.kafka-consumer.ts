@@ -32,15 +32,27 @@ export interface ReplayKafkaConsumerHandle {
 // rather than dropping replay — a redelivery at worst duplicates a chunk (Phase
 // 1 accepted), it never loses one.
 
-// Heartbeat cadence within a large batch so a slow CH insert can't blow the
-// 30s sessionTimeout. Replay batches are small in count (few, fat messages), so
-// heartbeating around the insert is enough; kept for symmetry with events.
 const POD = process.env.HOSTNAME || process.env.POD_NAME || 'unknown';
+
+// A fat-payload insert can outlast the 30s consumer sessionTimeout (the CH
+// client's own request timeout is 1h), which would get this member kicked and
+// the batch reprocessed on another pod. So while an insert is in flight we
+// heartbeat every HEARTBEAT_EVERY_MS, and abort the insert after INSERT_TIMEOUT_MS
+// (below sessionTimeout) — a timed-out insert takes the normal failure path.
+const HEARTBEAT_EVERY_MS = 3_000;
+const INSERT_TIMEOUT_MS = Number.parseInt(
+  process.env.REPLAY_KAFKA_INSERT_TIMEOUT_MS || '25000',
+  10,
+);
 
 export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHandle> {
   const consumer = createKafkaReplayConsumer();
   await consumer.connect();
-  await consumer.subscribe({ topic: KAFKA_REPLAY_TOPIC, fromBeginning: false });
+  // fromBeginning only applies when the group has no committed offset yet (first
+  // start); afterwards it resumes from the committed offset. On the dedicated,
+  // short-retention replay topic this makes rollout order-independent: chunks
+  // produced before the consumer first joins are still consumed, not skipped.
+  await consumer.subscribe({ topic: KAFKA_REPLAY_TOPIC, fromBeginning: true });
 
   // Partitions this pod currently owns, so a rebalance can clear stale lag
   // gauges for partitions that moved to another member (a left-behind lag
@@ -147,13 +159,24 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
         // real request in SigNoz) and stamp log_comment endpoint so the insert
         // is attributable in query_log.
         const parentCtx = contextFromTraceparent(firstTraceparent);
+        // Keep the group session alive while the insert runs, and bound the
+        // insert below sessionTimeout (see HEARTBEAT_EVERY_MS / INSERT_TIMEOUT_MS).
+        await heartbeat();
+        const keepAlive = setInterval(() => {
+          heartbeat().catch(() => {
+            // a failed heartbeat surfaces via the consumer's own events
+          });
+        }, HEARTBEAT_EVERY_MS);
         try {
           await context.with(parentCtx, () =>
             withQueryContext({ endpoint: 'worker.incomingReplay' }, () =>
               withSpan(
                 'worker.incomingReplay',
                 { attributes: { 'openpanel.replay_chunks': lines.length } },
-                () => insertReplayChunks(lines),
+                () =>
+                  insertReplayChunks(lines, {
+                    abortSignal: AbortSignal.timeout(INSERT_TIMEOUT_MS),
+                  }),
               ),
             ),
           );
@@ -169,7 +192,19 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
             partition: batch.partition,
             messages: batch.messages.length,
           });
+          // Nothing in this batch was resolved, so lag runs from its first
+          // offset. Setting it here keeps the gauge climbing during an outage
+          // instead of freezing at the last successful value.
+          replayKafkaConsumerLag.set(
+            { partition },
+            Math.max(
+              0,
+              Number(batch.highWatermark) - Number(batch.messages[0]!.offset),
+            ),
+          );
           return;
+        } finally {
+          clearInterval(keepAlive);
         }
       }
 
