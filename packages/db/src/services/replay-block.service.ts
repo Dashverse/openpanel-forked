@@ -45,6 +45,10 @@ export async function insertReplayBlocks(
     table: TABLE_NAMES.session_replay_blocks,
     values: rows,
     format: 'JSONEachRow',
+    // Same as the chunk inserts: one tiny ref insert per Kafka batch would make
+    // a part per batch, so let ClickHouse coalesce them (async_insert) — and wait
+    // for the write, because the consumer resolves Kafka offsets after this ack.
+    clickhouse_settings: { async_insert: 1, wait_for_async_insert: 1 },
   });
 }
 
