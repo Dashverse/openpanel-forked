@@ -22,6 +22,7 @@ import { Worker as GroupWorker } from 'groupmq';
 import { cronJob } from './jobs/cron';
 import { incomingEvent } from './jobs/events.incoming-event';
 import { startKafkaEventsConsumer } from './jobs/events.kafka-consumer';
+import { startKafkaReplayConsumer } from './jobs/replay.kafka-consumer';
 import { importJob } from './jobs/import';
 import { miscJob } from './jobs/misc';
 import { notificationJob } from './jobs/notification';
@@ -51,6 +52,10 @@ function getEnabledQueues(): QueueName[] {
     logger.info('No ENABLED_QUEUES specified, starting all queues', {
       totalEventShards: EVENTS_GROUP_QUEUES_SHARDS,
     });
+    // `replay` is deliberately NOT in the default set: it must be enabled
+    // explicitly (ENABLED_QUEUES=…,replay). Its start is fail-fast, so if it
+    // auto-started on a pod whose replay hub isn't provisioned it would
+    // crash-loop the whole pod, taking its other queues down with it.
     return ['events', 'sessions', 'cron', 'notification', 'misc', 'import'];
   }
 
@@ -237,6 +242,24 @@ export async function bootWorkers() {
       extraStops.push(() => handle.stop());
     } catch (err) {
       logger.error('Failed to start Kafka events consumer', { err });
+      throw err;
+    }
+  }
+
+  // Start the Kafka SESSION-REPLAY consumer. Separate topic/consumer-group from
+  // events; gated on the `replay` ENABLED_QUEUES token (so only the pod meant to
+  // drain replay runs it) plus isKafkaConfigured(). Inserts chunks straight into
+  // session_replay_chunks — no GroupMQ counterpart (replay always went through
+  // the Redis buffer, which stays for not-yet-flagged projects).
+  if (isKafkaConfigured() && enabledQueues.includes('replay')) {
+    // Fail-fast like the events consumer: if it can't start, abort boot so k8s
+    // restarts the pod rather than silently leaving replay chunks unconsumed.
+    try {
+      const handle = await startKafkaReplayConsumer();
+      logger.info('Started Kafka replay consumer');
+      extraStops.push(() => handle.stop());
+    } catch (err) {
+      logger.error('Failed to start Kafka replay consumer', { err });
       throw err;
     }
   }

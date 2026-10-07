@@ -43,16 +43,19 @@ const REPLAY_INSERT_CONCURRENCY = positiveIntEnv(
   5,
 );
 
-function replayClickhouseSettings(): ClickHouseSettings {
-  if (process.env.BUFFER_ASYNC_INSERTS) {
-    return {
-      async_insert: 1,
-      wait_for_async_insert: 0,
-      parallel_view_processing: 1,
-    };
-  }
-  return {};
-}
+// Replay inserts always use a server-side async insert that WAITS for the flush:
+// - async_insert=1: ClickHouse coalesces the many small per-batch inserts (the
+//   Kafka consumer inserts per fetch batch, often 1–3 fat chunks) into larger
+//   parts, instead of a tiny part per insert on this fat-row table.
+// - wait_for_async_insert=1: the insert is only acknowledged once the data is
+//   written. Both callers commit progress after the ack (the consumer resolves
+//   Kafka offsets, the Redis flush trims the list), so an early ack
+//   (wait_for_async_insert=0) could commit rows that are later lost.
+// Deliberately independent of BUFFER_ASYNC_INSERTS, which uses wait=0.
+const REPLAY_INSERT_SETTINGS: ClickHouseSettings = {
+  async_insert: 1,
+  wait_for_async_insert: 1,
+};
 
 /**
  * Insert already-serialized JSONEachRow replay-chunk lines into ClickHouse,
@@ -60,10 +63,15 @@ function replayClickhouseSettings(): ClickHouseSettings {
  * lifted to a free function so BOTH the Redis flush AND the Kafka replay
  * consumer produce byte-identical `session_replay_chunks` rows. Each line MUST
  * be `JSON.stringify(chunk)` of an `IClickhouseSessionReplayChunk`.
+ * `abortSignal` lets a caller bound the whole insert (the Kafka consumer keeps
+ * it under its group sessionTimeout).
  */
-export async function insertReplayChunks(rawLines: string[]): Promise<void> {
+export async function insertReplayChunks(
+  rawLines: string[],
+  opts: { abortSignal?: AbortSignal } = {},
+): Promise<void> {
   if (rawLines.length === 0) return;
-  const settings = replayClickhouseSettings();
+  const settings = REPLAY_INSERT_SETTINGS;
   const groups: string[][] = [];
   for (let i = 0; i < rawLines.length; i += REPLAY_INSERT_CHUNK_SIZE) {
     groups.push(rawLines.slice(i, i + REPLAY_INSERT_CHUNK_SIZE));
@@ -78,6 +86,7 @@ export async function insertReplayChunks(rawLines: string[]): Promise<void> {
       ),
       format: 'JSONEachRow',
       clickhouse_settings: settings,
+      abort_signal: opts.abortSignal,
     });
   const concurrency = REPLAY_INSERT_CONCURRENCY; // positiveIntEnv already guarantees >= 1
   if (concurrency <= 1 || groups.length === 1) {

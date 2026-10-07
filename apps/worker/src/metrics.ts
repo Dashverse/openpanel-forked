@@ -174,6 +174,34 @@ export const kafkaPartitionOwner = new client.Gauge({
 
 register.registerMetric(kafkaPartitionOwner);
 
+// ─── session-replay Kafka consumer (separate namespace from kafka_* events) ──
+// Replay chunks land on the dedicated `session-replay` topic and are inserted
+// straight into session_replay_chunks (no session read-modify-write, so no
+// per-key grouping or dedup — a batch is decompressed and bulk-inserted). These
+// mirror the events consumer's consumed/errors/lag, kept under replay_kafka_*
+// so a replay incident is never confused with the events pipeline.
+export const replayKafkaConsumedTotal = new client.Counter({
+  name: 'replay_kafka_consumed_total',
+  help: 'Session-replay chunks inserted into ClickHouse from the Kafka consumer',
+  labelNames: ['partition'],
+});
+
+export const replayKafkaConsumeErrorsTotal = new client.Counter({
+  name: 'replay_kafka_consume_errors_total',
+  help: 'Session-replay Kafka batches whose decompress/insert failed',
+  labelNames: ['partition'],
+});
+
+export const replayKafkaConsumerLag = new client.Gauge({
+  name: 'replay_kafka_consumer_lag',
+  help: 'Session-replay Kafka consumer lag (messages behind the partition high-watermark)',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(replayKafkaConsumedTotal);
+register.registerMetric(replayKafkaConsumeErrorsTotal);
+register.registerMetric(replayKafkaConsumerLag);
+
 queues.forEach((queue) => {
   register.registerMetric(
     new client.Gauge({
