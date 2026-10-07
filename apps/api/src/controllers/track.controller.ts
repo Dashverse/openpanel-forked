@@ -2,6 +2,10 @@ import fastJsonStableHash from 'fast-json-stable-hash';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
+import {
+  replayKafkaDroppedTotal,
+  replayKafkaProducedTotal,
+} from '@/metrics';
 import { HttpError } from '@/utils/errors';
 import { buildEventJobId } from '@/utils/event-job-id';
 import { generateId, slug } from '@openpanel/common';
@@ -20,7 +24,9 @@ import {
   getEventsGroupQueueShard,
   getQueueName,
   produceIncomingEvent,
+  produceReplayChunk,
   shouldUseKafka,
+  shouldUseReplayKafka,
 } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
 import { currentTraceparent, withQueryContext } from '@openpanel/telemetry';
@@ -449,7 +455,7 @@ async function handleReplay({
     });
   }
 
-  await replayBuffer.add({
+  const chunk = {
     project_id: projectId,
     session_id: sessionId,
     // Empty string for older SDKs — CH column defaults to '' so the raw
@@ -461,7 +467,40 @@ async function handleReplay({
     events_count: payload.events_count,
     is_full_snapshot: payload.is_full_snapshot,
     payload: payload.payload,
-  });
+  };
+
+  // Redis-free Kafka path, flag-gated per project (REPLAY_KAFKA_PROJECT_IDS).
+  // A produce failure throws → /track errors → the SDK retries; an oversize
+  // chunk (>1MB after LZ4, usually a fat full snapshot) is dropped + counted,
+  // not shipped. Not-yet-flagged projects stay on the legacy Redis buffer.
+  if (shouldUseReplayKafka(projectId)) {
+    // Partition key = sessionId so a session's chunks stay ordered on one
+    // partition. (deviceId would work too, but for replay it's always just the
+    // IP+UA hash — the payload carries no device override — and the read path
+    // re-sorts by (started_at, chunk_index) regardless, so sessionId is the
+    // simpler, better-distributed key and skips the getSalts()/hash work.)
+    try {
+      const result = await produceReplayChunk(chunk, sessionId);
+      if (result === 'oversize') {
+        replayKafkaDroppedTotal.inc({ reason: 'oversize' });
+      } else {
+        replayKafkaProducedTotal.inc();
+      }
+    } catch (err) {
+      // Separate admission-cap backpressure (the SDK retries → not a confirmed
+      // drop) from a genuine produce failure, so dropped_total stays a
+      // trustworthy loss signal (there is no Redis fallback on this path).
+      const reason =
+        err instanceof Error && err.message.includes('backpressure')
+          ? 'backpressure'
+          : 'produce_failed';
+      replayKafkaDroppedTotal.inc({ reason });
+      throw err; // surface to /track → SDK retry (no Redis fallback)
+    }
+    return;
+  }
+
+  await replayBuffer.add(chunk);
 }
 
 async function identify({

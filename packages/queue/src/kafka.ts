@@ -123,7 +123,7 @@ export const shouldUseKafka = (projectId: string): boolean => {
 };
 
 let kafka: Kafka | null = null;
-const getKafka = (): Kafka => {
+export const getKafka = (): Kafka => {
   if (!isKafkaConfigured()) {
     throw new Error(
       'KAFKA_BROKERS env var is not set; cannot create Kafka client',

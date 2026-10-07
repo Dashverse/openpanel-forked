@@ -14,7 +14,8 @@
     "@openpanel/telemetry": "workspace:*",
     "bullmq": "^5.63.0",
     "groupmq": "catalog:",
-    "kafkajs": "^2.2.4"
+    "kafkajs": "^2.2.4",
+    "lz4js": "^0.2.0"
   },
   "devDependencies": {
     "@openpanel/sdk": "workspace:*",
