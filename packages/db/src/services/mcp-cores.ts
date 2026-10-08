@@ -56,8 +56,13 @@ export async function getEventPropertiesCore(input: {
   limit?: number;
 }) {
   const limit = Math.min(Math.max(input.limit ?? 200, 1), 1000);
+  // count(), not uniqExact(property_value): each row is already one distinct
+  // (name, property_key, property_value), so count() is the distinct-value
+  // count (slightly high until background merges collapse duplicate parts) —
+  // and it's answerable from the proj_event_keys projection without reading
+  // the values at all.
   const res = await chMcp.query({
-    query: `SELECT property_key, uniqExact(property_value) AS distinct_values
+    query: `SELECT property_key, count() AS distinct_values
       FROM ${TABLE_NAMES.event_property_values_mv}
       WHERE project_id = ${esc(input.projectId)} AND name = ${esc(input.eventName)}
       GROUP BY property_key ORDER BY distinct_values DESC LIMIT ${limit}`,

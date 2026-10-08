@@ -297,11 +297,13 @@ export const chartRouter = createTRPCRouter({
         ),
       ];
 
+      // Keys only — no max(created_at). Selecting just (project_id, name,
+      // property_key) lets ClickHouse answer from the proj_event_keys
+      // aggregate projection (~1M rows) instead of scanning every stored value
+      // (~268M rows on dashreels, ~900ms). A last-seen tie-break isn't worth
+      // that: the list is re-sorted by length below anyway.
       const query = clix(ch)
-        .select<{ property_key: string; created_at: string }>([
-          'distinct property_key',
-          'max(created_at) as created_at',
-        ])
+        .select<{ property_key: string }>(['property_key'])
         .from(TABLE_NAMES.event_property_values_mv)
         .where('project_id', '=', projectId)
         .groupBy(['property_key'])
@@ -309,7 +311,7 @@ export const chartRouter = createTRPCRouter({
         // so projects with millions of unique property keys don't blow the
         // heap on this endpoint.
         .orderBy('length(property_key)', 'ASC')
-        .orderBy('created_at', 'DESC')
+        .orderBy('property_key', 'ASC')
         .limit(10_000);
 
       if (event && event !== '*') {
