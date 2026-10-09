@@ -580,7 +580,11 @@ function getPerUserChartSql({
     effectiveAggregation === 'distinct_count';
 
   // WHERE clause (event filters + project + name + date range)
-  const where = getEventFiltersWhereClause(event.filters ?? [], projectId);
+  const where = getEventFiltersWhereClause(
+    event.filters ?? [],
+    projectId,
+    event.filterOperator,
+  );
   where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   if (event.name !== '*') {
     where.eventName = `name = ${sqlstring.escape(event.name)}`;
@@ -597,6 +601,7 @@ function getPerUserChartSql({
             f.operator !== 'notInCohort',
         ),
         projectId,
+        event.filterOperator,
       ),
     );
     const firstTimeSubquery = buildFirstTimeSubquery({
@@ -874,7 +879,11 @@ export async function getChartSql({
   });
 
   // Common setup
-  sb.where = getEventFiltersWhereClause(event.filters, projectId);
+  sb.where = getEventFiltersWhereClause(
+    event.filters,
+    projectId,
+    event.filterOperator,
+  );
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   sb.select.label_0 =
     event.name !== '*'
@@ -923,6 +932,7 @@ export async function getChartSql({
             f.operator !== 'notInCohort',
         ),
         projectId,
+        event.filterOperator,
       ),
     );
     firstTimeSubquery = buildFirstTimeSubquery({
@@ -1420,8 +1430,10 @@ async function setupCustomEventCTE(
 }
 
 export function getEventFiltersWhereClause(
-  filters: IChartEventFilter[],
+  // `isGlobal` marks report/dashboard filters merged into an event's own list.
+  filters: (IChartEventFilter & { isGlobal?: boolean })[],
   projectId?: string,
+  filterOperator: 'and' | 'or' = 'and',
 ) {
   const where: Record<string, string> = {};
   filters.forEach((filter, index) => {
@@ -1820,6 +1832,25 @@ export function getEventFiltersWhereClause(
       }
     }
   });
+
+  // "Match any": OR the event's own property filters into one clause. Cohort
+  // filters (conversion also applies them via JOINs) and merged report/dashboard
+  // filters always stay required (ANDed).
+  if (filterOperator === 'or') {
+    const ids = Object.keys(where).filter((id) => {
+      const f = filters[Number(id.slice(1))];
+      return (
+        f &&
+        !f.isGlobal &&
+        f.operator !== 'inCohort' &&
+        f.operator !== 'notInCohort'
+      );
+    });
+    if (ids.length >= 2) {
+      where.f_or = `(${ids.map((id) => where[id]).join(' OR ')})`;
+      for (const id of ids) delete where[id];
+    }
+  }
 
   return where;
 }

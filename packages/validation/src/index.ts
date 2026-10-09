@@ -96,6 +96,13 @@ export const zChartEvent = z.object({
     .array(zChartEventFilter)
     .default([])
     .describe('Filters applied specifically to this event'),
+  filterOperator: z
+    .enum(['and', 'or'])
+    .default('and')
+    .optional()
+    .describe(
+      'How this event\'s property filters combine: "and" (match all, default) or "or" (match any). Cohort filters always apply.',
+    ),
 });
 
 export const zChartFormula = z.object({

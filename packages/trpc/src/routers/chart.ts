@@ -558,6 +558,8 @@ export const chartRouter = createTRPCRouter({
         range: zRange,
         firstEventFilters: z.array(zChartEventFilter).default([]),
         secondEventFilters: z.array(zChartEventFilter).default([]),
+        firstEventFilterOperator: z.enum(['and', 'or']).optional(),
+        secondEventFilterOperator: z.enum(['and', 'or']).optional(),
       }),
     )
     .query(async ({ input }) => {
@@ -574,6 +576,8 @@ export const chartRouter = createTRPCRouter({
         endDate: dates.endDate,
         firstEventFilters: input.firstEventFilters,
         secondEventFilters: input.secondEventFilters,
+        firstEventFilterOperator: input.firstEventFilterOperator,
+        secondEventFilterOperator: input.secondEventFilterOperator,
       });
 
       const cohortData = await chQuery<{
@@ -615,7 +619,11 @@ export const chartRouter = createTRPCRouter({
       const { sb, getSql } = createSqlBuilder();
 
       sb.select.profile_id = 'DISTINCT profile_id';
-      sb.where = getEventFiltersWhereClause(serie.filters);
+      sb.where = getEventFiltersWhereClause(
+        serie.filters,
+        undefined,
+        serie.filterOperator,
+      );
       sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
       sb.where.dateRange = `${clix.toStartOf('created_at', input.interval)} = ${clix.toDate(sqlstring.escape(formatClickhouseDate(dateObj)), input.interval)}`;
       if (serie.name !== '*') {

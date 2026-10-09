@@ -56,6 +56,7 @@ export function transformReportEventItem(
     type: 'event',
     segment: item.segment ?? 'event',
     filters: (item.filters ?? []).map(transformFilter),
+    filterOperator: item.filterOperator,
     id: item.id ?? alphabetIds[index]!,
     name: item.name || 'unknown_event',
     displayName: item.displayName,

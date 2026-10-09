@@ -47,7 +47,11 @@ export async function fetch(plan: Plan): Promise<ConcreteSeries[]> {
         id: event.id,
         name: event.name,
         segment: event.segment,
-        filters: [...event.filters, ...globalFilters],
+        filters: [
+          ...event.filters,
+          ...globalFilters.map((f) => ({ ...f, isGlobal: true })),
+        ],
+        filterOperator: event.filterOperator,
         displayName: event.displayName,
         property: event.property,
         perUser: event.perUser,

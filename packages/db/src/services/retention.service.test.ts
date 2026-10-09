@@ -93,6 +93,19 @@ describe('buildRetentionQuery', () => {
     expect(cohort).not.toContain('co-123');
   });
 
+  it('firstEventFilterOperator "or" ORs only the cohort event filters', () => {
+    const { sql } = buildRetentionQuery({
+      ...base,
+      firstEventFilters: [f('country', ['US']), f('os', ['iOS'])],
+      firstEventFilterOperator: 'or',
+      secondEventFilters: [f('country', ['US']), f('os', ['iOS'])],
+    });
+    const { cohort, lastEvent } = ctes(sql);
+    expect(cohort).toContain("AND ((country = 'US' OR os = 'iOS'))");
+    expect(lastEvent).toContain("AND (country = 'US')");
+    expect(lastEvent).toContain("AND (os = 'iOS')");
+  });
+
   it('criteria on_or_after => cumulative (>=), on => exact (=)', () => {
     expect(
       buildRetentionQuery({ ...base, criteria: 'on_or_after' }).sql,

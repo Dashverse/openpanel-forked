@@ -54,6 +54,7 @@ function firstTimeFilterConditions(
           f.operator !== 'notInCohort',
       ),
       projectId,
+      event.filterOperator,
     ),
   );
 }
@@ -158,7 +159,11 @@ export class ConversionService {
       const filterClauses =
         nonCohortFilters.length > 0
           ? Object.values(
-              getEventFiltersWhereClause(nonCohortFilters, projectId),
+              getEventFiltersWhereClause(
+                nonCohortFilters,
+                projectId,
+                event.filterOperator,
+              ),
             )
           : [];
       const filterWhere =
@@ -440,7 +445,9 @@ export class ConversionService {
     const collectFilterClauses = (event: IChartEvent): string[] => {
       const filters = event.filters ?? [];
       if (filters.length === 0) return [];
-      return Object.values(getEventFiltersWhereClause(filters, projectId));
+      return Object.values(
+        getEventFiltersWhereClause(filters, projectId, event.filterOperator),
+      );
     };
 
     const firstFilterClauses = collectFilterClauses(firstEvent);
@@ -668,7 +675,10 @@ export class ConversionService {
     // Merge global filters into each event's filters (same as fetch.ts does for regular charts)
     const events = onlyReportEvents(series).map((event) => ({
       ...event,
-      filters: [...(event.filters ?? []), ...globalFilters],
+      filters: [
+        ...(event.filters ?? []),
+        ...globalFilters.map((f) => ({ ...f, isGlobal: true })),
+      ],
     }));
 
     if (events.length < 2) {
