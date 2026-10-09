@@ -54,6 +54,7 @@ export async function normalize(
         property: event.property,
         perUser: event.perUser,
         firstTime: event.firstTime,
+        filterOperator: event.filterOperator,
       } as SeriesDefinition;
     },
   );
