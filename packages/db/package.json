@@ -18,6 +18,7 @@
     "with-env": "dotenv -e ../../.env -c --"
   },
   "dependencies": {
+    "@azure/storage-blob": "12.33.0",
     "@clickhouse/client": "^1.18.5",
     "@openpanel/common": "workspace:*",
     "@openpanel/constants": "workspace:*",

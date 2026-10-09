@@ -1,10 +1,10 @@
 import client from 'prom-client';
 
 import {
+  type FlushObservation,
   aliasBuffer,
   botBuffer,
   eventBuffer,
-  type FlushObservation,
   profileBuffer,
   replayBuffer,
   sessionBuffer,
@@ -201,6 +201,31 @@ export const replayKafkaConsumerLag = new client.Gauge({
 register.registerMetric(replayKafkaConsumedTotal);
 register.registerMetric(replayKafkaConsumeErrorsTotal);
 register.registerMetric(replayKafkaConsumerLag);
+
+// ─── blob-primary write path (Phase 2, REPLAY_BLOCKS_MODE=dual|only) ─────────
+// Blocks (one zstd block per session per batch) written to Azure Blob, their
+// compressed byte total, and write failures. Separate from replay_kafka_* so a
+// blob-write incident is distinct from the CH-insert path.
+export const replayBlocksWrittenTotal = new client.Counter({
+  name: 'replay_blocks_written_total',
+  help: 'Session-replay blocks appended to Azure Blob from the Kafka consumer',
+  labelNames: ['partition'],
+});
+
+export const replayBlocksBytesTotal = new client.Counter({
+  name: 'replay_blocks_bytes_total',
+  help: 'Compressed (zstd) bytes of session-replay blocks written to Azure Blob',
+});
+
+export const replayBlocksErrorsTotal = new client.Counter({
+  name: 'replay_blocks_errors_total',
+  help: 'Session-replay batches whose blob block write/ref insert failed',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(replayBlocksWrittenTotal);
+register.registerMetric(replayBlocksBytesTotal);
+register.registerMetric(replayBlocksErrorsTotal);
 
 queues.forEach((queue) => {
   register.registerMetric(
