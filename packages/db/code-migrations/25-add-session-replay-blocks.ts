@@ -21,7 +21,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { TABLE_NAMES } from '../src/clickhouse/client';
-import { createTable, runClickhouseMigrationCommands } from '../src/clickhouse/migration';
+import {
+  createTable,
+  runClickhouseMigrationCommands,
+} from '../src/clickhouse/migration';
 import { getIsCluster } from './helpers';
 
 export async function up() {

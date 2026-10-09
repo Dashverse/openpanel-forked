@@ -1,10 +1,10 @@
 import client from 'prom-client';
 
 import {
+  type FlushObservation,
   aliasBuffer,
   botBuffer,
   eventBuffer,
-  type FlushObservation,
   profileBuffer,
   replayBuffer,
   sessionBuffer,
