@@ -7,8 +7,8 @@ import {
  * Blob-primary replay: write path (Phase 2).
  *
  * `writeSessionReplayBlocks` takes the decompressed chunk lines of ONE Kafka
- * batch (with each line's Kafka offset), groups them by session, appends one
- * zstd block per session to that session's append blob, and records a reference
+ * batch (with each line's Kafka offset), groups them by (session, window),
+ * appends one zstd block per group to that session's append blob, and records a reference
  * row per block in `session_replay_blocks` — no payload in ClickHouse.
  *
  * block_index = the Kafka offset of the block's first chunk: monotonic per
@@ -125,7 +125,9 @@ export async function writeSessionReplayBlocks(
     } catch {
       continue; // malformed; CH path logs/counts it separately
     }
-    const key = `${chunk.project_id}:${chunk.session_id}`;
+    // One block per (project, session, window): a session_id is shared across
+    // tabs, and each block's ref records a single window_id.
+    const key = `${chunk.project_id}:${chunk.session_id}:${chunk.window_id ?? ''}`;
     let g = groups.get(key);
     if (!g) {
       g = {

@@ -60,10 +60,12 @@ const REPLAY_BLOCKS_MODE: ReplayBlocksMode = ((): ReplayBlocksMode => {
 })();
 // Overall bound on one batch's blob appends + ref insert. With the CH insert's
 // own INSERT_TIMEOUT_MS this keeps a batch well inside the rebalance timeout.
-const BLOCKS_TIMEOUT_MS = Number.parseInt(
-  process.env.REPLAY_BLOCKS_TIMEOUT_MS || '20000',
-  10,
-);
+// A non-positive/non-numeric value falls back to the default: NaN would make
+// AbortSignal.timeout throw on every batch (silently, inside the shadow catch).
+const BLOCKS_TIMEOUT_MS = (() => {
+  const n = Number.parseInt(process.env.REPLAY_BLOCKS_TIMEOUT_MS ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : 20_000;
+})();
 
 // Replay is MUCH simpler than the events consumer: a chunk is a self-contained
 // row — there is no session read-modify-write to serialize, so we don't group by

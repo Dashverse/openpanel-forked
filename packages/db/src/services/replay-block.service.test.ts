@@ -97,6 +97,28 @@ describe('writeSessionReplayBlocks', () => {
     expect(res.bytes).toBe(refA.size_bytes + refB.size_bytes);
   });
 
+  it('splits one session into one block per window (tab)', async () => {
+    const items = [
+      { line: chunk('A', 0, '2026-10-01 10:00:00.000'), offset: 5 },
+      {
+        line: chunk('A', 0, '2026-10-01 10:00:00.500', { window_id: 'tab-2' }),
+        offset: 6,
+      },
+      { line: chunk('A', 1, '2026-10-01 10:00:01.000'), offset: 7 },
+    ];
+    const res = await writeSessionReplayBlocks(items);
+    expect(res.blocks).toBe(2);
+    const byWindow = new Map(inserted.map((r) => [r.window_id, r]));
+    expect(byWindow.get('win-A').block_index).toBe(5);
+    expect(byWindow.get('win-A').chunk_hi).toBe(1);
+    expect(byWindow.get('tab-2').block_index).toBe(6);
+    expect(byWindow.get('tab-2').chunk_lo).toBe(0);
+    // both windows of the session append to the same session blob
+    expect(byWindow.get('win-A').blob_path).toBe(
+      byWindow.get('tab-2').blob_path,
+    );
+  });
+
   it('ties on started_at are broken by chunk_index', async () => {
     const t = '2026-10-01 10:00:00.000';
     const items = [
