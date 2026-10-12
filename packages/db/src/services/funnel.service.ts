@@ -16,6 +16,7 @@ import {
 import { clix } from '../clickhouse/query-builder';
 import { createSqlBuilder } from '../sql-builder';
 import {
+  assertFirstTimeMatchAnySupported,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
   fetchCohortsMetadata,
@@ -231,7 +232,11 @@ export class FunnelService {
   ): string[] {
     return events.map((event) => {
       const { sb, getWhere } = createSqlBuilder();
-      sb.where = getEventFiltersWhereClause(event.filters, projectId);
+      sb.where = getEventFiltersWhereClause(
+        event.filters,
+        projectId,
+        event.filterOperator,
+      );
       sb.where.name = `name = ${sqlstring.escape(event.name)}`;
       return getWhere().replace('WHERE ', '');
     });
@@ -465,7 +470,10 @@ export class FunnelService {
     // Merge global filters into each event's filters (same as fetch.ts does for regular charts)
     const eventSeries = onlyReportEvents(series).map((event) => ({
       ...event,
-      filters: [...(event.filters ?? []), ...globalFilters],
+      filters: [
+        ...(event.filters ?? []),
+        ...globalFilters.map((f) => ({ ...f, isGlobal: true })),
+      ],
     }));
 
     if (eventSeries.length === 0) {
@@ -582,9 +590,14 @@ export class FunnelService {
           ),
       ),
     );
-    const allFiltersIdentical = eventFilterSets.every(
-      (s) => s === eventFilterSets[0],
-    );
+    // Match all/any must also agree, or an OR step would prefilter an AND one.
+    const allFiltersIdentical =
+      eventFilterSets.every((s) => s === eventFilterSets[0]) &&
+      eventSeries.every(
+        (e) =>
+          (e.filterOperator ?? 'and') ===
+          (eventSeries[0]?.filterOperator ?? 'and'),
+      );
     const eventFiltersForPrefilter = (eventSeries[0]?.filters ?? []).filter(
       (f) =>
         !f.name.startsWith('profile.') &&
@@ -634,7 +647,11 @@ export class FunnelService {
       ? [
           ...new Set(
             Object.values(
-              getEventFiltersWhereClause(eventFiltersForPrefilter, projectId),
+              getEventFiltersWhereClause(
+                eventFiltersForPrefilter,
+                projectId,
+                eventSeries[0]?.filterOperator,
+              ),
             ),
           ),
         ]
@@ -659,6 +676,7 @@ export class FunnelService {
       ? funnelConditionsBase.map((cond, i) => {
           const ev = eventSeries[i];
           if (!ev?.firstTime || !cond) return cond;
+          assertFirstTimeMatchAnySupported(ev);
           const firstTimeFilterConditions = Object.values(
             getEventFiltersWhereClause(
               (ev.filters ?? []).filter(
@@ -668,6 +686,7 @@ export class FunnelService {
                   f.operator !== 'notInCohort',
               ),
               projectId,
+              ev.filterOperator,
             ),
           );
           const sub = buildFirstTimeSubquery({
@@ -1084,14 +1103,22 @@ export class FunnelService {
         firstEvent.filters && firstEvent.filters.length > 0
           ? '\n          WHERE ' +
             Object.values(
-              getEventFiltersWhereClause(firstEvent.filters, projectId),
+              getEventFiltersWhereClause(
+                firstEvent.filters,
+                projectId,
+                firstEvent.filterOperator,
+              ),
             ).join(' AND ')
           : '';
       const lastEventWhere =
         lastEventItem.filters && lastEventItem.filters.length > 0
           ? '\n          WHERE ' +
             Object.values(
-              getEventFiltersWhereClause(lastEventItem.filters, projectId),
+              getEventFiltersWhereClause(
+                lastEventItem.filters,
+                projectId,
+                lastEventItem.filterOperator,
+              ),
             ).join(' AND ')
           : '';
 

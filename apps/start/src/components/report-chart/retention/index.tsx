@@ -51,6 +51,8 @@ export function ReportRetentionChart() {
         interval,
         firstEventFilters,
         secondEventFilters,
+        firstEventFilterOperator: eventSeries[0]?.filterOperator,
+        secondEventFilterOperator: eventSeries[1]?.filterOperator,
       },
       {
         placeholderData: keepPreviousData,
