@@ -46,13 +46,11 @@ export function FiltersList({
             { value: 'and' as const, label: 'Match all filters' },
             { value: 'or' as const, label: 'Match any filter' },
           ]}
-          label="Cohort filters always apply."
         >
           <Button
             variant="ghost"
             size="sm"
             className="self-start text-muted-foreground"
-            title="Cohort filters always apply."
           >
             {event.filterOperator === 'or' ? 'Match any' : 'Match all'}
           </Button>
