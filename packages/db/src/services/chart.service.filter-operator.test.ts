@@ -1,6 +1,9 @@
 import type { IChartEventFilter } from '@openpanel/validation';
 import { describe, expect, it } from 'vitest';
-import { getEventFiltersWhereClause } from './chart.service';
+import {
+  assertFirstTimeMatchAnySupported,
+  getEventFiltersWhereClause,
+} from './chart.service';
 
 const f = (
   name: string,
@@ -52,5 +55,49 @@ describe('getEventFiltersWhereClause match all / match any', () => {
     expect(Object.values(where).sort()).toEqual(
       ["(country = 'US' OR os = 'iOS')", "device = 'mobile'"].sort(),
     );
+  });
+});
+
+describe('assertFirstTimeMatchAnySupported', () => {
+  const email = f('profile.email', ['@gmail'], 'contains');
+
+  it('refuses match any + a profile filter (first-time leg would undercount)', () => {
+    expect(() =>
+      assertFirstTimeMatchAnySupported({
+        name: 'signup',
+        filterOperator: 'or',
+        filters: [country, email],
+      }),
+    ).toThrow(/Match any/);
+  });
+
+  it('allows match all with a profile filter', () => {
+    expect(() =>
+      assertFirstTimeMatchAnySupported({
+        name: 'signup',
+        filterOperator: 'and',
+        filters: [country, email],
+      }),
+    ).not.toThrow();
+  });
+
+  it('allows match any with only event-property filters', () => {
+    expect(() =>
+      assertFirstTimeMatchAnySupported({
+        name: 'signup',
+        filterOperator: 'or',
+        filters: [country, os],
+      }),
+    ).not.toThrow();
+  });
+
+  it('ignores report/dashboard profile filters (always ANDed)', () => {
+    expect(() =>
+      assertFirstTimeMatchAnySupported({
+        name: 'signup',
+        filterOperator: 'or',
+        filters: [country, os, { ...email, isGlobal: true }],
+      }),
+    ).not.toThrow();
   });
 });

@@ -17,6 +17,7 @@ import {
 } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
 import {
+  assertFirstTimeMatchAnySupported,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
   fetchCohortsMetadata,
@@ -45,6 +46,7 @@ function firstTimeFilterConditions(
   event: IChartEvent,
   projectId: string,
 ): string[] {
+  assertFirstTimeMatchAnySupported(event);
   return Object.values(
     getEventFiltersWhereClause(
       (event.filters ?? []).filter(

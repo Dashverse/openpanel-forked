@@ -34,6 +34,13 @@ export function FiltersList({
   const propertyFilterCount = filters.filter(
     (f) => f.operator !== 'inCohort' && f.operator !== 'notInCohort',
   ).length;
+  // The server refuses "match any" + first-time + a profile.* filter (it would
+  // undercount), so only offer "match any" when it can run. Keep it listed if
+  // it's already selected so the user can switch back.
+  const matchAnyBlocked =
+    !!event.firstTime &&
+    event.filterOperator !== 'or' &&
+    filters.some((f) => f.name.startsWith('profile.'));
 
   return (
     <div className="flex flex-col gap-1">
@@ -44,8 +51,15 @@ export function FiltersList({
           }
           items={[
             { value: 'and' as const, label: 'Match all filters' },
-            { value: 'or' as const, label: 'Match any filter' },
+            ...(matchAnyBlocked
+              ? []
+              : [{ value: 'or' as const, label: 'Match any filter' }]),
           ]}
+          label={
+            matchAnyBlocked
+              ? '"Match any" is off with First time + a profile filter'
+              : undefined
+          }
         >
           <Button
             variant="ghost"

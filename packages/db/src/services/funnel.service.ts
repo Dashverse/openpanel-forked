@@ -16,6 +16,7 @@ import {
 import { clix } from '../clickhouse/query-builder';
 import { createSqlBuilder } from '../sql-builder';
 import {
+  assertFirstTimeMatchAnySupported,
   getEventFiltersWhereClause,
   getSelectPropertyKey,
   fetchCohortsMetadata,
@@ -675,6 +676,7 @@ export class FunnelService {
       ? funnelConditionsBase.map((cond, i) => {
           const ev = eventSeries[i];
           if (!ev?.firstTime || !cond) return cond;
+          assertFirstTimeMatchAnySupported(ev);
           const firstTimeFilterConditions = Object.values(
             getEventFiltersWhereClause(
               (ev.filters ?? []).filter(

@@ -592,6 +592,7 @@ function getPerUserChartSql({
   // First-time-for-user: restrict the per-user CTE (which scans the events table
   // aliased `e`) to each canonical person's global-first matching occurrence.
   if (isFirstTime(event) && event.name !== '*') {
+    assertFirstTimeMatchAnySupported(event);
     const firstTimeFilterConditions = Object.values(
       getEventFiltersWhereClause(
         (event.filters ?? []).filter(
@@ -923,6 +924,7 @@ export async function getChartSql({
     event.segment !== 'one_event_per_user';
   let firstTimeSubquery = '';
   if (firstTimeActive) {
+    assertFirstTimeMatchAnySupported(event);
     const firstTimeFilterConditions = Object.values(
       getEventFiltersWhereClause(
         (event.filters ?? []).filter(
@@ -1427,6 +1429,30 @@ async function setupCustomEventCTE(
   // the alias, a custom-event chart WITH a cohort breakdown fails with
   // "Unknown expression identifier `e.profile_id`".
   sb.from = 'custom_event_data e';
+}
+
+/**
+ * The first-time subquery only sees event-property filters (profile.* filters
+ * reference a join it doesn't have). Under "match any", a row can qualify
+ * through a profile.* filter alone, and the first-time leg would silently drop
+ * it — an undercount. Refuse that combination instead of returning a wrong
+ * number. Call from inside each first-time branch.
+ */
+export function assertFirstTimeMatchAnySupported(event: {
+  name: string;
+  filterOperator?: 'and' | 'or';
+  filters?: (IChartEventFilter & { isGlobal?: boolean })[];
+}) {
+  if (
+    event.filterOperator === 'or' &&
+    (event.filters ?? []).some(
+      (f) => !f.isGlobal && f.name.startsWith('profile.'),
+    )
+  ) {
+    throw new Error(
+      `"Match any" can't be combined with "First time" when "${event.name}" has a profile filter. Switch to "Match all" or remove the profile filter.`,
+    );
+  }
 }
 
 export function getEventFiltersWhereClause(
