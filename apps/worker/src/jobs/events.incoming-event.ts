@@ -170,6 +170,23 @@ async function handleIncomingEvent(
 
   // if timestamp is from the past we dont want to create a new session
   if (uaInfo.isServer || isTimestampFromThePast) {
+    if (!uaInfo.isServer) {
+      const deviceSession = currentDeviceId
+        ? await sessionBuffer.getExistingSession({
+            profileId: currentDeviceId,
+            projectId,
+          })
+        : null;
+
+      const payload = {
+        ...baseEvent,
+        deviceId: currentDeviceId,
+        sessionId: deviceSession?.id ?? '',
+      };
+
+      return createEventAndNotify(payload as IServiceEvent, logger);
+    }
+
     const session = profileId
       ? await sessionBuffer.getExistingSession({
           profileId,
