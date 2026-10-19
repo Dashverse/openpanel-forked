@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // We mock ONLY the Kafka client (no broker in unit tests). getKafka().producer()
@@ -58,12 +59,22 @@ const rrwebPayload = (targetBytes: number): string => {
   return `[${events.join(',')}]`;
 };
 
+// Incompressible payload (random base64), so the LZ4 value is about as big as
+// the input and a small REPLAY_KAFKA_MAX_BYTES forces a split.
+const randomPayload = (bytes: number): string =>
+  randomBytes(Math.ceil((bytes * 3) / 4)).toString('base64');
+
 beforeEach(() => {
+  vi.unstubAllEnvs();
+  // splitting is opt-in (REPLAY_KAFKA_SPLIT_ENABLED); most tests cover it on
+  vi.stubEnv('REPLAY_KAFKA_SPLIT_ENABLED', '1');
   sent.length = 0;
-  sendMock.mockClear();
+  sendMock.mockReset();
+  sendMock.mockImplementation(async (payload: any) => {
+    sent.push(payload);
+  });
   connectMock.mockClear();
   vi.resetModules();
-  vi.unstubAllEnvs();
 });
 
 afterEach(() => {
@@ -102,26 +113,150 @@ describe('produceReplayChunk', () => {
     const chunk = makeChunk(rrwebPayload(50_000));
     const result = await produceReplayChunk(chunk as any, 'device_xyz');
 
-    expect(result).toBe('produced');
+    expect(result.status).toBe('produced');
+    expect(result.parts).toBe(1);
     expect(sendMock).toHaveBeenCalledTimes(1);
     const call = sent[0];
     expect(call.topic).toBe(KAFKA_REPLAY_TOPIC);
     const msg = call.messages[0];
     expect(msg.key).toBe('device_xyz');
     expect(msg.headers['content-encoding']).toBe('lz4');
+    // under the limit: exactly the legacy wire format, no part headers
+    expect(msg.headers['x-replay-chunk-id']).toBeUndefined();
+    expect(msg.headers['x-replay-part']).toBeUndefined();
     // the consumer will do exactly this — it must reconstruct JSON.stringify(chunk)
     expect(decompressReplayLine(msg.value)).toBe(JSON.stringify(chunk));
   });
 
-  it('returns "oversize" and does NOT send when the compressed value exceeds the cap', async () => {
+  it('returns "oversize" and does NOT send when the compressed value exceeds the total cap', async () => {
     vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '256');
+    vi.stubEnv('REPLAY_KAFKA_MAX_TOTAL_BYTES', '2000');
     const { produceReplayChunk } = await import('./replay-kafka');
     const result = await produceReplayChunk(
-      makeChunk(rrwebPayload(200_000)) as any,
+      makeChunk(randomPayload(20_000)) as any,
       'device_xyz',
     );
-    expect(result).toBe('oversize');
+    expect(result.status).toBe('oversize');
+    expect(result.compressedBytes).toBeGreaterThan(2000);
     expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it('returns "oversize" for an over-limit chunk when splitting is disabled (the default)', async () => {
+    vi.stubEnv('REPLAY_KAFKA_SPLIT_ENABLED', '');
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '4000');
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const result = await produceReplayChunk(
+      makeChunk(randomPayload(15_000)) as any,
+      'sess_abc',
+    );
+    expect(result.status).toBe('oversize');
+    expect(sendMock).not.toHaveBeenCalled();
+    // under the limit it still produces normally
+    const small = await produceReplayChunk(
+      makeChunk(rrwebPayload(1_000)) as any,
+      'sess_abc',
+    );
+    expect(small.status).toBe('produced');
+  });
+
+  it('returns "oversize" when the split would need more parts than REPLAY_KAFKA_MAX_PARTS', async () => {
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '1000');
+    vi.stubEnv('REPLAY_KAFKA_MAX_PARTS', '4');
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const result = await produceReplayChunk(
+      makeChunk(randomPayload(20_000)) as any,
+      'device_xyz',
+    );
+    expect(result.status).toBe('oversize');
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  it('splits a value over the per-message limit into ordered parts, one send each, same key', async () => {
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '4000');
+    const { produceReplayChunk, decompressReplayLine } = await import(
+      './replay-kafka'
+    );
+    const { joinReplayParts } = await import('./replay-parts');
+    const chunk = makeChunk(randomPayload(15_000));
+    const result = await produceReplayChunk(chunk as any, 'sess_abc');
+
+    expect(result.status).toBe('produced');
+    const n = Math.ceil(result.compressedBytes / 4000);
+    expect(n).toBeGreaterThan(1);
+    expect(result.parts).toBe(n);
+    // one Produce request per part (Event Hubs' 1 MB cap is per request too)
+    expect(sendMock).toHaveBeenCalledTimes(n);
+    const msgs = sent.map((call) => {
+      expect(call.messages).toHaveLength(1);
+      return call.messages[0];
+    });
+    const chunkId = msgs[0].headers['x-replay-chunk-id'];
+    expect(chunkId).toMatch(/^[0-9a-f-]{36}$/);
+    msgs.forEach((m: any, i: number) => {
+      expect(m.key).toBe('sess_abc');
+      expect(m.value.length).toBeLessThanOrEqual(4000);
+      expect(m.headers['content-encoding']).toBe('lz4');
+      expect(m.headers['x-replay-chunk-id']).toBe(chunkId);
+      expect(m.headers['x-replay-part']).toBe(String(i));
+      expect(m.headers['x-replay-parts']).toBe(String(n));
+    });
+    const joined = joinReplayParts(msgs.map((m: any) => m.value));
+    expect(joined.length).toBe(result.compressedBytes);
+    expect(decompressReplayLine(joined)).toBe(JSON.stringify(chunk));
+  });
+
+  it('awaits each part before sending the next, and a failed part throws with no further parts', async () => {
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '4000');
+    let active = 0;
+    let maxActive = 0;
+    sendMock.mockImplementation(async (payload: any) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 1));
+      active--;
+      sent.push(payload);
+      if (sent.length === 2) throw new Error('broker down');
+    });
+    const { produceReplayChunk } = await import('./replay-kafka');
+    await expect(
+      produceReplayChunk(makeChunk(randomPayload(15_000)) as any, 'sess_abc'),
+    ).rejects.toThrow('broker down');
+    expect(maxActive).toBe(1);
+    expect(sendMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives each produce attempt of a split chunk a new chunk id', async () => {
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '4000');
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const chunk = makeChunk(randomPayload(15_000)) as any;
+    await produceReplayChunk(chunk, 'sess_abc');
+    const first = sent[0].messages[0].headers['x-replay-chunk-id'];
+    sent.length = 0;
+    await produceReplayChunk(chunk, 'sess_abc');
+    expect(sent[0].messages[0].headers['x-replay-chunk-id']).not.toBe(first);
+  });
+
+  it('rejects a split chunk with backpressure when in-flight part bytes would exceed the cap', async () => {
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '4000');
+    vi.stubEnv('REPLAY_KAFKA_MAX_INFLIGHT_PART_BYTES', '25000');
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    sendMock.mockImplementation(async () => {
+      await held;
+    });
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const p1 = produceReplayChunk(
+      makeChunk(randomPayload(15_000)) as any,
+      'sess_a',
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(
+      produceReplayChunk(makeChunk(randomPayload(15_000)) as any, 'sess_b'),
+    ).rejects.toThrow(/backpressure/);
+    release();
+    await p1;
   });
 
   it('throws when the producer send fails (so /track errors → SDK retry)', async () => {
@@ -159,6 +294,141 @@ describe('produceReplayChunk', () => {
     // Release and let the two in-flight ones finish so nothing dangles.
     release();
     await Promise.all([p1, p2]);
+  });
+});
+
+describe('split cap derived from the consumer fetch size', () => {
+  it('defaults to the 5 MiB fetch minus two max-size messages', async () => {
+    const q = await import('./replay-kafka');
+    expect(q.REPLAY_KAFKA_MAX_BYTES_PER_PARTITION).toBe(5 * 1024 * 1024);
+    expect(q.REPLAY_KAFKA_MAX_TOTAL_BYTES).toBe(5 * 1024 * 1024 - 2 * 950_000);
+  });
+
+  it('follows KAFKA_REPLAY_MAX_BYTES_PER_PARTITION', async () => {
+    vi.stubEnv('KAFKA_REPLAY_MAX_BYTES_PER_PARTITION', '100000');
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '10000');
+    const q = await import('./replay-kafka');
+    expect(q.REPLAY_KAFKA_MAX_TOTAL_BYTES).toBe(80_000);
+  });
+
+  it('clamps a REPLAY_KAFKA_MAX_TOTAL_BYTES above the fetch size, with a warning', async () => {
+    vi.stubEnv('KAFKA_REPLAY_MAX_BYTES_PER_PARTITION', '100000');
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '10000');
+    vi.stubEnv('REPLAY_KAFKA_MAX_TOTAL_BYTES', '10000000');
+    const { kafkaLogger } = await import('./kafka');
+    const q = await import('./replay-kafka');
+    expect(q.REPLAY_KAFKA_MAX_TOTAL_BYTES).toBe(80_000);
+    expect(kafkaLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('clamped'),
+      expect.objectContaining({ requested: 10_000_000, clampedTo: 80_000 }),
+    );
+  });
+
+  it('keeps a REPLAY_KAFKA_MAX_TOTAL_BYTES below the fetch size as is', async () => {
+    vi.stubEnv('REPLAY_KAFKA_MAX_TOTAL_BYTES', '2000000');
+    const q = await import('./replay-kafka');
+    expect(q.REPLAY_KAFKA_MAX_TOTAL_BYTES).toBe(2_000_000);
+  });
+
+  it('a chunk over the derived cap is oversize', async () => {
+    vi.stubEnv('KAFKA_REPLAY_MAX_BYTES_PER_PARTITION', '30000');
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '4000');
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const ok = await produceReplayChunk(
+      makeChunk(randomPayload(15_000)) as any,
+      'sess_abc',
+    );
+    expect(ok.status).toBe('produced');
+    const big = await produceReplayChunk(
+      makeChunk(randomPayload(30_000)) as any,
+      'sess_abc',
+    );
+    expect(big.status).toBe('oversize');
+  });
+});
+
+describe('codec (REPLAY_KAFKA_CODEC)', () => {
+  const ZSTD_MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
+  const LZ4_MAGIC = [0x04, 0x22, 0x4d, 0x18];
+
+  it('defaults to lz4 with content-encoding lz4', async () => {
+    const { produceReplayChunk } = await import('./replay-kafka');
+    await produceReplayChunk(makeChunk(rrwebPayload(5_000)) as any, 'k');
+    const msg = sent[0].messages[0];
+    expect(msg.headers['content-encoding']).toBe('lz4');
+    expect([...msg.value.subarray(0, 4)]).toEqual(LZ4_MAGIC);
+  });
+
+  it('zstd: produces a zstd frame with content-encoding zstd that round-trips', async () => {
+    vi.stubEnv('REPLAY_KAFKA_CODEC', 'zstd');
+    const { produceReplayChunk, decodeReplayValue } = await import(
+      './replay-kafka'
+    );
+    const chunk = makeChunk(`${rrwebPayload(50_000)}···né😀`);
+    const r = await produceReplayChunk(chunk as any, 'k');
+    const msg = sent[0].messages[0];
+    expect(r.status).toBe('produced');
+    expect(msg.headers['content-encoding']).toBe('zstd');
+    expect([...msg.value.subarray(0, 4)]).toEqual(ZSTD_MAGIC);
+    expect(decodeReplayValue(msg.value, 'zstd')).toBe(JSON.stringify(chunk));
+  });
+
+  it('zstd: size checks and splitting apply to the zstd bytes', async () => {
+    vi.stubEnv('REPLAY_KAFKA_CODEC', 'zstd');
+    vi.stubEnv('REPLAY_KAFKA_MAX_BYTES', '4000');
+    const { produceReplayChunk, decodeReplayValue, encodeReplayLine } =
+      await import('./replay-kafka');
+    const { joinReplayParts } = await import('./replay-parts');
+    const chunk = makeChunk(randomPayload(15_000));
+    const r = await produceReplayChunk(chunk as any, 'sess_abc');
+    expect(r.compressedBytes).toBe(
+      encodeReplayLine(JSON.stringify(chunk), 'zstd').length,
+    );
+    expect(r.parts).toBe(Math.ceil(r.compressedBytes / 4000));
+    const msgs = sent.map((c) => c.messages[0]);
+    for (const m of msgs) {
+      expect(m.headers['content-encoding']).toBe('zstd');
+    }
+    const joined = joinReplayParts(msgs.map((m: any) => m.value));
+    expect(decodeReplayValue(joined, 'zstd')).toBe(JSON.stringify(chunk));
+  });
+
+  it('falls back to lz4 (with a warning) for an unknown codec', async () => {
+    vi.stubEnv('REPLAY_KAFKA_CODEC', 'brotli');
+    const { kafkaLogger } = await import('./kafka');
+    const { produceReplayChunk } = await import('./replay-kafka');
+    await produceReplayChunk(makeChunk(rrwebPayload(1_000)) as any, 'k');
+    expect(sent[0].messages[0].headers['content-encoding']).toBe('lz4');
+    expect(kafkaLogger.warn).toHaveBeenCalledWith(
+      'Unsupported REPLAY_KAFKA_CODEC; using lz4',
+      { value: 'brotli' },
+    );
+  });
+
+  it('decodeReplayValue: by header, by magic when the header is missing, both codecs', async () => {
+    const { decodeReplayValue, encodeReplayLine } = await import(
+      './replay-kafka'
+    );
+    const line = JSON.stringify(makeChunk(rrwebPayload(20_000)));
+    const lz = encodeReplayLine(line, 'lz4');
+    const zs = encodeReplayLine(line, 'zstd');
+    expect(decodeReplayValue(lz, 'lz4')).toBe(line);
+    expect(decodeReplayValue(zs, 'zstd')).toBe(line);
+    expect(decodeReplayValue(lz)).toBe(line);
+    expect(decodeReplayValue(zs)).toBe(line);
+    expect(decodeReplayValue(zs, ' ZSTD ')).toBe(line);
+    // unknown header value: magic decides
+    expect(decodeReplayValue(zs, 'x-unknown')).toBe(line);
+    expect(() => decodeReplayValue(Buffer.from('not compressed'))).toThrow(
+      /unknown replay content-encoding/,
+    );
+  });
+
+  it('detectReplayCodec reads the frame magic', async () => {
+    const { detectReplayCodec } = await import('./replay-kafka');
+    expect(detectReplayCodec(Buffer.from(ZSTD_MAGIC))).toBe('zstd');
+    expect(detectReplayCodec(Buffer.from(LZ4_MAGIC))).toBe('lz4');
+    expect(detectReplayCodec(Buffer.from([1, 2]))).toBeNull();
   });
 });
 

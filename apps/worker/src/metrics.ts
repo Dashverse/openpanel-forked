@@ -267,6 +267,32 @@ register.registerMetric(replayBlocksShadowSkippedTotal);
 register.registerMetric(replayBlocksSkippedChunksTotal);
 register.registerMetric(replayKafkaBatchRetriesTotal);
 
+// Split chunks (transport parts): sets joined back into one chunk, sets
+// dropped because they can never complete (reason = invalid | abandoned |
+// unfetchable, see jobs/replay-parts.ts), and how often a partition waited for
+// the rest of a set at the head of its batch.
+export const replayKafkaChunksReassembledTotal = new client.Counter({
+  name: 'replay_kafka_chunks_reassembled_total',
+  help: 'Split session-replay chunks whose transport parts were joined back into one chunk',
+  labelNames: ['partition'],
+});
+
+export const replayKafkaPartSetsDroppedTotal = new client.Counter({
+  name: 'replay_kafka_part_sets_dropped_total',
+  help: 'Split session-replay chunks dropped because their part set can never complete, by reason',
+  labelNames: ['partition', 'reason'],
+});
+
+export const replayKafkaPartsWaitsTotal = new client.Counter({
+  name: 'replay_kafka_parts_waits_total',
+  help: 'Times a replay partition paused because the part set at the head of its batch was still incomplete',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(replayKafkaChunksReassembledTotal);
+register.registerMetric(replayKafkaPartSetsDroppedTotal);
+register.registerMetric(replayKafkaPartsWaitsTotal);
+
 queues.forEach((queue) => {
   register.registerMetric(
     new client.Gauge({

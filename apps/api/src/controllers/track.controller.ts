@@ -3,7 +3,10 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
 import {
+  replayKafkaChunksSplitTotal,
   replayKafkaDroppedTotal,
+  replayKafkaOversizeBytes,
+  replayKafkaPartsProducedTotal,
   replayKafkaProducedTotal,
 } from '@/metrics';
 import { HttpError } from '@/utils/errors';
@@ -476,9 +479,10 @@ async function handleReplay({
   };
 
   // Redis-free Kafka path, flag-gated per project (REPLAY_KAFKA_PROJECT_IDS).
-  // A produce failure throws → /track errors → the SDK retries; an oversize
-  // chunk (>1MB after LZ4, usually a fat full snapshot) is dropped + counted,
-  // not shipped. Not-yet-flagged projects stay on the legacy Redis buffer.
+  // A produce failure throws → /track errors → the SDK retries; a chunk over
+  // 1MB compressed (usually a fat full snapshot) is sent as transport parts,
+  // and only one over REPLAY_KAFKA_MAX_TOTAL_BYTES is dropped + counted, not
+  // shipped. Not-yet-flagged projects stay on the legacy Redis buffer.
   if (shouldUseReplayKafka(projectId)) {
     // Partition key = sessionId so a session's chunks stay ordered on one
     // partition. (deviceId would work too, but for replay it's always just the
@@ -487,10 +491,18 @@ async function handleReplay({
     // simpler, better-distributed key and skips the getSalts()/hash work.)
     try {
       const result = await produceReplayChunk(chunk, sessionId);
-      if (result === 'oversize') {
+      if (result.status === 'oversize') {
         replayKafkaDroppedTotal.inc({ reason: 'oversize' });
+        replayKafkaOversizeBytes.observe(
+          { is_full_snapshot: chunk.is_full_snapshot ? 'true' : 'false' },
+          result.compressedBytes,
+        );
       } else {
         replayKafkaProducedTotal.inc();
+        if (result.parts > 1) {
+          replayKafkaChunksSplitTotal.inc();
+          replayKafkaPartsProducedTotal.inc(result.parts);
+        }
       }
     } catch (err) {
       // Separate admission-cap backpressure (the SDK retries → not a confirmed
