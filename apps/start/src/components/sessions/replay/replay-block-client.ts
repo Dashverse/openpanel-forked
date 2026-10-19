@@ -40,6 +40,11 @@ export function createReplayBlockFetcher(opts: {
   source: string;
 }): ReplayBlockFetcher {
   let worker: Worker | null = null;
+  // Set once the worker has failed (script blocked by CSP / a proxy, load or
+  // evaluation error). Those surface as an async 'error' event, not a throw
+  // from new Worker(), so without this every retry would build a new worker
+  // that fails the same way. Later decodes run on the main thread instead.
+  let workerFailed = false;
   let disposed = false;
   let nextId = 1;
   const pending = new Map<
@@ -51,7 +56,8 @@ export function createReplayBlockFetcher(opts: {
   >();
 
   const getWorker = (): Worker | null => {
-    if (worker || disposed || typeof Worker === 'undefined') return worker;
+    if (worker || disposed || workerFailed || typeof Worker === 'undefined')
+      return worker;
     try {
       worker = new Worker(
         new URL('./replay-decode.worker.ts', import.meta.url),
@@ -76,6 +82,7 @@ export function createReplayBlockFetcher(opts: {
       pending.clear();
       worker?.terminate();
       worker = null;
+      workerFailed = true;
     };
     return worker;
   };

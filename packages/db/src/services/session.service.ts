@@ -1239,7 +1239,66 @@ async function legacyHasOlderReplay(
 }
 
 /**
- * Are this session's refs a complete copy (rules (a) + (b) above)? A guard
+ * Completeness guard (c): while ClickHouse still holds this session, does any
+ * tab have more events in CH (each chunk counted once) than in the blocks?
+ * That catches what (b) cannot: chunks missing AFTER the blocks' first chunk
+ * (a failed dual-write shadow append mid-session) and a tab that exists only
+ * in CH. A tab whose refs all carry `chunk_keys` compares DISTINCT chunks, so
+ * a duplicated block (redelivered batch) can't mask a missing chunk; refs from
+ * before migration 26 fall back to summed events_count, where a duplicate can.
+ * Reads key columns + events_count only, on the (project_id, session_id)
+ * sort-key prefix. Sessions CH has already dropped are not checked here (the
+ * archive index has no counts).
+ */
+async function chHasMoreEventsThanBlocks(
+  sessionId: string,
+  projectId: string,
+  refs: ReplayBlockRef[],
+): Promise<boolean> {
+  const rows = await chQuery<{
+    window_id: string;
+    chunks: string;
+    events: string;
+  }>(
+    `SELECT window_id, toString(count()) AS chunks, toString(sum(ev)) AS events
+     FROM (
+       SELECT window_id, chunk_index, started_at, any(events_count) AS ev
+       FROM ${TABLE_NAMES.session_replay_chunks}
+       WHERE project_id = ${sqlstring.escape(projectId)}
+         AND session_id = ${sqlstring.escape(sessionId)}
+       GROUP BY window_id, chunk_index, started_at
+     )
+     GROUP BY window_id`,
+  );
+  if (rows.length === 0) return false;
+  const byWindow = new Map<
+    string,
+    { keys: Set<string>; allKeyed: boolean; events: number }
+  >();
+  for (const r of refs) {
+    const w = byWindow.get(r.windowId) ?? {
+      keys: new Set<string>(),
+      allKeyed: true,
+      events: 0,
+    };
+    w.events += r.eventsCount;
+    if (r.chunkKeys.length === 0) w.allKeyed = false;
+    for (const [chunkIndex, startedMs] of r.chunkKeys) {
+      w.keys.add(`${chunkIndex}:${startedMs}`);
+    }
+    byWindow.set(r.windowId, w);
+  }
+  return rows.some((row) => {
+    const w = byWindow.get(row.window_id);
+    if (!w) return true; // tab only in CH
+    return w.allKeyed
+      ? Number(row.chunks) > w.keys.size
+      : Number(row.events) > w.events;
+  });
+}
+
+/**
+ * Are this session's refs a complete copy (rules (a) + (b) + (c))? A guard
  * query failure is fail safe (false, not cached, so the next read retries);
  * a cancellation is rethrown.
  */
@@ -1266,9 +1325,13 @@ async function blocksAreComplete(
 
   // (b) legacy holds chunks older than the blocks: the blocks are only the
   // tail of a resumed session, legacy.
+  // (c) CH holds more events for some tab than the blocks do: a gap inside
+  // the session (failed shadow write) or a CH-only tab, legacy.
   let older: boolean;
   try {
-    older = await legacyHasOlderReplay(sessionId, projectId, blocksFirstMs);
+    older =
+      (await legacyHasOlderReplay(sessionId, projectId, blocksFirstMs)) ||
+      (await chHasMoreEventsThanBlocks(sessionId, projectId, refs));
   } catch (error) {
     if (isReplayAbortError(error, signal)) throw error;
     replayLogger.error(

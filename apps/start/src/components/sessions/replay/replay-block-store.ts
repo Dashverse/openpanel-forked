@@ -201,6 +201,28 @@ export class ReplayBlockStore {
     return true;
   }
 
+  /**
+   * Current position of a block key. Positions are reassigned whenever the
+   * list is re-set (a live recording re-lists every few seconds, and a late
+   * block can sort before earlier ones), so an in-flight request must resolve
+   * its keys to positions on completion, never reuse the positions it
+   * captured when it started.
+   */
+  posOfKey(key: string): number | undefined {
+    const e = this.entries.find((x) => x.meta.key === key);
+    return e?.pos;
+  }
+
+  /** A failed / cancelled request, by key: its blocks can be requested again. */
+  markUnloadedKeys(keys: string[]): void {
+    const positions: number[] = [];
+    for (const k of keys) {
+      const p = this.posOfKey(k);
+      if (p !== undefined) positions.push(p);
+    }
+    this.markUnloaded(positions);
+  }
+
   markLoading(positions: number[]): void {
     for (const p of positions) {
       const e = this.entries[p];

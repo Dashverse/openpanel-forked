@@ -94,6 +94,21 @@ const chQuery = vi.fn(async (sql: string) => {
       );
     return chOlder || archOlder ? [{ older: 1 }] : [];
   }
+  if (sql.includes('any(events_count) AS ev')) {
+    // completeness guard (c): per-window events, each chunk counted once
+    if (failGuard) throw new Error('guard down');
+    const perWindow = new Map<string, Map<string, number>>();
+    for (const c of scopeOf(sql)) {
+      const w = perWindow.get(c.window_id) ?? new Map<string, number>();
+      w.set(`${c.chunk_index}:${c.started_at}`, c.events_count);
+      perWindow.set(c.window_id, w);
+    }
+    return [...perWindow].map(([window_id, chunks]) => ({
+      window_id,
+      chunks: String(chunks.size),
+      events: String([...chunks.values()].reduce((a, b) => a + b, 0)),
+    }));
+  }
   if (sql.includes('SELECT 1 AS one FROM session_replay_chunks')) {
     return scopeOf(sql).length ? [{ one: 1 }] : [];
   }
@@ -241,6 +256,8 @@ function addBlock(chunks: Chunk[], blockIndex: number, createdIso: string) {
     byte_end: String(start + buf.length),
     created_ms: String(Date.parse(createdIso)),
     first_ms: String(Math.min(...chunks.map((c) => ms(c.started_at)))),
+    // As the writer does: a block's events_count is its chunks' sum.
+    events_count: String(chunks.reduce((n, c) => n + c.events_count, 0)),
     chunk_keys: chunks.map((c) => replayChunkKeyOf(JSON.parse(toLine(c)))),
   });
 }
@@ -306,12 +323,14 @@ describe('replay source resolution', () => {
     expect(meta.totalChunkCount).toBe(chMeta.totalChunkCount);
     expect(meta.startedAtMs).toBe(chMeta.startedAtMs);
     expect(meta.endedAtMs).toBe(chMeta.endedAtMs);
-    // blocks-only: the legacy store is touched only by the completeness guard
+    // blocks-only: the legacy store is touched only by the completeness
+    // guards (b: older chunk, c: per-window event totals), never for data
     expect(
       sqlLog.filter(
         (s) =>
           s.includes('session_replay_chunks') &&
-          !s.includes('SELECT 1 AS older'),
+          !s.includes('SELECT 1 AS older') &&
+          !s.includes('any(events_count) AS ev'),
       ),
     ).toEqual([]);
     expect(sqlLog.filter((s) => s.includes('SELECT 1 AS older'))).toHaveLength(
@@ -457,6 +476,51 @@ describe('replay source resolution', () => {
     });
     addBlock(cs, 1, '2026-10-11T08:00:02Z');
     expect((await svc.getSessionReplayMeta('k', 'p1')).source).toBe('blocks');
+  });
+
+  it('mid-session chunk missing from blocks (shadow write failed) → legacy', async () => {
+    const cs = [
+      mkChunk('p1', 'gap', 'w', 0, '2026-10-11T08:00:00.000Z', true),
+      mkChunk('p1', 'gap', 'w', 1, '2026-10-11T08:00:01.000Z'),
+      mkChunk('p1', 'gap', 'w', 2, '2026-10-11T08:00:02.000Z'),
+    ];
+    chChunks.push(...cs);
+    // Same start as CH, so guards (a)+(b) pass; chunk 1's block never landed.
+    addBlock([cs[0]!], 1, '2026-10-11T08:00:01Z');
+    addBlock([cs[2]!], 2, '2026-10-11T08:00:03Z');
+    expect((await svc.getSessionReplayMeta('gap', 'p1')).source).toBe('ch');
+  });
+
+  it('tab only in CH (its blocks never written) → legacy', async () => {
+    const a = mkChunk('p1', 'tab', 'wa', 0, '2026-10-11T08:00:00.000Z', true);
+    const b = mkChunk('p1', 'tab', 'wb', 0, '2026-10-11T08:00:05.000Z', true);
+    chChunks.push(a, b);
+    addBlock([a], 1, '2026-10-11T08:00:01Z');
+    expect((await svc.getSessionReplayMeta('tab', 'p1')).source).toBe('ch');
+  });
+
+  it('duplicate blocks (redelivery) do not trip the guard → blocks', async () => {
+    const cs = [
+      mkChunk('p1', 'dup', 'w', 0, '2026-10-11T08:00:00.000Z', true),
+      mkChunk('p1', 'dup', 'w', 1, '2026-10-11T08:00:01.000Z'),
+    ];
+    chChunks.push(...cs, cs[1]!); // CH also holds a redelivered duplicate
+    addBlock(cs, 1, '2026-10-11T08:00:02Z');
+    addBlock([cs[1]!], 2, '2026-10-11T08:00:03Z');
+    expect((await svc.getSessionReplayMeta('dup', 'p1')).source).toBe('blocks');
+  });
+
+  it('a duplicated block cannot mask a missing chunk (distinct chunk count) → legacy', async () => {
+    const cs = [
+      mkChunk('p1', 'mask', 'w', 0, '2026-10-11T08:00:00.000Z', true),
+      mkChunk('p1', 'mask', 'w', 1, '2026-10-11T08:00:01.000Z'),
+      mkChunk('p1', 'mask', 'w', 2, '2026-10-11T08:00:02.000Z'),
+    ];
+    chChunks.push(...cs);
+    // chunk 1 landed twice, chunk 2 never: summed events would match CH (3).
+    addBlock([cs[0]!, cs[1]!], 1, '2026-10-11T08:00:02Z');
+    addBlock([cs[1]!], 2, '2026-10-11T08:00:03Z');
+    expect((await svc.getSessionReplayMeta('mask', 'p1')).source).toBe('ch');
   });
 
   it('guard query error → legacy (fail safe), not cached', async () => {

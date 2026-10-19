@@ -112,13 +112,11 @@ export async function writeReplayBatch(
     }
   }
 
-  // 1. CH chunks (dual projects) - source of truth for them; throws.
-  if (dualItems.length > 0) {
-    await deps.insertChunks(dualItems.map((i) => i.line));
-    result.chChunks = dualItems.length;
-  }
-
-  // 2. Blob-only projects - the only copy; fail closed.
+  // 1. Blob-only projects - the only copy; fail closed. Runs FIRST: if Azure
+  // is down the batch fails before any CH insert, so the redeliveries during
+  // an outage don't re-insert the dual projects' chunks into CH every retry.
+  // (A CH failure after this point only duplicates blocks, which every block
+  // reader already de-duplicates.)
   if (blobOnlyItems.length > 0) {
     try {
       const { blocks, bytes } = await deps.writeBlocks(blobOnlyItems);
@@ -129,6 +127,12 @@ export async function writeReplayBatch(
       deps.onFailClosed?.(err);
       throw err;
     }
+  }
+
+  // 2. CH chunks (dual projects) - source of truth for them; throws.
+  if (dualItems.length > 0) {
+    await deps.insertChunks(dualItems.map((i) => i.line));
+    result.chChunks = dualItems.length;
   }
 
   // 3. Dual projects - shadow write; never blocks the batch.

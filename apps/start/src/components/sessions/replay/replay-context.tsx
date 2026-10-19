@@ -254,7 +254,7 @@ export function ReplayProvider({
   const storeRef = useRef(new ReplayBlockStore());
   const seenChunksRef = useRef(new Set<string>());
   // Chunk ids + positions of the initial events (survive a player re-create).
-  const initialRef = useRef<{ positions: number[]; seen: Set<string> } | null>(
+  const initialRef = useRef<{ keys: string[]; seen: Set<string> } | null>(
     null,
   );
   const loopRef = useRef({
@@ -569,7 +569,10 @@ export function ReplayProvider({
     const chunks = prefix.positions.flatMap((p) => store.takeChunks(p));
     const events = mergeChunkEvents(chunks, seenChunksRef.current);
     initialRef.current = {
-      positions: prefix.positions,
+      // By key: positions shift when the list is re-set (live re-list).
+      keys: prefix.positions
+        .map((p) => store.entry(p)?.meta.key)
+        .filter((k): k is string => k !== undefined),
       seen: new Set(seenChunksRef.current),
     };
     setInitialEvents(events);
@@ -621,19 +624,25 @@ export function ReplayProvider({
       const controller = new AbortController();
       const inFlight: InFlight = { controller, positions, seek };
       loop.inFlight = inFlight;
+      // Completion works by KEY: the list can be re-set while this request is
+      // in flight (live re-list every 10 s, a late block sorting earlier), which
+      // reassigns positions. Using the positions captured above would mark the
+      // wrong entries loaded (with empty data) and leave the fetched ones
+      // stuck in 'loading', stalling playback at them.
       fetchFn(keys, controller.signal)
         .then((byKey) => {
           if (!loop.alive || controller.signal.aborted) {
-            store.markUnloaded(positions);
+            store.markUnloadedKeys(keys);
             return;
           }
           // A block the server returned nothing for still counts as loaded
           // (empty): re-requesting it forever would stall the loader.
-          for (const p of positions) {
-            const key = store.entry(p)?.meta.key;
+          for (const key of keys) {
+            const p = store.posOfKey(key);
+            if (p === undefined) continue; // dropped from the list meanwhile
             store.markLoaded(
               p,
-              (key && byKey.get(key)) || {
+              byKey.get(key) ?? {
                 chunks: [],
                 fullSnapshots: [],
                 minTs: null,
@@ -645,7 +654,7 @@ export function ReplayProvider({
           setLoadError(null);
         })
         .catch((error) => {
-          store.markUnloaded(positions);
+          store.markUnloadedKeys(keys);
           // Only an abort WE triggered (unmount, tab switch, seek preempting
           // buffer-ahead) is silent. Any other abort, e.g. a disposed fetcher,
           // is a failure with backoff: returning here without retryAt made
@@ -825,11 +834,11 @@ export function ReplayProvider({
     loop.inFlight = null;
     const store = storeRef.current;
     const initial = initialRef.current;
-    const keep = new Set(initial?.positions ?? []);
+    const keep = new Set(initial?.keys ?? []);
     const reset: number[] = [];
     for (let i = 0; i < store.count; i++) {
-      const e = store.entry(i)!;
-      if (!keep.has(i) && e.state === 'applied') reset.push(i);
+      const e = store.entry(i);
+      if (e && !keep.has(e.meta.key) && e.state === 'applied') reset.push(i);
     }
     for (const p of reset) {
       const e = store.entry(p)!;

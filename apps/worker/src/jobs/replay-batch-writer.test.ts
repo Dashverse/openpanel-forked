@@ -129,7 +129,7 @@ describe('writeReplayBatch', () => {
     expect(res.blobOnlyChunks).toBe(2);
   });
 
-  it('CH insert failure throws before any block write', async () => {
+  it('Blob-only blocks are written before the CH insert; a CH failure then throws', async () => {
     const { d } = deps();
     d.insertChunks.mockRejectedValueOnce(new Error('ch down'));
     await expect(
@@ -139,7 +139,22 @@ describe('writeReplayBatch', () => {
         d,
       ),
     ).rejects.toThrow('ch down');
-    expect(d.writeBlocks).not.toHaveBeenCalled();
+    // Only the Blob-only write ran (redelivery just duplicates blocks); the
+    // dual shadow write after the CH insert did not.
+    expect(d.writeBlocks).toHaveBeenCalledTimes(1);
+  });
+
+  it('Blob outage fails the batch before any CH insert (no CH duplicates on retry)', async () => {
+    const { d } = deps();
+    d.writeBlocks.mockRejectedValueOnce(new Error('azure down'));
+    await expect(
+      writeReplayBatch(
+        batch,
+        { mode: 'dual', blobOnlyProjectIds: new Set(['frameo']) },
+        d,
+      ),
+    ).rejects.toThrow('azure down');
+    expect(d.insertChunks).not.toHaveBeenCalled();
   });
 
   it('batch of only Blob-only projects makes no CH insert', async () => {
