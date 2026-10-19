@@ -8,10 +8,11 @@ import {
   useRef,
   useState,
 } from 'react';
-import {
-  type ChunkData,
-  ReplayChunkBuffer,
-} from './replay-chunk-buffer';
+import { ReplayStaleListError } from './replay-block-client';
+import type { FetchReplayBlocks } from './replay-block-client';
+import { type ReplayEvent, mergeChunkEvents } from './replay-block-decode';
+import { planNextBatch, playbackStatus } from './replay-block-planner';
+import { type ReplayBlockMeta, ReplayBlockStore } from './replay-block-store';
 
 export interface ReplayPlayerInstance {
   play: () => void;
@@ -22,87 +23,73 @@ export interface ReplayPlayerInstance {
   getMetaData: () => { startTime: number; endTime: number; totalTime: number };
   getReplayer: () => { getCurrentTime: () => number };
   addEvent: (event: { type: number; data: unknown; timestamp: number }) => void;
-  addEventListener: (event: string, handler: (e: { payload: unknown }) => void) => void;
+  addEventListener: (
+    event: string,
+    handler: (e: { payload: unknown }) => void,
+  ) => void;
   $set?: (props: Record<string, unknown>) => void;
   $destroy?: () => void;
 }
 
 type CurrentTimeListener = (t: number) => void;
 
-export type PrefetchChunksFn = (
-  fromIndex: number,
-  toIndex: number,
-) => Promise<ChunkData[]>;
-
-/**
- * Smart-seek fetcher: given a target wall-clock ms, returns the slice of
- * chunks starting from the latest full snapshot at-or-before the target
- * through target + lookahead. Replaces the sequential walk when seeking far
- * into long sessions.
- */
-export type SeekFetchFn = (targetMs: number) => Promise<ChunkData[]>;
-
 interface ReplayContextValue {
-  // High-frequency value — read via ref, not state. Use subscribeToCurrentTime
+  // High-frequency value: read via ref, not state. Use subscribeToCurrentTime
   // or useCurrentTime() to get updates without causing 60fps re-renders.
   currentTimeRef: React.MutableRefObject<number>;
   subscribeToCurrentTime: (fn: CurrentTimeListener) => () => void;
-  // Low-frequency state (safe to consume directly)
+  // Low-frequency state (safe to consume directly). True while playing AND
+  // while playback is only waiting on data (stalled / seek-then-play), so the
+  // play/pause control doesn't flip to "Play" during "Buffering...".
   isPlaying: boolean;
   // Raw wall-clock duration (rrweb coordinate). seek()/currentTime are in this
   // space. The scrubber/readout use the *display* space below instead.
   duration: number;
   startTime: number | null;
   isReady: boolean;
-  // ── Display (gap-collapsed) time space ──────────────────────────────────
-  // A window_id is reused across reloads, so its wall-clock span is mostly idle
-  // air. The player stays wall-clock; these collapse the idle gaps for the
-  // scrubber + time readout only (PostHog-style), so what the user sees is real
-  // recorded time. Identity fallback (== wall-clock) when no segments are set.
+  // Display (gap-collapsed) time space: a window_id is reused across reloads,
+  // so its wall-clock span is mostly idle air. The player stays wall-clock;
+  // these collapse the idle gaps for the scrubber + time readout only
+  // (PostHog-style). Identity fallback (== wall-clock) when no segments are set.
   displayDuration: number;
-  // wall-clock offset (ms from startTime) → gap-collapsed display ms
+  // wall-clock offset (ms from startTime) -> gap-collapsed display ms
   toDisplayMs: (wallOffsetMs: number) => number;
-  // gap-collapsed display ms → wall-clock offset (ms from startTime), for seek
+  // gap-collapsed display ms -> wall-clock offset (ms from startTime), for seek
   fromDisplayMs: (displayMs: number) => number;
   // Display-space positions of collapsed idle gaps (for scrubber markers).
   segmentBoundariesMs: number[];
   // Register the active recording segments (absolute wall ms) for the playing
-  // window. Null/empty ⇒ identity mapping (legacy single-recording sessions).
+  // window. Null/empty -> identity mapping.
   setSegments: (segments: { startMs: number; endMs: number }[] | null) => void;
-  // Buffered-region tracking — for the YouTube-style buffered progress bar
-  // and the buffer-aware seek path.
+  // Buffered regions (wall-clock offsets from startTime) for the buffered bar.
+  // Loading is progressive, so there can be holes (after a far seek).
   loadedUpToMs: number;
+  loadedRanges: { startMs: number; endMs: number }[];
+  // True while a seek is loading or playback is stalled waiting for data.
   isBuffering: boolean;
+  // Events the rrweb player is constructed with (the loaded prefix of the
+  // recording up to its first FullSnapshot), null until they are loaded.
+  initialEvents: ReplayEvent[] | null;
+  // Set when the recording could not be loaded at all.
+  loadError: string | null;
+  // Blocks of this window and how many are in the player (diagnostics).
+  blockProgress: { total: number; applied: number };
   // Playback controls
   play: () => void;
   pause: () => void;
   toggle: () => void;
   seek: (timeMs: number) => void;
-  // Current playback speed — canonical source of truth so any control stays in
-  // sync (rather than tracking a parallel local copy).
   speed: number;
   setSpeed: (speed: number) => void;
-  // Lazy chunk loading
-  addEvent: (event: { type: number; data: unknown; timestamp: number }) => void;
   refreshDuration: () => void;
-  /**
-   * Called by chunk loaders for each chunk. `addToPlayer: false` is used for
-   * the FIRST batch, whose events were already passed to the rrweb player at
-   * construction time — we only need to register the range / chunkIndex so the
-   * buffer reflects reality. Defaults to true for sequential + prefetch loads.
-   */
-  markChunkLoaded: (chunk: ChunkData, opts?: { addToPlayer?: boolean }) => void;
-  /**
-   * Registered by the consumer (ReplayContent) once it has a tRPC client +
-   * sessionId. Allows seek() to prefetch chunks on demand.
-   */
-  setPrefetchChunks: (fn: PrefetchChunksFn | null) => void;
-  /** Registers the smart-seek fetcher (anchored at nearest full snapshot). */
-  setSeekFetch: (fn: SeekFetchFn | null) => void;
   // Called by ReplayPlayer to register/unregister the rrweb instance
-  onPlayerReady: (player: ReplayPlayerInstance, playerStartTime: number) => void;
+  onPlayerReady: (
+    player: ReplayPlayerInstance,
+    playerStartTime: number,
+  ) => void;
   onPlayerDestroy: () => void;
-  // State setters exposed so ReplayPlayer can wire rrweb event listeners
+  /** rrweb's 'finish': the playhead ran past the last event IN THE PLAYER. */
+  onPlayerFinish: () => void;
   setCurrentTime: (t: number) => void;
   setIsPlaying: (p: boolean) => void;
   setDuration: (d: number) => void;
@@ -112,12 +99,51 @@ const ReplayContext = createContext<ReplayContextValue | null>(null);
 
 const SPEED_OPTIONS = [0.5, 1, 2, 4, 8] as const;
 
-/** Chunks fetched per round trip during seek-targeted prefetch.
- * Larger = fewer network round trips for seeking far into long sessions. */
-const PREFETCH_BATCH_SIZE = 250;
-/** Bound the prefetch loop so a bug can't infinitely fetch.
- * 250 * 200 = 50,000 chunks — covers any realistic session. */
-const MAX_PREFETCH_BATCHES = 200;
+/** How often (real time) the loader re-plans while the playhead moves. */
+const TICK_INTERVAL_MS = 250;
+/** Failed block requests retry with exponential backoff, capped. */
+const RETRY_BASE_MS = 1_000;
+const RETRY_MAX_MS = 15_000;
+/** Initial load failures before the player shows an error. */
+const INITIAL_FAILURES_BEFORE_ERROR = 3;
+/** Resuming from a stall with skip-inactivity on jumps idle air longer than
+ * this (rrweb's own inactivity threshold) instead of waiting through it: the
+ * fast-forward rrweb would have done can't trigger across a load boundary. */
+const STALL_SKIP_GAP_MS = 10_000;
+
+/**
+ * Insert sorted events into the rrweb replayer's own event list WITHOUT
+ * casting them (its addEvent() casts anything older than the baseline onto
+ * the current DOM). A following goto() recomputes every event's delay and
+ * rebuilds from the nearest FullSnapshot. Returns false if the internal list
+ * isn't reachable, so callers can fall back to addEvent().
+ */
+function insertEventsWithoutCasting(
+  player: ReplayPlayerInstance,
+  events: ReplayEvent[],
+): boolean {
+  const replayer = player.getReplayer() as unknown as {
+    service?: { state?: { context?: { events?: { timestamp: number }[] } } };
+  };
+  const list = replayer?.service?.state?.context?.events;
+  if (!Array.isArray(list)) return false;
+  for (const ev of events) {
+    // Binary search: insert after any event with the same timestamp.
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((list[mid]?.timestamp ?? 0) <= ev.timestamp) lo = mid + 1;
+      else hi = mid;
+    }
+    list.splice(lo, 0, ev);
+  }
+  return true;
+}
+
+/** Let rrweb ingest queued addEvent()s (it applies them on a microtask). */
+const nextMacrotask = () =>
+  new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 export function useReplayContext() {
   const ctx = useContext(ReplayContext);
@@ -154,42 +180,114 @@ export function useCurrentTime(intervalMs = 0): number {
   return time;
 }
 
+type PendingSeek = {
+  gen: number;
+  targetWallMs: number;
+  offsetMs: number;
+  wantsPlay: boolean;
+};
+
+type InFlight = {
+  controller: AbortController;
+  positions: number[];
+  seek: boolean;
+};
+
+/**
+ * Player state + the PostHog-style block loader for ONE window (tab).
+ *
+ * Loading: the window's blocks (from session.replayBlocks) live in a
+ * ReplayBlockStore; a single loop (tick) asks the planner for the next batch
+ * (initial / buffer ahead / seek), fetches it (one request in flight, the
+ * decode happens in a Web Worker), and hands new events to rrweb without ever
+ * letting it cast an event onto the wrong DOM. Exactly one loader per window:
+ * the store only requests 'unloaded' blocks, and the provider is keyed per
+ * window, so a remount or a window switch aborts the in-flight request.
+ */
 export function ReplayProvider({
   children,
   totalDurationMs,
+  blocks,
+  fetchBlocks,
+  onStale,
+  skipInactive = true,
 }: {
   children: ReactNode;
   /**
-   * Definitive replay duration from `session.replayMeta`. When provided, this
-   * overrides rrweb's progressive `getMetaData().totalTime` so the timeline
-   * shows the final number from the start instead of growing as chunks load.
+   * Definitive replay duration (from the block list). When provided, it owns
+   * the duration so the timeline doesn't grow as blocks load.
    */
   totalDurationMs?: number;
+  /** This window's blocks (sorted by start). Undefined = nothing to load yet. */
+  blocks?: ReplayBlockMeta[];
+  fetchBlocks?: FetchReplayBlocks;
+  /** The server refused a request as stale (409): refetch the block list. */
+  onStale?: () => void;
+  /** Used when resuming from a stall (jump idle air across a load boundary). */
+  skipInactive?: boolean;
 }) {
   const playerRef = useRef<ReplayPlayerInstance | null>(null);
   const isPlayingRef = useRef(false);
   const currentTimeRef = useRef(0);
   const listenersRef = useRef<Set<CurrentTimeListener>>(new Set());
-
-  // Buffer state — ref (mutated by markChunkLoaded + drained ranges) feeds
-  // the React state mirrors below so subscribers re-render at the right times.
-  const bufferRef = useRef(new ReplayChunkBuffer());
   const startTimeRef = useRef<number | null>(null);
-  const prefetchRef = useRef<PrefetchChunksFn | null>(null);
-  const seekFetchRef = useRef<SeekFetchFn | null>(null);
-  // Mirror totalDurationMs in a ref so callbacks (passed to the player's
-  // useEffect deps) don't get a new identity when it changes — preventing the
-  // player from being destroyed + recreated every time the prop lands.
+  // rrweb casts an added event SYNCHRONOUSLY (onto whatever DOM is showing)
+  // when its timestamp is before the replayer's baseline: the time of the
+  // last play()/goto(). Track it (absolute wall ms) so new events never land
+  // that way. -Infinity until the first play/goto (rrweb starts at 0).
+  const baselineWallRef = useRef(Number.NEGATIVE_INFINITY);
+  // Bumped by every seek (and on teardown): lets async work detect that the
+  // playhead moved under it.
+  const seekGenRef = useRef(0);
+  const pendingSeekRef = useRef<PendingSeek | null>(null);
+  // Playback paused because the playhead reached a block not in the player
+  // yet ("Buffering..."); the loader resumes it.
+  const stalledRef = useRef(false);
+  // rrweb finished at the true end of the recording: next play restarts.
+  const finishedRef = useRef(false);
   const totalDurationMsRef = useRef<number | undefined>(totalDurationMs);
+  const speedRef = useRef(1);
+  const skipInactiveRef = useRef(skipInactive);
+  skipInactiveRef.current = skipInactive;
+
+  // --- block loading state ---
+  const storeRef = useRef(new ReplayBlockStore());
+  const seenChunksRef = useRef(new Set<string>());
+  // Chunk ids + positions of the initial events (survive a player re-create).
+  const initialRef = useRef<{ positions: number[]; seen: Set<string> } | null>(
+    null,
+  );
+  const loopRef = useRef({
+    alive: true,
+    inFlight: null as InFlight | null,
+    failures: 0,
+    retryAt: 0,
+    retryTimer: null as ReturnType<typeof setTimeout> | null,
+    applying: false,
+    applyAgain: false,
+  });
+  const fetchRef = useRef(fetchBlocks);
+  fetchRef.current = fetchBlocks;
+  const onStaleRef = useRef(onStale);
+  onStaleRef.current = onStale;
+  const tickRef = useRef<() => void>(() => {});
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [loadedUpToMs, setLoadedUpToMs] = useState(0);
+  const [loadedRanges, setLoadedRanges] = useState<
+    { startMs: number; endMs: number }[]
+  >([]);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [resumePending, setResumePending] = useState(false);
   const [speed, setSpeedState] = useState(1);
-  // Active recording segments (absolute wall ms) for the playing window.
+  const [initialEvents, setInitialEvents] = useState<ReplayEvent[] | null>(
+    null,
+  );
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [blockProgress, setBlockProgress] = useState({ total: 0, applied: 0 });
   const [segments, setSegmentsState] = useState<
     { startMs: number; endMs: number }[] | null
   >(null);
@@ -202,9 +300,7 @@ export function ReplayProvider({
   );
 
   // Piecewise-linear map between wall-clock offsets (rrweb/seek space) and the
-  // gap-collapsed display space. Rebuilt only when the segment list or the
-  // player's startTime changes. Identity when no segments (legacy sessions or
-  // before segments load) so nothing regresses.
+  // gap-collapsed display space. Identity when no segments.
   const timeMapping = useMemo(() => {
     if (!segments || startTime == null) {
       return {
@@ -214,7 +310,6 @@ export function ReplayProvider({
         segmentBoundariesMs: [] as number[],
       };
     }
-    // Convert to offsets from startTime, drop empties, order, accumulate.
     const rows: {
       wallStart: number;
       wallEnd: number;
@@ -239,8 +334,6 @@ export function ReplayProvider({
     const toDisplayMs = (wallOffsetMs: number) => {
       if (rows.length === 0) return wallOffsetMs;
       for (const r of rows) {
-        // In the idle gap before this segment → snap to its (compressed) start,
-        // which equals the previous segment's compressed end.
         if (wallOffsetMs < r.wallStart) return r.compStart;
         if (wallOffsetMs <= r.wallEnd) {
           return r.compStart + (wallOffsetMs - r.wallStart);
@@ -260,10 +353,7 @@ export function ReplayProvider({
       return rows[rows.length - 1]!.wallEnd;
     };
 
-    // Display-space positions where an idle gap was collapsed (each segment's
-    // start except the first) — the scrubber renders a marker at each.
     const segmentBoundariesMs = rows.slice(1).map((r) => r.compStart);
-
     return { displayDuration, toDisplayMs, fromDisplayMs, segmentBoundariesMs };
   }, [segments, startTime, duration]);
 
@@ -279,8 +369,6 @@ export function ReplayProvider({
     };
   }, []);
 
-  // Called by ReplayPlayer on every ui-update-current-time tick.
-  // Updates the ref and notifies subscribers — no React state update here.
   const setCurrentTime = useCallback((t: number) => {
     currentTimeRef.current = t;
     for (const fn of listenersRef.current) {
@@ -288,69 +376,27 @@ export function ReplayProvider({
     }
   }, []);
 
-  const onPlayerReady = useCallback(
-    (player: ReplayPlayerInstance, playerStartTime: number) => {
-      playerRef.current = player;
-      startTimeRef.current = playerStartTime;
-      setStartTime(playerStartTime);
-      currentTimeRef.current = 0;
-      setIsPlayingWithRef(false);
-      setIsReady(true);
-    },
-    [setIsPlayingWithRef],
-  );
-
-  const onPlayerDestroy = useCallback(() => {
-    playerRef.current = null;
-    startTimeRef.current = null;
-    bufferRef.current.reset();
-    setIsReady(false);
-    currentTimeRef.current = 0;
-    // Preserve the server-supplied duration on re-mount (read via ref so this
-    // callback's identity stays stable — putting totalDurationMs in deps would
-    // cause the player to destroy + recreate every time it lands).
-    const td = totalDurationMsRef.current;
-    if (!(td && td > 0)) {
-      setDuration(0);
-    }
-    setStartTime(null);
-    setIsPlayingWithRef(false);
-    setLoadedUpToMs(0);
-    setIsBuffering(false);
-  }, [setIsPlayingWithRef]);
-
-  const play = useCallback(() => {
-    playerRef.current?.play();
+  const updateBuffering = useCallback(() => {
+    const seeking = pendingSeekRef.current !== null;
+    setIsBuffering(seeking || stalledRef.current);
+    setResumePending(
+      stalledRef.current ||
+        (seeking && (pendingSeekRef.current?.wantsPlay ?? false)),
+    );
   }, []);
-
-  const pause = useCallback(() => {
-    playerRef.current?.pause();
-  }, []);
-
-  const toggle = useCallback(() => {
-    playerRef.current?.toggle();
-  }, []);
-
-  const addEvent = useCallback(
-    (event: { type: number; data: unknown; timestamp: number }) => {
-      playerRef.current?.addEvent(event);
-    },
-    [],
-  );
 
   const refreshDuration = useCallback(() => {
-    // When a definitive totalDurationMs is supplied (from session.replayMeta),
-    // it owns the duration value — don't let rrweb's progressive totalTime
-    // overwrite it as more chunks arrive (that's what made the timeline jump
-    // from "2 min" to "35 min" to "80 min"). Read via ref to keep the callback
-    // identity stable.
-    const td = totalDurationMsRef.current;
-    if (td && td > 0) return;
     const total = playerRef.current?.getMetaData().totalTime ?? 0;
+    const td = totalDurationMsRef.current;
+    // The list's duration owns the timeline; rrweb's (once the tail loads)
+    // may only extend it by the last chunk's own few seconds.
+    if (td && td > 0) {
+      setDuration((d) => Math.max(td, d, total));
+      return;
+    }
     if (total > 0) setDuration(total);
   }, []);
 
-  // Sync the prop into state + the ref once it lands (and on subsequent changes).
   useEffect(() => {
     totalDurationMsRef.current = totalDurationMs;
     if (totalDurationMs && totalDurationMs > 0) {
@@ -358,169 +404,565 @@ export function ReplayProvider({
     }
   }, [totalDurationMs]);
 
-  const updateLoadedUpToMs = useCallback(() => {
-    const wallMs = bufferRef.current.maxLoadedMs();
-    const baseline = startTimeRef.current;
-    if (wallMs == null || baseline == null) return;
-    const relativeMs = Math.max(0, wallMs - baseline);
-    setLoadedUpToMs((prev) => (relativeMs > prev ? relativeMs : prev));
-  }, []);
+  /** Mirror the store into React state (buffered bar, progress). */
+  const publishBuffer = useCallback(() => {
+    const store = storeRef.current;
+    let applied = 0;
+    for (let i = 0; i < store.count; i++) {
+      if (store.entry(i)?.state === 'applied') applied++;
+    }
+    setBlockProgress((p) =>
+      p.total === store.count && p.applied === applied
+        ? p
+        : { total: store.count, applied },
+    );
+    const base = startTimeRef.current;
+    if (base == null) return;
+    const ranges = store.loadedRanges().map((r) => ({
+      startMs: Math.max(0, r.startMs - base),
+      endMs: Math.max(0, r.endMs - base),
+    }));
+    setLoadedRanges(ranges);
+    setLoadedUpToMs(ranges.reduce((m, r) => Math.max(m, r.endMs), 0));
+    refreshDuration();
+  }, [refreshDuration]);
 
-  const markChunkLoaded = useCallback(
-    (chunk: ChunkData, opts?: { addToPlayer?: boolean }) => {
-      const addToPlayer = opts?.addToPlayer ?? true;
-      const drained = bufferRef.current.enqueueAndDrain(chunk);
-      if (addToPlayer) {
-        for (const c of drained) {
-          for (const ev of c.events) {
-            playerRef.current?.addEvent(ev);
-          }
-        }
-      }
-      if (drained.length > 0) {
-        const td = totalDurationMsRef.current;
-        if (!(td && td > 0)) {
-          const total = playerRef.current?.getMetaData().totalTime ?? 0;
-          if (total > 0) setDuration(total);
-        }
-      }
-      updateLoadedUpToMs();
-    },
-    [updateLoadedUpToMs],
-  );
-
-  const setPrefetchChunks = useCallback((fn: PrefetchChunksFn | null) => {
-    prefetchRef.current = fn;
-  }, []);
-
-  const setSeekFetch = useCallback((fn: SeekFetchFn | null) => {
-    seekFetchRef.current = fn;
+  /**
+   * Every play/goto goes through here so the replayer's baseline is known.
+   * Uses rrweb-player's goto(t, play) rather than its play(): after rrweb's
+   * 'finish' (which also fires when the playhead merely reaches the end of the
+   * events in the player) rrweb-player's play() restarts from 0:00.
+   */
+  const gotoOffset = useCallback((offsetMs: number, playAfter: boolean) => {
+    const player = playerRef.current;
+    const base = startTimeRef.current;
+    if (!player || base == null) return;
+    const t = Math.max(0, offsetMs);
+    baselineWallRef.current = base + t;
+    finishedRef.current = false;
+    player.goto(t, playAfter);
   }, []);
 
   /**
-   * Sequentially prefetch chunks starting from loadedUpToChunkIndex + 1 in
-   * batches of PREFETCH_BATCH_SIZE until the target wall-clock ms is buffered
-   * (or we run out of chunks to fetch). Bounded by MAX_PREFETCH_BATCHES so a
-   * runaway loop can't lock the player.
+   * Add events (sorted) to rrweb without letting it cast any of them onto the
+   * DOM currently shown. Events behind the playhead/baseline (a seek backfill,
+   * a late duplicate block) would be applied synchronously out of context, so
+   * the player is first re-based just before the oldest one (paused), the
+   * events inserted, then the position restored (unless a seek is about to
+   * goto anyway).
    */
-  const prefetchUntilLoaded = useCallback(
-    async (targetWallMs: number) => {
-      const fetch = prefetchRef.current;
-      if (!fetch) return;
-      let batches = 0;
-      while (
-        !bufferRef.current.isLoaded(targetWallMs) &&
-        batches < MAX_PREFETCH_BATCHES
-      ) {
-        const fromIndex = bufferRef.current.loadedUpToChunkIndex + 1;
-        const toIndex = fromIndex + PREFETCH_BATCH_SIZE - 1;
-        const chunks = await fetch(fromIndex, toIndex);
-        if (chunks.length === 0) {
-          // Nothing more to fetch — give up.
-          return;
+  const addEventsSafely = useCallback(
+    async (events: ReplayEvent[]) => {
+      const player = playerRef.current;
+      const base = startTimeRef.current;
+      if (!player || base == null || events.length === 0) return;
+      const minTs = events[0]!.timestamp;
+      const playheadWall = base + currentTimeRef.current;
+      const unsafe =
+        minTs < baselineWallRef.current ||
+        (isPlayingRef.current && minTs < playheadWall);
+      const gen = seekGenRef.current;
+      // Out-of-order events (a seek backfill, a late block): rrweb's
+      // addEvent() casts any event older than its baseline onto the page
+      // shown NOW, so older mutations hit a newer snapshot's node ids
+      // ("Node with id X not found") and the frame breaks. Insert them into
+      // the replayer's sorted event list without casting, then rebuild the
+      // current position once with goto(): rrweb replays from the nearest
+      // FullSnapshot in timestamp order. PostHog likewise never casts
+      // backfilled data into a running replayer.
+      if (unsafe && insertEventsWithoutCasting(player, events)) {
+        if (pendingSeekRef.current === null) {
+          gotoOffset(currentTimeRef.current, isPlayingRef.current);
         }
-        for (const c of chunks) {
-          const drained = bufferRef.current.enqueueAndDrain(c);
-          for (const dc of drained) {
-            for (const ev of dc.events) {
-              playerRef.current?.addEvent(ev);
-            }
-          }
-        }
-        const td = totalDurationMsRef.current;
-        if (!(td && td > 0)) {
-          const total = playerRef.current?.getMetaData().totalTime ?? 0;
-          if (total > 0) setDuration(total);
-        }
-        updateLoadedUpToMs();
-        batches += 1;
-      }
-    },
-    [updateLoadedUpToMs],
-  );
-
-  /**
-   * Smart seek: jumps to the latest full DOM snapshot before the target time
-   * via a single server query, then loads ~30 sec of chunks from there. One
-   * round trip, regardless of how far into the session the user is seeking.
-   * Falls back to sequential prefetch if the smart fetcher isn't registered.
-   */
-  const seekFastFetch = useCallback(
-    async (targetWallMs: number) => {
-      const fetch = seekFetchRef.current;
-      if (!fetch) return false;
-      const chunks = await fetch(targetWallMs);
-      if (chunks.length === 0) return false;
-      // Force the buffer's in-order pointer past anything we're about to skip,
-      // so subsequent enqueueAndDrain calls accept these chunks (they'd
-      // otherwise be ignored as "older than what's loaded").
-      const minChunkIndex = chunks.reduce(
-        (min, c) => (c.chunkIndex < min ? c.chunkIndex : min),
-        chunks[0]!.chunkIndex,
-      );
-      if (bufferRef.current.loadedUpToChunkIndex < minChunkIndex - 1) {
-        bufferRef.current.loadedUpToChunkIndex = minChunkIndex - 1;
-      }
-      for (const c of chunks) {
-        const drained = bufferRef.current.enqueueAndDrain(c);
-        for (const dc of drained) {
-          for (const ev of dc.events) {
-            playerRef.current?.addEvent(ev);
-          }
-        }
-      }
-      const td = totalDurationMsRef.current;
-      if (!(td && td > 0)) {
-        const total = playerRef.current?.getMetaData().totalTime ?? 0;
-        if (total > 0) setDuration(total);
-      }
-      updateLoadedUpToMs();
-      return true;
-    },
-    [updateLoadedUpToMs],
-  );
-
-  const seek = useCallback(
-    async (timeMs: number) => {
-      const baseline = startTimeRef.current;
-      if (baseline == null) return;
-      const targetWallMs = baseline + timeMs;
-
-      // Fast path: target already buffered.
-      if (bufferRef.current.isLoaded(targetWallMs)) {
-        playerRef.current?.goto(timeMs, isPlayingRef.current);
         return;
       }
-
-      // Slow path: pause, jump to nearest full snapshot via smart fetch, then
-      // goto. Fall back to sequential prefetch if smart fetch isn't wired.
-      const wasPlaying = isPlayingRef.current;
-      setIsBuffering(true);
-      playerRef.current?.pause();
-      try {
-        const fastOk = await seekFastFetch(targetWallMs);
-        if (!fastOk) {
-          await prefetchUntilLoaded(targetWallMs);
+      let restore: { offset: number; play: boolean } | null = null;
+      if (unsafe) {
+        if (pendingSeekRef.current === null) {
+          restore = {
+            offset: currentTimeRef.current,
+            play: isPlayingRef.current,
+          };
         }
-      } finally {
-        playerRef.current?.goto(timeMs, false);
-        setIsBuffering(false);
-        if (wasPlaying) playerRef.current?.play();
+        gotoOffset(minTs - base - 1, false);
+      }
+      for (const ev of events) player.addEvent(ev);
+      // rrweb applies addEvent() on a microtask: let them land before any
+      // goto, or the goto would rebuild without them.
+      await nextMacrotask();
+      if (
+        restore &&
+        playerRef.current === player &&
+        gen === seekGenRef.current &&
+        pendingSeekRef.current === null
+      ) {
+        gotoOffset(restore.offset, restore.play);
       }
     },
-    [seekFastFetch, prefetchUntilLoaded],
+    [gotoOffset],
   );
+
+  /** Hand every loaded-but-not-applied block to rrweb (serialized). */
+  const applyPending = useCallback(async () => {
+    const loop = loopRef.current;
+    if (!playerRef.current || startTimeRef.current == null) return;
+    if (loop.applying) {
+      loop.applyAgain = true;
+      return;
+    }
+    loop.applying = true;
+    try {
+      do {
+        loop.applyAgain = false;
+        const store = storeRef.current;
+        const pending = store.pendingApply();
+        if (pending.length === 0) break;
+        const chunks = pending.flatMap((e) => store.takeChunks(e.pos));
+        const events = mergeChunkEvents(chunks, seenChunksRef.current);
+        await addEventsSafely(events);
+      } while (loop.applyAgain && loop.alive);
+    } finally {
+      loop.applying = false;
+    }
+    publishBuffer();
+    tickRef.current();
+  }, [addEventsSafely, publishBuffer]);
+
+  /** Build the player's initial events once the loaded prefix allows it. */
+  const tryBuildInitial = useCallback((): boolean => {
+    if (initialRef.current) return true;
+    const store = storeRef.current;
+    const loop = loopRef.current;
+    if (store.count === 0) return false;
+    const prefix = store.loadedPrefix();
+    if (!prefix) return false;
+    const nothingMore =
+      loop.inFlight === null &&
+      planNextBatch(store, {
+        target: null,
+        playbackPosition: store.firstStartMs ?? undefined,
+      }) === null;
+    if (!prefix.hasFullSnapshot && !nothingMore) return false;
+    // The whole tab is loaded and it holds no FullSnapshot anywhere: rrweb
+    // has nothing to draw on (every other event is a diff on top of one).
+    // Usually the tab's only snapshot was dropped as oversize at ingest.
+    if (
+      nothingMore &&
+      store.findNearestFullSnapshot(Number.POSITIVE_INFINITY) === null
+    ) {
+      setLoadError(
+        "This tab can't be replayed: its starting page snapshot was not recorded (often a snapshot too large to ingest). Try another tab.",
+      );
+      return false;
+    }
+    // Peek without consuming: rrweb needs at least 2 events to start.
+    let eventCount = 0;
+    for (const p of prefix.positions) {
+      for (const c of store.entry(p)!.chunks ?? [])
+        eventCount += c.events.length;
+    }
+    if (eventCount < 2 && !nothingMore) return false;
+    if (eventCount < 2) {
+      setLoadError('This recording has no playable events.');
+      return false;
+    }
+    const chunks = prefix.positions.flatMap((p) => store.takeChunks(p));
+    const events = mergeChunkEvents(chunks, seenChunksRef.current);
+    initialRef.current = {
+      positions: prefix.positions,
+      seen: new Set(seenChunksRef.current),
+    };
+    setInitialEvents(events);
+    publishBuffer();
+    return true;
+  }, [publishBuffer]);
+
+  const finishSeek = useCallback(
+    (ps: PendingSeek) => {
+      if (pendingSeekRef.current !== ps) return;
+      pendingSeekRef.current = null;
+      updateBuffering();
+      gotoOffset(ps.offsetMs, ps.wantsPlay);
+    },
+    [gotoOffset, updateBuffering],
+  );
+
+  const stallForBuffering = useCallback(() => {
+    if (stalledRef.current || pendingSeekRef.current !== null) return;
+    stalledRef.current = true;
+    updateBuffering();
+    playerRef.current?.pause();
+  }, [updateBuffering]);
+
+  const resumeFromStall = useCallback(() => {
+    if (!stalledRef.current || pendingSeekRef.current !== null) return;
+    const base = startTimeRef.current;
+    stalledRef.current = false;
+    updateBuffering();
+    let t = currentTimeRef.current;
+    if (skipInactiveRef.current && base != null) {
+      const playhead = base + t;
+      const next = storeRef.current.nextBlockStartAfter(playhead);
+      if (next !== null && next - playhead > STALL_SKIP_GAP_MS) {
+        t = next - base - 1;
+      }
+    }
+    gotoOffset(t, true);
+  }, [gotoOffset, updateBuffering]);
+
+  const fetchBatch = useCallback(
+    (positions: number[], seek: boolean) => {
+      const loop = loopRef.current;
+      const fetchFn = fetchRef.current;
+      const store = storeRef.current;
+      if (!fetchFn || positions.length === 0) return;
+      const keys = positions.map((p) => store.entry(p)!.meta.key);
+      store.markLoading(positions);
+      const controller = new AbortController();
+      const inFlight: InFlight = { controller, positions, seek };
+      loop.inFlight = inFlight;
+      fetchFn(keys, controller.signal)
+        .then((byKey) => {
+          if (!loop.alive || controller.signal.aborted) {
+            store.markUnloaded(positions);
+            return;
+          }
+          // A block the server returned nothing for still counts as loaded
+          // (empty): re-requesting it forever would stall the loader.
+          for (const p of positions) {
+            const key = store.entry(p)?.meta.key;
+            store.markLoaded(
+              p,
+              (key && byKey.get(key)) || {
+                chunks: [],
+                fullSnapshots: [],
+                minTs: null,
+                maxTs: null,
+              },
+            );
+          }
+          loop.failures = 0;
+          setLoadError(null);
+        })
+        .catch((error) => {
+          store.markUnloaded(positions);
+          // Only an abort WE triggered (unmount, tab switch, seek preempting
+          // buffer-ahead) is silent. Any other abort, e.g. a disposed fetcher,
+          // is a failure with backoff: returning here without retryAt made
+          // .finally() -> tick() -> fetchBatch() spin without ever yielding.
+          if (!loop.alive || controller.signal.aborted) {
+            return;
+          }
+          if (error instanceof ReplayStaleListError) {
+            onStaleRef.current?.();
+          }
+          loop.failures += 1;
+          if (
+            !initialRef.current &&
+            loop.failures >= INITIAL_FAILURES_BEFORE_ERROR
+          ) {
+            setLoadError('Could not load this recording. Retrying...');
+          }
+          const delay = Math.min(
+            RETRY_MAX_MS,
+            RETRY_BASE_MS * 2 ** (loop.failures - 1),
+          );
+          loop.retryAt = Date.now() + delay;
+          if (loop.retryTimer) clearTimeout(loop.retryTimer);
+          loop.retryTimer = setTimeout(() => {
+            loop.retryAt = 0;
+            tickRef.current();
+          }, delay);
+        })
+        .finally(() => {
+          if (loop.inFlight === inFlight) loop.inFlight = null;
+          if (!loop.alive) return;
+          publishBuffer();
+          if (initialRef.current && playerRef.current) {
+            void applyPending();
+          } else {
+            tickRef.current();
+          }
+        });
+    },
+    [applyPending, publishBuffer],
+  );
+
+  /**
+   * The loader + playback loop step. Cheap and idempotent: called on time
+   * updates (throttled), load completions, seeks and play-state changes.
+   */
+  const tick = useCallback(() => {
+    const loop = loopRef.current;
+    if (!loop.alive) return;
+    const store = storeRef.current;
+    if (store.count === 0) return;
+
+    if (!initialRef.current) {
+      tryBuildInitial();
+    }
+    const player = playerRef.current;
+    const base = startTimeRef.current;
+    const ready = player !== null && base !== null;
+    const ps = pendingSeekRef.current;
+
+    if (ready) {
+      // A pending seek lands once its target is playable, or once nothing
+      // more can be loaded for it (best effort, never hang).
+      if (ps) {
+        if (store.canPlayAt(ps.targetWallMs)) {
+          finishSeek(ps);
+        } else if (
+          loop.inFlight === null &&
+          store.pendingApply().length === 0 &&
+          planNextBatch(store, {
+            target: ps.targetWallMs,
+            playbackPosition: ps.targetWallMs,
+          }) === null
+        ) {
+          finishSeek(ps);
+        }
+      } else {
+        const playheadMs = base + currentTimeRef.current;
+        const status = playbackStatus(store, {
+          playheadMs,
+          speed: speedRef.current,
+          playing: isPlayingRef.current,
+        });
+        if (status.starving && !stalledRef.current) {
+          stallForBuffering();
+        } else if (stalledRef.current && status.canResume) {
+          // rrweb can't play past its last event (it emits 'finish' and
+          // stops), so idle air before a block that isn't applied yet is no
+          // runway: resume once the player holds events ahead of the playhead.
+          const lastEvent = player.getMetaData().endTime;
+          if (status.endLoaded || lastEvent > playheadMs + 500) {
+            resumeFromStall();
+          }
+        }
+      }
+    }
+
+    if (loop.inFlight !== null || Date.now() < loop.retryAt) return;
+    const seekNow = pendingSeekRef.current;
+    const plan = planNextBatch(store, {
+      target: ready && seekNow ? seekNow.targetWallMs : null,
+      playbackPosition: ready
+        ? (seekNow?.targetWallMs ?? base + currentTimeRef.current)
+        : (store.firstStartMs ?? undefined),
+    });
+    if (!plan) return;
+    fetchBatch(plan.positions, plan.reason !== 'buffer_ahead');
+  }, [
+    tryBuildInitial,
+    finishSeek,
+    stallForBuffering,
+    resumeFromStall,
+    fetchBatch,
+  ]);
+  tickRef.current = tick;
+
+  // Blocks (re)listed: merge into the store by key and continue.
+  useEffect(() => {
+    storeRef.current.setBlocks(blocks ?? []);
+    publishBuffer();
+    tickRef.current();
+  }, [blocks, publishBuffer]);
+
+  // Lifetime of the loader: one per provider (= per window). Unmount aborts
+  // the in-flight request so nothing keeps loading for a closed tab.
+  useEffect(() => {
+    const loop = loopRef.current;
+    loop.alive = true;
+    tickRef.current();
+    return () => {
+      loop.alive = false;
+      loop.inFlight?.controller.abort();
+      loop.inFlight = null;
+      if (loop.retryTimer) clearTimeout(loop.retryTimer);
+    };
+  }, []);
+
+  // Re-plan while the playhead moves.
+  useEffect(() => {
+    let last = 0;
+    return subscribeToCurrentTime(() => {
+      const now = performance.now();
+      if (now - last < TICK_INTERVAL_MS) return;
+      last = now;
+      tickRef.current();
+    });
+  }, [subscribeToCurrentTime]);
+
+  const onPlayerReady = useCallback(
+    (player: ReplayPlayerInstance, playerStartTime: number) => {
+      playerRef.current = player;
+      startTimeRef.current = playerStartTime;
+      setStartTime(playerStartTime);
+      currentTimeRef.current = 0;
+      baselineWallRef.current = Number.NEGATIVE_INFINITY;
+      finishedRef.current = false;
+      stalledRef.current = false;
+      pendingSeekRef.current = null;
+      setIsBuffering(false);
+      setResumePending(false);
+      setIsPlayingWithRef(false);
+      setIsReady(true);
+      publishBuffer();
+      void applyPending();
+    },
+    [setIsPlayingWithRef, publishBuffer, applyPending],
+  );
+
+  const onPlayerDestroy = useCallback(() => {
+    playerRef.current = null;
+    startTimeRef.current = null;
+    // A re-created player starts from the initial events again: everything
+    // applied after them must be loaded again (their data was dropped once
+    // handed to rrweb).
+    const loop = loopRef.current;
+    loop.inFlight?.controller.abort();
+    loop.inFlight = null;
+    const store = storeRef.current;
+    const initial = initialRef.current;
+    const keep = new Set(initial?.positions ?? []);
+    const reset: number[] = [];
+    for (let i = 0; i < store.count; i++) {
+      const e = store.entry(i)!;
+      if (!keep.has(i) && e.state === 'applied') reset.push(i);
+    }
+    for (const p of reset) {
+      const e = store.entry(p)!;
+      e.state = 'unloaded';
+      e.chunks = null;
+    }
+    store.version++;
+    seenChunksRef.current = new Set(initial?.seen ?? []);
+    seekGenRef.current += 1;
+    pendingSeekRef.current = null;
+    stalledRef.current = false;
+    finishedRef.current = false;
+    baselineWallRef.current = Number.NEGATIVE_INFINITY;
+    setIsReady(false);
+    currentTimeRef.current = 0;
+    const td = totalDurationMsRef.current;
+    if (!(td && td > 0)) setDuration(0);
+    setStartTime(null);
+    setIsPlayingWithRef(false);
+    setLoadedUpToMs(0);
+    setLoadedRanges([]);
+    setIsBuffering(false);
+    setResumePending(false);
+  }, [setIsPlayingWithRef]);
+
+  const play = useCallback(() => {
+    if (isPlayingRef.current || stalledRef.current) return;
+    const ps = pendingSeekRef.current;
+    if (ps) {
+      ps.wantsPlay = true;
+      updateBuffering();
+      return;
+    }
+    gotoOffset(finishedRef.current ? 0 : currentTimeRef.current, true);
+  }, [gotoOffset, updateBuffering]);
+
+  const pause = useCallback(() => {
+    // Pausing also cancels a pending resume (stall) or play-after-seek.
+    if (pendingSeekRef.current) pendingSeekRef.current.wantsPlay = false;
+    stalledRef.current = false;
+    updateBuffering();
+    playerRef.current?.pause();
+  }, [updateBuffering]);
+
+  const toggle = useCallback(() => {
+    const wantsPlay =
+      isPlayingRef.current ||
+      stalledRef.current ||
+      (pendingSeekRef.current?.wantsPlay ?? false);
+    if (wantsPlay) pause();
+    else play();
+  }, [play, pause]);
+
+  const seek = useCallback(
+    (timeMs: number) => {
+      const base = startTimeRef.current;
+      const player = playerRef.current;
+      if (base == null || !player) return;
+      const t = Math.max(0, timeMs);
+      const targetWallMs = base + t;
+      const gen = ++seekGenRef.current;
+      // Keep playing after the seek if playback was running, stalled, or an
+      // earlier (now superseded) seek was going to resume it.
+      const wantsPlay =
+        isPlayingRef.current ||
+        stalledRef.current ||
+        (pendingSeekRef.current?.wantsPlay ?? false);
+      stalledRef.current = false;
+
+      if (storeRef.current.canPlayAt(targetWallMs)) {
+        pendingSeekRef.current = null;
+        updateBuffering();
+        gotoOffset(t, wantsPlay);
+        tickRef.current();
+        return;
+      }
+      // Not playable yet: pause, load around the target (+ backfill to its
+      // FullSnapshot), then goto. A buffer-ahead request in flight is dropped:
+      // the seek needs the connection more.
+      pendingSeekRef.current = { gen, targetWallMs, offsetMs: t, wantsPlay };
+      updateBuffering();
+      player.pause();
+      const inFlight = loopRef.current.inFlight;
+      if (inFlight && !inFlight.seek) inFlight.controller.abort();
+      tickRef.current();
+    },
+    [gotoOffset, updateBuffering],
+  );
+
+  const onPlayerFinish = useCallback(() => {
+    const base = startTimeRef.current;
+    if (base == null || pendingSeekRef.current !== null) return;
+    const playhead = base + currentTimeRef.current;
+    const endLoaded =
+      storeRef.current.playableUntil(playhead) === Number.POSITIVE_INFINITY;
+    if (!endLoaded) {
+      // Ran out of events IN THE PLAYER, not out of recording: a stall. Only
+      // if it was actually playing (a paused goto past the data also emits
+      // 'finish').
+      if (isPlayingRef.current && !stalledRef.current) {
+        stalledRef.current = true;
+        updateBuffering();
+        tickRef.current();
+      }
+      return;
+    }
+    finishedRef.current = true;
+  }, [updateBuffering]);
 
   const setSpeed = useCallback((s: number) => {
     if (!SPEED_OPTIONS.includes(s as (typeof SPEED_OPTIONS)[number])) return;
+    const base = startTimeRef.current;
+    // rrweb-player re-plays from the current time when the speed changes
+    // while playing: that moves the replayer's baseline.
+    if (isPlayingRef.current && base != null) {
+      baselineWallRef.current = base + currentTimeRef.current;
+    }
     playerRef.current?.setSpeed(s);
+    speedRef.current = s;
     setSpeedState(s);
   }, []);
+
+  // Re-plan on discrete changes the time ticks don't cover. fetchBlocks is
+  // included because the fetcher is created in an effect and can arrive after
+  // the loader's first tick, which would otherwise never fetch.
+  useEffect(() => {
+    tickRef.current();
+  }, [isPlaying, speed, isReady, fetchBlocks]);
 
   const value: ReplayContextValue = {
     currentTimeRef,
     subscribeToCurrentTime,
-    isPlaying,
+    isPlaying: isPlaying || resumePending,
     duration,
     startTime,
     isReady,
@@ -530,20 +972,21 @@ export function ReplayProvider({
     segmentBoundariesMs: timeMapping.segmentBoundariesMs,
     setSegments,
     loadedUpToMs,
+    loadedRanges,
     isBuffering,
+    initialEvents,
+    loadError,
+    blockProgress,
     play,
     pause,
     toggle,
     seek,
     speed,
     setSpeed,
-    addEvent,
     refreshDuration,
-    markChunkLoaded,
-    setPrefetchChunks,
-    setSeekFetch,
     onPlayerReady,
     onPlayerDestroy,
+    onPlayerFinish,
     setCurrentTime,
     setIsPlaying: setIsPlayingWithRef,
     setDuration,

@@ -19,6 +19,26 @@ import { createSqlBuilder } from '../sql-builder';
 import { getEventFiltersWhereClause } from './chart.service';
 import { getOrganizationByProjectIdCached } from './organization.service';
 import { type IServiceProfile, getProfilesCached } from './profile.service';
+import {
+  REPLAY_BLOCKS_COMPLETE_SINCE_MS,
+  type ReplayBlockChunk,
+  type ReplayBlockRef,
+  type ReplayIndexRow,
+  type ReplayScopedKey,
+  buildReplayIndex,
+  computeReplayMeta,
+  computeReplaySegments,
+  computeReplayWindows,
+  fetchReplayBlockRefs,
+  isReplayAbortError,
+  isReplayBlocksServingEnabled,
+  loadReplayChunksFromBlocks,
+  replayAnchorSeq,
+  replayBlockSessionIdsSql,
+  replayBlocksHaveChunkKeys,
+  resolveReplayRefKeys,
+  scopeReplayKeys,
+} from './replay-block-reader';
 
 export type IClickhouseSession = {
   id: string;
@@ -348,6 +368,8 @@ function buildReplayPresenceSubquery(projectId: string, days: number): string {
         AND started_at <= now()`,
     `dt > today() - ${days}
         AND dt <= today()`,
+    `first_started_at > now() - INTERVAL ${days} DAY
+        AND first_started_at <= now()`,
   );
 }
 
@@ -371,13 +393,21 @@ export function buildReplayPresenceSubqueryForRange(
         AND started_at <= toDateTime(${end}) + INTERVAL ${padDays} DAY`,
     `dt >= toDate(toDateTime(${start})) - ${padDays}
         AND dt <= toDate(toDateTime(${end})) + ${padDays}`,
+    `first_started_at >= toDateTime(${start}) - INTERVAL ${padDays} DAY
+        AND first_started_at <= toDateTime(${end}) + INTERVAL ${padDays} DAY`,
   );
 }
 
+/**
+ * Blocks-served projects (REPLAY_SERVE_BLOCKS_PROJECT_IDS) also enumerate
+ * sessions from the blob-block refs, so a session written only to Blob
+ * (REPLAY_BLOB_ONLY_PROJECT_IDS on the worker) still lists. Off → no change.
+ */
 function replayPresenceUnion(
   projectId: string,
   chunkWindow: string,
   archiveWindow: string,
+  blockWindow: string,
 ): string {
   const proj = sqlstring.escape(projectId);
   const chunks = `SELECT DISTINCT session_id
@@ -385,12 +415,16 @@ function replayPresenceUnion(
       WHERE project_id = ${proj}
         AND ${chunkWindow}`;
   if (!REPLAY_BLOB_CONN) return chunks;
-  return `${chunks}
+  const withArchive = `${chunks}
       UNION DISTINCT
       SELECT DISTINCT session_id
       FROM ${REPLAY_ARCHIVE_INDEX} FINAL
       WHERE project_id = ${proj}
         AND ${archiveWindow}`;
+  if (!isReplayBlocksServingEnabled(projectId)) return withArchive;
+  return `${withArchive}
+      UNION DISTINCT
+      ${replayBlockSessionIdsSql(projectId, blockWindow)}`;
 }
 
 /**
@@ -408,12 +442,20 @@ function buildReplayDaySubquery(projectId: string, days: number): string {
           AND started_at > now() - INTERVAL ${days} DAY
           AND started_at <= now()`;
   if (!REPLAY_BLOB_CONN) return chunkDays;
-  return `${chunkDays}
+  const withArchive = `${chunkDays}
         UNION DISTINCT
         SELECT DISTINCT dt AS d
         FROM ${REPLAY_ARCHIVE_INDEX} FINAL
         WHERE project_id = ${proj}
           AND dt > today() - ${days}`;
+  if (!isReplayBlocksServingEnabled(projectId)) return withArchive;
+  return `${withArchive}
+        UNION DISTINCT
+        SELECT DISTINCT toDate(first_started_at) AS d
+        FROM ${TABLE_NAMES.session_replay_blocks}
+        WHERE project_id = ${proj}
+          AND first_started_at > now() - INTERVAL ${days} DAY
+          AND first_started_at <= now()`;
 }
 
 /**
@@ -681,6 +723,12 @@ export async function getSessionList({
       // "Longest" without bounds LEFT JOINs: archived-only sessions (no CH
       // chunks, d.tabs = 0) stay listed, sorted last, and get their shown
       // duration from the archive via batchSessionReplayDuration below.
+      const durRows = await replayDurationRowsSource(
+        projectId,
+        `project_id = ${sqlstring.escape(projectId)}
+                  AND started_at > now() - INTERVAL ${dateIntervalInDays + 1} DAY
+                  AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
+      );
       rows = await chQuery<
         IClickhouseSession & { replay_ms: string; replay_tabs: string }
       >(
@@ -692,10 +740,8 @@ export async function getSessionList({
              SELECT session_id, window_id, ${replayActiveMsExpr} AS active_ms
              FROM (
                ${replayWindowRowsSql(
-                 TABLE_NAMES.session_replay_chunks,
-                 `project_id = ${sqlstring.escape(projectId)}
-                  AND started_at > now() - INTERVAL ${dateIntervalInDays + 1} DAY
-                  AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
+                 durRows.from,
+                 durRows.where,
                  'session_id, window_id',
                )}
              )
@@ -881,6 +927,12 @@ export async function getSessionsCount({
         ? `dur <= ${Math.floor(maxReplayDurationMs)}`
         : '',
     ].filter(Boolean);
+    const durRows = await replayDurationRowsSource(
+      projectId,
+      `project_id = ${sqlstring.escape(projectId)}
+                AND started_at > now() - INTERVAL ${days + 1} DAY
+                AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
+    );
     const rows = await chQuery<{ count: number }>(
       `SELECT count() AS count FROM (
          SELECT session_id, sum(active_ms) AS dur
@@ -888,10 +940,8 @@ export async function getSessionsCount({
            SELECT session_id, window_id, ${replayActiveMsExpr} AS active_ms
            FROM (
              ${replayWindowRowsSql(
-               TABLE_NAMES.session_replay_chunks,
-               `project_id = ${sqlstring.escape(projectId)}
-                AND started_at > now() - INTERVAL ${days + 1} DAY
-                AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
+               durRows.from,
+               durRows.where,
                'session_id, window_id',
              )}
            )
@@ -986,7 +1036,7 @@ const REPLAY_SERVE_BLOB_FIRST = process.env.REPLAY_SERVE_BLOB_FIRST === 'true';
 const REPLAY_ARCHIVE_INDEX = 'replay_archive_index';
 const replayLogger = createLogger({ name: 'replay-serving' });
 
-type ReplaySource = {
+export type ReplaySource = {
   /** Which store this read hits — 'blob' (Azure) or 'ch' (ClickHouse hot). */
   kind: 'blob' | 'ch';
   /** FROM-clause expression: a table name or an azureBlobStorage(...) call. */
@@ -1068,6 +1118,314 @@ async function resolveReplaySource(
     from: `azureBlobStorage(${sqlstring.escape(REPLAY_BLOB_CONN)}, ${sqlstring.escape(REPLAY_BLOB_CONTAINER)}, ${sqlstring.escape(pathArg)}, 'Native', 'zstd')`,
     settings: { use_hive_partitioning: 0 },
   };
+}
+
+// --- Blob-primary blocks serving (REPLAY_SERVE_BLOCKS_PROJECT_IDS) ---
+// One source per session, never mixed (PostHog's rule). For an allow-listed
+// project a session is served from the Azure blocks ('blocks') only when its
+// blocks are provably complete, BOTH:
+//   (a) every ref was written at/after REPLAY_BLOCKS_COMPLETE_SINCE (the
+//       dual-write rollout had finished, so no chunk was consumed by a
+//       not-yet-dual pod: excludes rollout-window gaps); AND
+//   (b) the legacy stores hold NO chunk older than the blocks' first chunk
+//       (min first_started_at): a long-lived session that recorded before
+//       blocks existed and resumed later has refs that pass (a) but only its
+//       tail in blocks. Strict `<`: complete sessions have equal first
+//       timestamps, and both come from the same device clock.
+// Every other session (no refs, (a) or (b) failing, or the (b) guard query
+// erroring, fail safe) takes the legacy path unchanged (CH-first, else cold
+// archive); CH/archive were dual-written for the whole blocks period, so they
+// are complete for those. The decision lives in decideReplayServing() and is
+// shared by the block-list endpoint (replay-block-list.ts) and the chunk
+// readers below.
+//
+// Cancellation: a read whose client went away (AbortError, or the caller's
+// signal fired) just stops. It is never treated as a store failure, so it never
+// falls back to legacy (that used to turn every cancelled page into a 33 MB
+// ClickHouse read).
+//
+// The chunk readers (replayChunksFrom / ByIndexRange / AroundTime, kept for the
+// MCP / agent callers) still need a per-chunk index for 'blocks'; with no
+// `chunk_keys` column that means decoding every block once (cached). The
+// dashboard player no longer uses them: it reads the block list + raw blocks
+// (replay-block-list.ts), which never decodes on the server.
+
+export type ReplayServingDecision =
+  | { kind: 'blocks'; refs: ReplayBlockRef[] }
+  | { kind: 'ch' | 'blob'; legacy: ReplaySource };
+
+type ResolvedReplay =
+  | { kind: 'ch' | 'blob'; legacy: ReplaySource }
+  | { kind: 'blocks'; index: ReplayIndexRow[] };
+
+type BlocksResolved = Extract<ResolvedReplay, { kind: 'blocks' }>;
+
+function isBlocksResolved(r: ResolvedReplay): r is BlocksResolved {
+  return r.kind === 'blocks';
+}
+
+// Guard (b) results, keyed by the ref set (count + max block_index) so a live
+// session's new block is a cache miss. Guard failures are never cached.
+const GUARD_TTL_MS = 30 * 1000;
+const GUARD_CACHE_MAX = 500;
+const guardCache = new Map<string, { at: number; complete: boolean }>();
+
+function cacheGuard(key: string, complete: boolean) {
+  if (guardCache.size >= GUARD_CACHE_MAX) {
+    const oldest = guardCache.keys().next().value;
+    if (oldest !== undefined) guardCache.delete(oldest);
+  }
+  guardCache.set(key, { at: Date.now(), complete });
+}
+
+// The per-chunk index built from a 'blocks' session's refs (chunk readers
+// only). Same key as the guard cache.
+const BLOCK_INDEX_TTL_MS = 30 * 1000;
+const BLOCK_INDEX_MAX = 200;
+const blockIndexCache = new Map<
+  string,
+  { at: number; index: ReplayIndexRow[] }
+>();
+
+function cacheBlockIndex(key: string, index: ReplayIndexRow[]) {
+  if (blockIndexCache.size >= BLOCK_INDEX_MAX) {
+    const oldest = blockIndexCache.keys().next().value;
+    if (oldest !== undefined) blockIndexCache.delete(oldest);
+  }
+  blockIndexCache.set(key, { at: Date.now(), index });
+}
+
+function refSetKey(
+  projectId: string,
+  sessionId: string,
+  refs: ReplayBlockRef[],
+): string {
+  let maxBlock = 0;
+  for (const r of refs) maxBlock = Math.max(maxBlock, r.blockIndex);
+  return [projectId, sessionId, refs.length, maxBlock].join('\u0000');
+}
+
+/**
+ * Completeness guard (b): does the legacy store (CH hot chunks, or the cold
+ * archive index) hold any chunk of this session that started strictly before
+ * the blocks' first chunk? Two point lookups on the sort-key prefix.
+ */
+async function legacyHasOlderReplay(
+  sessionId: string,
+  projectId: string,
+  blocksFirstMs: number,
+): Promise<boolean> {
+  const sid = sqlstring.escape(sessionId);
+  const proj = sqlstring.escape(projectId);
+  const before = `fromUnixTimestamp64Milli(toInt64(${Math.floor(blocksFirstMs)}))`;
+  const chunks = `SELECT 1 AS older
+     FROM ${TABLE_NAMES.session_replay_chunks}
+     WHERE project_id = ${proj}
+       AND session_id = ${sid}
+       AND started_at < ${before}
+     LIMIT 1`;
+  const sql = REPLAY_BLOB_CONN
+    ? `${chunks}
+     UNION ALL
+     SELECT 1 AS older
+     FROM ${REPLAY_ARCHIVE_INDEX} FINAL
+     WHERE project_id = ${proj}
+       AND session_id = ${sid}
+       AND first_started_at < ${before}
+     LIMIT 1`
+    : chunks;
+  const rows = await chQuery<{ older: number }>(sql);
+  return rows.length > 0;
+}
+
+/**
+ * Are this session's refs a complete copy (rules (a) + (b) above)? A guard
+ * query failure is fail safe (false, not cached, so the next read retries);
+ * a cancellation is rethrown.
+ */
+async function blocksAreComplete(
+  sessionId: string,
+  projectId: string,
+  refs: ReplayBlockRef[],
+  signal?: AbortSignal | null,
+): Promise<boolean> {
+  if (refs.length === 0) return false;
+  let minCreated = Number.POSITIVE_INFINITY;
+  let blocksFirstMs = Number.POSITIVE_INFINITY;
+  for (const r of refs) {
+    minCreated = Math.min(minCreated, r.createdAtMs);
+    blocksFirstMs = Math.min(blocksFirstMs, r.firstStartedMs);
+  }
+  // (a) a ref written before COMPLETE_SINCE: possible rollout gap, legacy.
+  if (minCreated < REPLAY_BLOCKS_COMPLETE_SINCE_MS) return false;
+  if (!Number.isFinite(blocksFirstMs)) return false;
+
+  const key = refSetKey(projectId, sessionId, refs);
+  const hit = guardCache.get(key);
+  if (hit && Date.now() - hit.at < GUARD_TTL_MS) return hit.complete;
+
+  // (b) legacy holds chunks older than the blocks: the blocks are only the
+  // tail of a resumed session, legacy.
+  let older: boolean;
+  try {
+    older = await legacyHasOlderReplay(sessionId, projectId, blocksFirstMs);
+  } catch (error) {
+    if (isReplayAbortError(error, signal)) throw error;
+    replayLogger.error(
+      'replay blocks completeness guard failed; serving legacy',
+      { sessionId, projectId, error },
+    );
+    return false;
+  }
+  cacheGuard(key, !older);
+  return !older;
+}
+
+/**
+ * THE source decision for a session's replay: 'blocks' (allow-listed project,
+ * complete refs) with its refs, else the legacy CH-first-else-archive source.
+ * A failure while looking at blocks (CH ref read) is logged and serves legacy;
+ * a cancellation is rethrown, never turned into a fallback.
+ */
+export async function decideReplayServing(
+  sessionId: string,
+  projectId: string,
+  opts: { signal?: AbortSignal | null } = {},
+): Promise<ReplayServingDecision> {
+  if (isReplayBlocksServingEnabled(projectId)) {
+    try {
+      const refs = await fetchReplayBlockRefs(projectId, sessionId);
+      if (await blocksAreComplete(sessionId, projectId, refs, opts.signal)) {
+        return { kind: 'blocks', refs };
+      }
+    } catch (error) {
+      if (isReplayAbortError(error, opts.signal)) throw error;
+      replayLogger.error('replay blocks resolve failed; serving legacy', {
+        sessionId,
+        projectId,
+        error,
+      });
+    }
+  }
+  const legacy = await resolveReplaySource(sessionId, projectId);
+  return { kind: legacy.kind, legacy };
+}
+
+/**
+ * The chunk readers' resolution: the decision plus, for 'blocks', the
+ * session's chunk index (from `chunk_keys`, else by decoding the blocks once).
+ * A failure building the index is logged and serves legacy; a cancellation is
+ * rethrown.
+ */
+async function resolveReplay(
+  sessionId: string,
+  projectId: string,
+  signal?: AbortSignal | null,
+): Promise<ResolvedReplay> {
+  const decision = await decideReplayServing(sessionId, projectId, { signal });
+  if (decision.kind !== 'blocks') {
+    return { kind: decision.kind, legacy: decision.legacy };
+  }
+  const key = refSetKey(projectId, sessionId, decision.refs);
+  const hit = blockIndexCache.get(key);
+  if (hit && Date.now() - hit.at < BLOCK_INDEX_TTL_MS) {
+    return { kind: 'blocks', index: hit.index };
+  }
+  try {
+    const index = buildReplayIndex(
+      await resolveReplayRefKeys(decision.refs, { signal }),
+    );
+    if (index.length > 0) {
+      cacheBlockIndex(key, index);
+      return { kind: 'blocks', index };
+    }
+  } catch (error) {
+    if (isReplayAbortError(error, signal)) throw error;
+    replayLogger.error('replay blocks index failed; serving legacy', {
+      sessionId,
+      projectId,
+      error,
+    });
+  }
+  return resolveLegacyReplay(sessionId, projectId);
+}
+
+async function resolveLegacyReplay(
+  sessionId: string,
+  projectId: string,
+): Promise<Extract<ResolvedReplay, { kind: 'ch' | 'blob' }>> {
+  const legacy = await resolveReplaySource(sessionId, projectId);
+  return { kind: legacy.kind, legacy };
+}
+
+/**
+ * The blocks session's ordered keys for a read scope, or null when the scope
+ * has no keys in blocks (e.g. a window the blocks don't hold): the caller
+ * then serves that read from legacy.
+ */
+function blocksScopeKeys(
+  r: BlocksResolved,
+  windowId: string | undefined,
+): ReplayScopedKey[] | null {
+  const keys = scopeReplayKeys(r.index, windowId);
+  return keys.length > 0 ? keys : null;
+}
+
+function blockChunkToItem(c: ReplayBlockChunk): ReplayChunkItem {
+  let events: ReplayChunkItem['events'] = [];
+  try {
+    events = JSON.parse(c.payload);
+  } catch {
+    events = [];
+  }
+  return {
+    chunkIndex: c.seq,
+    startedAtMs: c.startedMs,
+    endedAtMs: c.endedMs,
+    events,
+  };
+}
+
+/**
+ * Payloads for a page of scoped keys from blocks. Returns null when the page
+ * wanted chunks but none could be read (Blob error, or blocks missing them) so
+ * the caller falls back to legacy for this read; a partial page is logged. A
+ * cancellation is rethrown: it must never trigger the legacy fallback.
+ */
+async function loadBlocksPage(
+  sessionId: string,
+  projectId: string,
+  windowId: string | undefined,
+  keys: ReplayScopedKey[],
+  signal?: AbortSignal | null,
+): Promise<ReplayChunkItem[] | null> {
+  if (keys.length === 0) return [];
+  let chunks: Map<number, ReplayBlockChunk>;
+  try {
+    chunks = await loadReplayChunksFromBlocks(keys, windowId, { signal });
+  } catch (error) {
+    if (isReplayAbortError(error, signal)) throw error;
+    replayLogger.error('replay blocks page read failed; serving legacy', {
+      sessionId,
+      projectId,
+      windowId,
+      error,
+    });
+    return null;
+  }
+  if (chunks.size === 0) return null;
+  if (chunks.size < keys.length) {
+    replayLogger.warn('replay blocks page missing chunks', {
+      sessionId,
+      projectId,
+      windowId,
+      wanted: keys.length,
+      found: chunks.size,
+    });
+  }
+  return Array.from(chunks.values(), blockChunkToItem).sort(
+    (a, b) => a.chunkIndex - b.chunkIndex,
+  );
 }
 
 // --- Chunk ordering ---
@@ -1192,18 +1550,195 @@ async function loadReplayChunksForKeys(
     .sort((a, b) => a.chunkIndex - b.chunkIndex);
 }
 
+// --- Legacy (CH hot table / cold archive) reads for the block endpoints ---
+// The block-list endpoint (replay-block-list.ts) serves legacy sessions as
+// pseudo-blocks: fixed pages of the session's ordered chunk keys. These two
+// helpers are its only legacy I/O: one payload-free key listing (all windows)
+// and one payload read for the requested chunks, returned as NDJSON lines in
+// the SAME format the Blob blocks store, so the player has one decode path.
+
+export type LegacyReplayChunkKey = {
+  windowId: string;
+  chunkIndex: number;
+  startedMs: number;
+  endedMs: number;
+  isFullSnapshot: boolean;
+  eventsCount: number;
+};
+
+// Archived recordings never change and every archive query reads the whole
+// session file, so the archive's key list is cached (like blobChunkKeys). The
+// CH hot table is live and cheap to key: never cached here.
+const legacyKeyCache = new Map<
+  string,
+  { at: number; keys: LegacyReplayChunkKey[] }
+>();
+
+/**
+ * Every distinct chunk key of the session (all windows), de-duplicated by
+ * (window_id, chunk_index, started_at) exactly like replayChunkKeysSql, ordered
+ * by (started_at, chunk_index).
+ */
+export async function listLegacyReplayChunkKeys(
+  src: ReplaySource,
+  sessionId: string,
+  projectId: string,
+): Promise<LegacyReplayChunkKey[]> {
+  const cacheKey = [src.from, sessionId, projectId].join('\u0000');
+  if (src.kind === 'blob') {
+    const hit = legacyKeyCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < BLOB_KEYS_TTL_MS) return hit.keys;
+  }
+  const rows = await chQuery<{
+    window_id: string;
+    chunk_index: string | number;
+    s_ms: string | number;
+    e_ms: string | number;
+    full: string | number;
+    ev: string | number;
+  }>(
+    `SELECT window_id,
+            toString(chunk_index) AS chunk_index,
+            toString(toUnixTimestamp64Milli(started_at)) AS s_ms,
+            toString(max(toUnixTimestamp64Milli(ended_at))) AS e_ms,
+            toString(max(toUInt8(is_full_snapshot))) AS full,
+            toString(max(events_count)) AS ev
+     FROM ${src.from}
+     WHERE ${replayScope(sessionId, projectId)}
+     GROUP BY window_id, chunk_index, started_at
+     ORDER BY started_at, chunk_index`,
+    src.settings,
+  );
+  const keys = rows.map((r) => {
+    const startedMs = Number(r.s_ms);
+    const endedMs = Number(r.e_ms);
+    return {
+      windowId: r.window_id ?? '',
+      chunkIndex: Number(r.chunk_index),
+      startedMs,
+      endedMs: Number.isFinite(endedMs)
+        ? Math.max(startedMs, endedMs)
+        : startedMs,
+      isFullSnapshot: Number(r.full) > 0,
+      eventsCount: Number(r.ev) || 0,
+    };
+  });
+  if (src.kind === 'blob') {
+    if (legacyKeyCache.size >= BLOB_KEYS_MAX) {
+      const oldest = legacyKeyCache.keys().next().value;
+      if (oldest !== undefined) legacyKeyCache.delete(oldest);
+    }
+    legacyKeyCache.set(cacheKey, { at: Date.now(), keys });
+  }
+  return keys;
+}
+
+/** `${chunkIndex}:${startedMs}`: a chunk's identity within one window. */
+export const legacyChunkId = (chunkIndex: number, startedMs: number) =>
+  `${chunkIndex}:${startedMs}`;
+
+/**
+ * Payloads of the given chunks of one window, as block-format NDJSON lines
+ * (`JSON.stringify` of the CH row, `payload` last), keyed by legacyChunkId.
+ * Range-bounded on started_at so ClickHouse reads only those granules. The
+ * signal aborts the ClickHouse request (client cancel).
+ */
+export async function readLegacyReplayChunkLines(
+  src: ReplaySource,
+  sessionId: string,
+  projectId: string,
+  windowId: string,
+  keys: { chunkIndex: number; startedMs: number }[],
+  opts: { signal?: AbortSignal | null } = {},
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (keys.length === 0) return out;
+  const tuples = keys
+    .map((k) => `(${Math.floor(k.chunkIndex)}, ${Math.floor(k.startedMs)})`)
+    .join(',');
+  const starts = keys.map((k) => Math.floor(k.startedMs));
+  const res = await ch.query({
+    query: `SELECT window_id,
+            toString(chunk_index) AS chunk_index,
+            toString(toUnixTimestamp64Milli(started_at)) AS s_ms,
+            toString(toUnixTimestamp64Milli(ended_at)) AS e_ms,
+            toString(events_count) AS events_count,
+            toUInt8(is_full_snapshot) AS full,
+            payload
+     FROM ${src.from}
+     WHERE ${replayScope(sessionId, projectId, windowId)}
+       AND started_at >= fromUnixTimestamp64Milli(toInt64(${Math.min(...starts)}))
+       AND started_at <= fromUnixTimestamp64Milli(toInt64(${Math.max(...starts)}))
+       AND (chunk_index, toUnixTimestamp64Milli(started_at)) IN (${tuples})
+     ORDER BY started_at, chunk_index
+     LIMIT 1 BY chunk_index, started_at`,
+    format: 'JSONEachRow',
+    clickhouse_settings: src.settings,
+    abort_signal: opts.signal ?? undefined,
+  });
+  const rows = await res.json<{
+    window_id: string;
+    chunk_index: string;
+    s_ms: string;
+    e_ms: string;
+    events_count: string;
+    full: number | string;
+    payload: string;
+  }>();
+  for (const r of rows) {
+    const startedMs = Number(r.s_ms);
+    const endedMs = Number(r.e_ms);
+    out.set(
+      legacyChunkId(Number(r.chunk_index), startedMs),
+      JSON.stringify({
+        project_id: projectId,
+        session_id: sessionId,
+        window_id: r.window_id ?? '',
+        chunk_index: Number(r.chunk_index),
+        started_at: new Date(startedMs).toISOString(),
+        ended_at: new Date(
+          Number.isFinite(endedMs) ? endedMs : startedMs,
+        ).toISOString(),
+        events_count: Number(r.events_count) || 0,
+        is_full_snapshot: Number(r.full) > 0,
+        payload: r.payload ?? '',
+      }),
+    );
+  }
+  return out;
+}
+
 export async function getSessionReplayChunksFrom(
   sessionId: string,
   projectId: string,
   fromIndex: number,
   windowId?: string,
+  opts: { signal?: AbortSignal | null } = {},
 ) {
   // When a windowId is supplied, scope chunks to that single recorder (one
   // tab), so the player never mixes rrweb mirror states across concurrent tabs.
-  const src = await resolveReplaySource(sessionId, projectId);
-  const scope = replayScope(sessionId, projectId, windowId);
+  let resolved = await resolveReplay(sessionId, projectId, opts.signal);
   const from = Math.max(0, Math.floor(fromIndex));
   const to = from + REPLAY_CHUNKS_PAGE_SIZE + 1;
+  if (isBlocksResolved(resolved)) {
+    const all = blocksScopeKeys(resolved, windowId);
+    if (all) {
+      const page = all.filter((k) => k.seq >= from && k.seq < to);
+      const data = await loadBlocksPage(
+        sessionId,
+        projectId,
+        windowId,
+        page.slice(0, REPLAY_CHUNKS_PAGE_SIZE),
+        opts.signal,
+      );
+      if (data) {
+        return { data, hasMore: page.length > REPLAY_CHUNKS_PAGE_SIZE };
+      }
+    }
+    resolved = await resolveLegacyReplay(sessionId, projectId);
+  }
+  const src = resolved.legacy;
+  const scope = replayScope(sessionId, projectId, windowId);
   const keys =
     src.kind === 'blob'
       ? (await blobChunkKeys(src, scope)).filter(
@@ -1232,7 +1767,7 @@ export async function getSessionReplayChunksFrom(
 // idle and collapsed on the scrubber (matches "skip idle" playback semantics).
 // Shared by getSessionWindows (chip duration) and getSessionWindowSegments
 // (scrubber) so the two always agree.
-const REPLAY_IDLE_GAP_MS = 15_000;
+export const REPLAY_IDLE_GAP_MS = 15_000;
 
 /**
  * THE replay duration definition — used by the tab chip, the player readout
@@ -1267,6 +1802,45 @@ const replayActiveMsExpr = `greatest(0,
          - sum(if(prev_e_ms > 0 AND (s_ms - prev_e_ms) >= ${REPLAY_IDLE_GAP_MS}, s_ms - prev_e_ms, 0))
        )`;
 
+/**
+ * Row source for the replay-duration SQL (list sort/bounds, count, list
+ * durations). Off / pre-migration-26 → the CH chunk table, unchanged. For a
+ * blocks-served project with `chunk_keys`, the block refs' chunk keys are
+ * UNION ALL'd in (ARRAY JOIN), so Blob-only sessions get a duration too. A
+ * chunk present in both stores just repeats an identical (s_ms, e_ms) row,
+ * which changes neither min/max nor the idle-gap sum nor the per-window count,
+ * so no de-dup is needed here. `where` may use the chunk column names
+ * (started_at, session_id, …) - the blocks branch aliases them.
+ */
+async function replayDurationRowsSource(
+  projectId: string,
+  where: string,
+): Promise<{ from: string; where: string }> {
+  if (
+    !isReplayBlocksServingEnabled(projectId) ||
+    !(await replayBlocksHaveChunkKeys())
+  ) {
+    return { from: TABLE_NAMES.session_replay_chunks, where };
+  }
+  return {
+    from: `(
+      SELECT project_id, session_id, window_id, chunk_index, started_at, ended_at, is_full_snapshot
+      FROM ${TABLE_NAMES.session_replay_chunks}
+      WHERE ${where}
+      UNION ALL
+      SELECT project_id, session_id, window_id,
+             toUInt16(tupleElement(k, 1)) AS chunk_index,
+             fromUnixTimestamp64Milli(tupleElement(k, 2)) AS started_at,
+             fromUnixTimestamp64Milli(tupleElement(k, 3)) AS ended_at,
+             toBool(tupleElement(k, 4)) AS is_full_snapshot
+      FROM ${TABLE_NAMES.session_replay_blocks}
+      ARRAY JOIN chunk_keys AS k
+      WHERE ${where}
+    )`,
+    where: '1',
+  };
+}
+
 export type SessionReplayWindow = {
   windowId: string;
   chunkCount: number;
@@ -1296,8 +1870,24 @@ export type SessionReplayWindow = {
 export async function getSessionWindows(
   sessionId: string,
   projectId: string,
+  opts: { signal?: AbortSignal | null } = {},
 ): Promise<SessionReplayWindow[]> {
-  const src = await resolveReplaySource(sessionId, projectId);
+  const resolved = await resolveReplay(sessionId, projectId, opts.signal);
+  if (isBlocksResolved(resolved)) {
+    // index is never empty for a 'blocks' session (see resolveBlocksReplay)
+    return computeReplayWindows(resolved.index, REPLAY_IDLE_GAP_MS).map(
+      (w) => ({
+        windowId: w.windowId,
+        chunkCount: w.chunkCount,
+        fullSnapshotCount: w.fullSnapshotCount,
+        startedAtMs: w.startedAtMs,
+        endedAtMs: w.endedAtMs,
+        durationMs: Math.max(0, w.endedAtMs - w.startedAtMs),
+        activeDurationMs: Math.max(0, w.activeMs),
+      }),
+    );
+  }
+  const src = resolved.legacy;
   const rows = await chQuery<{
     window_id: string;
     chunk_count: string;
@@ -1356,8 +1946,20 @@ export async function getSessionWindowSegments(
   sessionId: string,
   projectId: string,
   windowId?: string,
+  opts: { signal?: AbortSignal | null } = {},
 ): Promise<SessionReplaySegment[]> {
-  const src = await resolveReplaySource(sessionId, projectId);
+  let resolved = await resolveReplay(sessionId, projectId, opts.signal);
+  if (isBlocksResolved(resolved)) {
+    const segments = computeReplaySegments(
+      resolved.index,
+      REPLAY_IDLE_GAP_MS,
+      windowId,
+    );
+    if (segments.length > 0) return segments;
+    // window not in blocks → legacy
+    resolved = await resolveLegacyReplay(sessionId, projectId);
+  }
+  const src = resolved.legacy;
   const windowScope =
     windowId !== undefined
       ? `AND window_id = ${sqlstring.escape(windowId)}`
@@ -1401,8 +2003,29 @@ export async function getSessionWindowSegments(
 export async function getSessionReplayMeta(
   sessionId: string,
   projectId: string,
-) {
-  const src = await resolveReplaySource(sessionId, projectId);
+  opts: { signal?: AbortSignal | null } = {},
+): Promise<{
+  startedAtMs: number;
+  endedAtMs: number;
+  totalDurationMs: number;
+  totalChunkCount: number;
+  /** 'ch' hot table · 'blob' cold archive · 'blocks' Azure Blob blocks */
+  source: ResolvedReplay['kind'];
+}> {
+  const resolved = await resolveReplay(sessionId, projectId, opts.signal);
+  if (isBlocksResolved(resolved)) {
+    const meta = computeReplayMeta(resolved.index);
+    return {
+      startedAtMs: meta?.startedAtMs ?? 0,
+      endedAtMs: meta?.endedAtMs ?? 0,
+      totalDurationMs: meta
+        ? Math.max(0, meta.endedAtMs - meta.startedAtMs)
+        : 0,
+      totalChunkCount: meta?.chunkCount ?? 0,
+      source: resolved.kind,
+    };
+  }
+  const src = resolved.legacy;
   const rows = await chQuery<{
     started_at_ms: string;
     ended_at_ms: string;
@@ -1459,13 +2082,31 @@ export async function getSessionReplayChunksAroundTime(
   targetMs: number,
   lookaheadMs = 30_000,
   windowId?: string,
+  opts: { signal?: AbortSignal | null } = {},
 ) {
-  const src = await resolveReplaySource(sessionId, projectId);
-  const scope = replayScope(sessionId, projectId, windowId);
+  let resolved = await resolveReplay(sessionId, projectId, opts.signal);
   // Anchor = seq of the most recent full snapshot at or before the target
   // (rrweb needs it to rebuild the DOM). None → seq 0.
   const target = Math.floor(targetMs);
   const until = Math.floor(targetMs + lookaheadMs);
+  if (isBlocksResolved(resolved)) {
+    const all = blocksScopeKeys(resolved, windowId);
+    if (all) {
+      const anchor = replayAnchorSeq(all, target);
+      const page = all.filter((k) => k.seq >= anchor && k.startedMs <= until);
+      const data = await loadBlocksPage(
+        sessionId,
+        projectId,
+        windowId,
+        page,
+        opts.signal,
+      );
+      if (data) return { data, anchorChunkIndex: anchor };
+    }
+    resolved = await resolveLegacyReplay(sessionId, projectId);
+  }
+  const src = resolved.legacy;
+  const scope = replayScope(sessionId, projectId, windowId);
   let anchorIndex: number;
   let keys: ReplayChunkKey[];
   if (src.kind === 'blob') {
@@ -1505,14 +2146,31 @@ export async function getSessionReplayChunksByIndexRange(
   fromIndex: number,
   toIndex: number,
   windowId?: string,
+  opts: { signal?: AbortSignal | null } = {},
 ) {
   if (toIndex < fromIndex) {
     return { data: [] as ReplayChunkItem[] };
   }
-  const src = await resolveReplaySource(sessionId, projectId);
-  const scope = replayScope(sessionId, projectId, windowId);
+  let resolved = await resolveReplay(sessionId, projectId, opts.signal);
   const lo = Math.floor(fromIndex);
   const hi = Math.floor(toIndex);
+  if (isBlocksResolved(resolved)) {
+    const all = blocksScopeKeys(resolved, windowId);
+    if (all) {
+      const page = all.filter((k) => k.seq >= lo && k.seq <= hi);
+      const data = await loadBlocksPage(
+        sessionId,
+        projectId,
+        windowId,
+        page,
+        opts.signal,
+      );
+      if (data) return { data };
+    }
+    resolved = await resolveLegacyReplay(sessionId, projectId);
+  }
+  const src = resolved.legacy;
+  const scope = replayScope(sessionId, projectId, windowId);
   const keys =
     src.kind === 'blob'
       ? (await blobChunkKeys(src, scope)).filter(
@@ -1538,7 +2196,7 @@ export async function batchSessionHasReplay(
     const inList = sessionIds.map((id) => sqlstring.escape(id)).join(',');
     // Blob ON → also consult the TTL-free archive index so sessions whose
     // chunks have been trimmed from ClickHouse still report hasReplay=true.
-    const sql = REPLAY_BLOB_CONN
+    let sql = REPLAY_BLOB_CONN
       ? `SELECT DISTINCT session_id
        FROM ${TABLE_NAMES.session_replay_chunks}
        WHERE project_id = ${proj}
@@ -1552,6 +2210,12 @@ export async function batchSessionHasReplay(
        FROM ${TABLE_NAMES.session_replay_chunks}
        WHERE project_id = ${proj}
          AND session_id IN (${inList})`;
+    // Blocks-served project → a Blob-only session (refs, no CH chunks) counts.
+    if (isReplayBlocksServingEnabled(projectId)) {
+      sql = `${sql}
+       UNION DISTINCT
+       ${replayBlockSessionIdsSql(projectId, `session_id IN (${inList})`)}`;
+    }
     const rows = await chQuery<{ session_id: string }>(sql);
     return new Set(rows.map((r) => r.session_id));
   } catch {
@@ -1582,6 +2246,10 @@ export async function batchSessionReplayDuration(
   let chOk = false;
   try {
     const inList = sessionIds.map((id) => sqlstring.escape(id)).join(',');
+    const durRows = await replayDurationRowsSource(
+      projectId,
+      `project_id = ${sqlstring.escape(projectId)} AND session_id IN (${inList})`,
+    );
     const rows = await chQuery<{
       session_id: string;
       duration_ms: string;
@@ -1594,8 +2262,8 @@ export async function batchSessionReplayDuration(
          SELECT session_id, window_id, ${replayActiveMsExpr} AS active_ms
          FROM (
            ${replayWindowRowsSql(
-             TABLE_NAMES.session_replay_chunks,
-             `project_id = ${sqlstring.escape(projectId)} AND session_id IN (${inList})`,
+             durRows.from,
+             durRows.where,
              'session_id, window_id',
            )}
          )
@@ -1644,7 +2312,7 @@ export async function sessionHasReplay(
   const proj = sqlstring.escape(projectId);
   // Blob ON → "has replay" = present in the CH hot chunks OR the TTL-free
   // archive index (so a trimmed-from-CH session still counts as having one).
-  const sql = REPLAY_BLOB_CONN
+  let sql = REPLAY_BLOB_CONN
     ? `SELECT 1 AS has
      FROM ${TABLE_NAMES.session_replay_chunks}
      WHERE session_id = ${sid}
@@ -1661,6 +2329,16 @@ export async function sessionHasReplay(
      WHERE session_id = ${sid}
        AND project_id = ${proj}
      LIMIT 1`;
+  // Blocks-served project → a Blob-only session (refs, no CH chunks) counts.
+  if (isReplayBlocksServingEnabled(projectId)) {
+    sql = `${sql}
+     UNION ALL
+     SELECT 1 AS has
+     FROM ${TABLE_NAMES.session_replay_blocks}
+     WHERE session_id = ${sid}
+       AND project_id = ${proj}
+     LIMIT 1`;
+  }
   const rows = await chQuery<{ has: number }>(sql);
   return rows.length > 0;
 }

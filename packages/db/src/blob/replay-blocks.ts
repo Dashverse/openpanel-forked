@@ -142,13 +142,19 @@ export const appendReplayBlock = async (
   }
 };
 
-/** Range-GET one block: `[byteStart, byteStart+count)` of a block blob. */
+/**
+ * Range-GET one block: `[byteStart, byteStart+count)` of a block blob. Pass the
+ * request's abortSignal so a client cancel stops the Azure read.
+ */
 export const readReplayBlockRange = async (
   blobPath: string,
   byteStart: number,
   count: number,
+  opts: { abortSignal?: AbortSignal } = {},
 ): Promise<Buffer> =>
-  getContainer().getBlobClient(blobPath).downloadToBuffer(byteStart, count);
+  getContainer()
+    .getBlobClient(blobPath)
+    .downloadToBuffer(byteStart, count, { abortSignal: opts.abortSignal });
 
 /**
  * Short-lived read-only SAS URL for one blob (download/export fast path). A

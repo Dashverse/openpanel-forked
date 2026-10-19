@@ -19,9 +19,11 @@ vi.mock('../blob/replay-blocks', async (importOriginal) => {
 });
 
 const inserted: any[] = [];
-const insertMock = vi.fn(async ({ values }: { values: any[] }) => {
-  inserted.push(...values);
-});
+const insertMock = vi.fn(
+  async ({ values }: { values: any[]; clickhouse_settings?: any }) => {
+    inserted.push(...values);
+  },
+);
 vi.mock('../clickhouse/client', () => ({
   TABLE_NAMES: { session_replay_blocks: 'session_replay_blocks' },
   ch: { insert: (args: any) => insertMock(args) },
@@ -153,6 +155,37 @@ describe('writeSessionReplayBlocks', () => {
     ]);
     expect(res.blocks).toBe(1);
     expect(inserted[0].block_index).toBe(2);
+  });
+
+  it('fills chunk_keys (block order) and tolerates a pre-migration table', async () => {
+    await writeSessionReplayBlocks([
+      {
+        line: chunk('A', 1, '2026-10-01T10:00:01.250Z', {
+          ended_at: '2026-10-01T10:00:02.000Z',
+        }),
+        offset: 2,
+      },
+      { line: chunk('A', 0, '2026-10-01T10:00:00.000Z'), offset: 1 },
+    ]);
+    expect(inserted[0].chunk_keys).toEqual([
+      [
+        0,
+        Date.UTC(2026, 9, 1, 10, 0, 0, 0),
+        Date.UTC(2026, 9, 1, 10, 0, 0, 0),
+        1,
+      ],
+      [
+        1,
+        Date.UTC(2026, 9, 1, 10, 0, 1, 250),
+        Date.UTC(2026, 9, 1, 10, 0, 2, 0),
+        0,
+      ],
+    ]);
+    // writer deployed before migration 26 must not fail on the unknown field
+    expect(
+      insertMock.mock.calls[0]![0].clickhouse_settings
+        .input_format_skip_unknown_fields,
+    ).toBe(1);
   });
 
   it('propagates an append failure (caller decides) and inserts no refs', async () => {

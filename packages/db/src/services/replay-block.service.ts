@@ -37,6 +37,82 @@ export interface IClickhouseSessionReplayBlock {
   events_count: number;
   size_bytes: number;
   codec: string;
+  /**
+   * Payload-free key of every chunk in the block, in block order:
+   * [chunk_index, started_ms, ended_ms, is_full_snapshot]. Lets the reader build
+   * the session's chunk index without downloading blocks (migration 26).
+   */
+  chunk_keys: ReplayBlockChunkKey[];
+}
+
+/** [chunk_index, started_ms, ended_ms, is_full_snapshot(0|1)] */
+export type ReplayBlockChunkKey = [number, number, number, number];
+
+const CH_DATETIME_RE =
+  /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+
+/**
+ * A chunk's `started_at` / `ended_at` as Unix ms - the value ClickHouse stores
+ * for the same JSONEachRow line in a DateTime64(3) column (best_effort input,
+ * UTC server): ISO / 'YYYY-MM-DD hh:mm:ss[.fff]' with no zone = UTC, sub-ms
+ * digits truncated, numeric = Unix seconds. NaN when unparseable.
+ */
+export function parseReplayTimestampMs(value: unknown): number {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? Math.floor(value * 1000) : Number.NaN;
+  }
+  if (typeof value !== 'string') return Number.NaN;
+  const v = value.trim();
+  if (/^\d+(\.\d+)?$/.test(v)) {
+    return Math.floor(Number(v) * 1000);
+  }
+  const m = CH_DATETIME_RE.exec(v);
+  if (m) {
+    const ms = Number(`${m[7] ?? ''}000`.slice(0, 3));
+    let t = Date.UTC(
+      Number(m[1]),
+      Number(m[2]) - 1,
+      Number(m[3]),
+      Number(m[4]),
+      Number(m[5]),
+      Number(m[6]),
+      ms,
+    );
+    const tz = m[8];
+    if (tz && tz.toUpperCase() !== 'Z') {
+      const sign = tz[0] === '-' ? -1 : 1;
+      const digits = tz.slice(1).replace(':', '');
+      const offMin =
+        Number(digits.slice(0, 2)) * 60 + Number(digits.slice(2, 4) || '0');
+      t -= sign * offMin * 60_000;
+    }
+    return t;
+  }
+  const parsed = Date.parse(v);
+  return Number.isFinite(parsed) ? Math.floor(parsed) : Number.NaN;
+}
+
+/** Same truthiness ClickHouse's Bool column applies to the JSON value. */
+export function replayFlag(value: unknown): boolean {
+  return value === true || value === 1 || value === '1' || value === 'true';
+}
+
+/** The chunk-key tuple of one parsed chunk (see `chunk_keys`). */
+export function replayChunkKeyOf(
+  chunk: Pick<
+    IClickhouseSessionReplayChunk,
+    'chunk_index' | 'started_at' | 'ended_at' | 'is_full_snapshot'
+  >,
+): ReplayBlockChunkKey | null {
+  const startedMs = parseReplayTimestampMs(chunk.started_at);
+  if (!Number.isFinite(startedMs)) return null;
+  const endedRaw = parseReplayTimestampMs(chunk.ended_at);
+  return [
+    Number(chunk.chunk_index) || 0,
+    startedMs,
+    Number.isFinite(endedRaw) ? endedRaw : startedMs,
+    replayFlag(chunk.is_full_snapshot) ? 1 : 0,
+  ];
 }
 
 // Sessions in one batch are independent blobs, so append a few concurrently
@@ -59,7 +135,13 @@ export async function insertReplayBlocks(
     // Same as the chunk inserts: one tiny ref insert per Kafka batch would make
     // a part per batch, so let ClickHouse coalesce them (async_insert) — and wait
     // for the write, because the consumer resolves Kafka offsets after this ack.
-    clickhouse_settings: { async_insert: 1, wait_for_async_insert: 1 },
+    // skip_unknown_fields: a writer deployed before migration 26 (chunk_keys)
+    // must not fail the insert on the new field.
+    clickhouse_settings: {
+      async_insert: 1,
+      wait_for_async_insert: 1,
+      input_format_skip_unknown_fields: 1,
+    },
   });
 }
 
@@ -169,10 +251,13 @@ export async function writeSessionReplayBlocks(
       let chunkLo = Number.POSITIVE_INFINITY;
       let chunkHi = 0;
       let events = 0;
+      const chunkKeys: ReplayBlockChunkKey[] = [];
       for (const { chunk } of g.chunks) {
         chunkLo = Math.min(chunkLo, chunk.chunk_index);
         chunkHi = Math.max(chunkHi, chunk.chunk_index);
         events += chunk.events_count ?? 0;
+        const key = replayChunkKeyOf(chunk);
+        if (key) chunkKeys.push(key);
       }
 
       return {
@@ -190,6 +275,7 @@ export async function writeSessionReplayBlocks(
         events_count: events,
         size_bytes: block.length,
         codec: 'zstd',
+        chunk_keys: chunkKeys,
       };
     },
   );

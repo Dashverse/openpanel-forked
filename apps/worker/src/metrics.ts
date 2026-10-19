@@ -219,13 +219,31 @@ export const replayBlocksBytesTotal = new client.Counter({
 
 export const replayBlocksErrorsTotal = new client.Counter({
   name: 'replay_blocks_errors_total',
-  help: 'Session-replay batches whose blob block write/ref insert failed',
+  help: 'Session-replay batches whose blob block write/ref insert failed (shadow + Blob-only)',
+  labelNames: ['partition'],
+});
+
+// Blob-only projects (REPLAY_BLOB_ONLY_PROJECT_IDS): blocks are the only copy,
+// so a failed block write fails the batch (offsets not resolved → redelivery).
+// Each such failure counts in replay_blocks_errors_total AND here, so
+// errors_total − fail_closed_total = swallowed shadow (dual) failures.
+export const replayBlocksFailClosedTotal = new client.Counter({
+  name: 'replay_blocks_fail_closed_total',
+  help: 'Session-replay batches redelivered because a Blob-only block write/ref insert failed',
+  labelNames: ['partition'],
+});
+
+export const replayBlobOnlyChunksTotal = new client.Counter({
+  name: 'replay_blob_only_chunks_total',
+  help: 'Session-replay chunks written to Blob blocks only (no ClickHouse chunk insert)',
   labelNames: ['partition'],
 });
 
 register.registerMetric(replayBlocksWrittenTotal);
 register.registerMetric(replayBlocksBytesTotal);
 register.registerMetric(replayBlocksErrorsTotal);
+register.registerMetric(replayBlocksFailClosedTotal);
+register.registerMetric(replayBlobOnlyChunksTotal);
 
 queues.forEach((queue) => {
   register.registerMetric(

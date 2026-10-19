@@ -17,14 +17,21 @@ import {
   withSpan,
 } from '@openpanel/telemetry';
 import {
+  replayBlobOnlyChunksTotal,
   replayBlocksBytesTotal,
   replayBlocksErrorsTotal,
+  replayBlocksFailClosedTotal,
   replayBlocksWrittenTotal,
   replayKafkaConsumeErrorsTotal,
   replayKafkaConsumedTotal,
   replayKafkaConsumerLag,
 } from '../metrics';
 import { logger } from '../utils/logger';
+import {
+  type ReplayBlocksMode,
+  parseBlobOnlyProjectIds,
+  writeReplayBatch,
+} from './replay-batch-writer';
 
 export interface ReplayKafkaConsumerHandle {
   stop: () => Promise<void>;
@@ -35,11 +42,13 @@ export interface ReplayKafkaConsumerHandle {
 //   dual           — ALSO write zstd blocks to Azure Blob + refs to CH, as a
 //                    SHADOW write: the CH chunk insert stays the source of truth,
 //                    a blob/ref failure is counted + logged but never blocks it.
-// There is deliberately no "blocks only" mode yet: the session list, player and
-// agent still read session_replay_chunks only, so stopping the CH insert would
-// make replays vanish until serving from blocks ships.
+// Per-project Blob-only (REPLAY_BLOB_ONLY_PROJECT_IDS, CSV) skips the CH insert
+// for those projects: blocks are their only copy, so a block/ref failure fails
+// the batch (redelivery) instead of being swallowed. Requires mode=dual (which
+// requires the blob store); otherwise those projects keep writing CH. Turn it
+// on only for projects the API serves from blocks
+// (REPLAY_SERVE_BLOCKS_PROJECT_IDS), or their new replays won't list/play.
 // Flip via `kubectl set env` + rollout.
-type ReplayBlocksMode = 'off' | 'dual';
 const REPLAY_BLOCKS_MODE: ReplayBlocksMode = ((): ReplayBlocksMode => {
   const v = (process.env.REPLAY_BLOCKS_MODE || 'off').trim().toLowerCase();
   if (v === 'dual') {
@@ -58,6 +67,24 @@ const REPLAY_BLOCKS_MODE: ReplayBlocksMode = ((): ReplayBlocksMode => {
   }
   return 'off';
 })();
+const REPLAY_BLOB_ONLY_PROJECT_IDS: ReadonlySet<string> = (() => {
+  const ids = parseBlobOnlyProjectIds(process.env.REPLAY_BLOB_ONLY_PROJECT_IDS);
+  if (ids.size > 0 && REPLAY_BLOCKS_MODE !== 'dual') {
+    // Never write nowhere: without blocks these projects stay on CH.
+    logger.error(
+      'REPLAY_BLOB_ONLY_PROJECT_IDS is set but replay blocks are off (needs REPLAY_BLOCKS_MODE=dual + AZURE_BLOB_CONNECTION_STRING); writing ClickHouse for those projects',
+      { projects: Array.from(ids) },
+    );
+    return new Set<string>();
+  }
+  if (ids.size > 0) {
+    logger.info('replay Blob-only projects (no ClickHouse chunk insert)', {
+      projects: Array.from(ids),
+    });
+  }
+  return ids;
+})();
+
 // Overall bound on one batch's blob appends + ref insert. With the CH insert's
 // own INSERT_TIMEOUT_MS this keeps a batch well inside the rebalance timeout.
 // A non-positive/non-numeric value falls back to the default: NaN would make
@@ -71,7 +98,9 @@ const BLOCKS_TIMEOUT_MS = (() => {
 // row — there is no session read-modify-write to serialize, so we don't group by
 // key and there's no dedup. A batch is: decompress every value → collect the
 // JSONEachRow lines → insert the CH chunks (then, in dual mode, shadow-write
-// blob blocks) → resolve the whole batch. On a decompress or CH insert error we
+// blob blocks; Blob-only projects get blocks only, fail-closed - see
+// replay-batch-writer.ts) → resolve the whole batch. On a CH insert or
+// Blob-only block error we
 // DON'T resolve, so kafkajs redelivers the batch (at-least-once) rather than
 // dropping replay — a redelivery at worst duplicates (CH chunks and block refs
 // are both de-duped by chunk at serving), it never loses a chunk.
@@ -229,31 +258,61 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
                   },
                 },
                 async () => {
-                  // CH chunks are the source of truth: a failure here means we
-                  // don't resolve → the batch redelivers.
-                  await insertReplayChunks(lines, {
-                    abortSignal: AbortSignal.timeout(INSERT_TIMEOUT_MS),
-                  });
-                  if (REPLAY_BLOCKS_MODE !== 'dual') {
-                    return;
+                  // CH chunks (dual/off projects) are the source of truth and
+                  // Blob-only projects' blocks are their only copy: a failure
+                  // of either throws → we don't resolve → the batch
+                  // redelivers. Dual projects' blocks are a shadow write: an
+                  // Azure outage or slow call must not stall live replay, so
+                  // those errors are counted + logged, never thrown.
+                  const res = await writeReplayBatch(
+                    linesWithOffsets,
+                    {
+                      mode: REPLAY_BLOCKS_MODE,
+                      blobOnlyProjectIds: REPLAY_BLOB_ONLY_PROJECT_IDS,
+                    },
+                    {
+                      insertChunks: (chLines) =>
+                        insertReplayChunks(chLines, {
+                          abortSignal: AbortSignal.timeout(INSERT_TIMEOUT_MS),
+                        }),
+                      writeBlocks: (items) =>
+                        writeSessionReplayBlocks(items, {
+                          abortSignal: AbortSignal.timeout(BLOCKS_TIMEOUT_MS),
+                        }),
+                      onShadowError: (err) => {
+                        replayBlocksErrorsTotal.inc({ partition });
+                        logger.error(
+                          'replay blob blocks write failed (shadow)',
+                          {
+                            error: err,
+                            partition: batch.partition,
+                            messages: batch.messages.length,
+                          },
+                        );
+                      },
+                      onFailClosed: (err) => {
+                        replayBlocksErrorsTotal.inc({ partition });
+                        replayBlocksFailClosedTotal.inc({ partition });
+                        logger.error(
+                          'replay blob blocks write failed (blob-only, batch will redeliver)',
+                          {
+                            error: err,
+                            partition: batch.partition,
+                            messages: batch.messages.length,
+                          },
+                        );
+                      },
+                    },
+                  );
+                  if (res.blocks > 0) {
+                    replayBlocksWrittenTotal.inc({ partition }, res.blocks);
+                    replayBlocksBytesTotal.inc(res.bytes);
                   }
-                  // Shadow write: an Azure outage or slow call must not stall
-                  // live replay (and let the short-retention topic age it out),
-                  // so blob/ref errors are counted + logged, never thrown.
-                  try {
-                    const { blocks, bytes } = await writeSessionReplayBlocks(
-                      linesWithOffsets,
-                      { abortSignal: AbortSignal.timeout(BLOCKS_TIMEOUT_MS) },
+                  if (res.blobOnlyChunks > 0) {
+                    replayBlobOnlyChunksTotal.inc(
+                      { partition },
+                      res.blobOnlyChunks,
                     );
-                    replayBlocksWrittenTotal.inc({ partition }, blocks);
-                    replayBlocksBytesTotal.inc(bytes);
-                  } catch (err) {
-                    replayBlocksErrorsTotal.inc({ partition });
-                    logger.error('replay blob blocks write failed (shadow)', {
-                      error: err,
-                      partition: batch.partition,
-                      messages: batch.messages.length,
-                    });
                   }
                 },
               ),
