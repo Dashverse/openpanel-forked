@@ -60,7 +60,6 @@ import { Route as AppOrganizationIdProjectIdSettingsTabsIndexRouteImport } from 
 import { Route as AppOrganizationIdProjectIdProfilesTabsIndexRouteImport } from './routes/_app.$organizationId.$projectId.profiles._tabs.index'
 import { Route as AppOrganizationIdProjectIdNotificationsTabsIndexRouteImport } from './routes/_app.$organizationId.$projectId.notifications._tabs.index'
 import { Route as AppOrganizationIdProjectIdEventsTabsIndexRouteImport } from './routes/_app.$organizationId.$projectId.events._tabs.index'
-import { Route as AppOrganizationIdProjectIdSettingsTabsMcpRouteImport } from './routes/_app.$organizationId.$projectId.settings._tabs.mcp'
 import { Route as AppOrganizationIdProjectIdSettingsTabsImportsRouteImport } from './routes/_app.$organizationId.$projectId.settings._tabs.imports'
 import { Route as AppOrganizationIdProjectIdSettingsTabsEventsRouteImport } from './routes/_app.$organizationId.$projectId.settings._tabs.events'
 import { Route as AppOrganizationIdProjectIdSettingsTabsDetailsRouteImport } from './routes/_app.$organizationId.$projectId.settings._tabs.details'
@@ -412,12 +411,6 @@ const AppOrganizationIdProjectIdEventsTabsIndexRoute =
     path: '/',
     getParentRoute: () => AppOrganizationIdProjectIdEventsTabsRoute,
   } as any)
-const AppOrganizationIdProjectIdSettingsTabsMcpRoute =
-  AppOrganizationIdProjectIdSettingsTabsMcpRouteImport.update({
-    id: '/mcp',
-    path: '/mcp',
-    getParentRoute: () => AppOrganizationIdProjectIdSettingsTabsRoute,
-  } as any)
 const AppOrganizationIdProjectIdSettingsTabsImportsRoute =
   AppOrganizationIdProjectIdSettingsTabsImportsRouteImport.update({
     id: '/imports',
@@ -569,7 +562,6 @@ export interface FileRoutesByFullPath {
   '/$organizationId/$projectId/settings/details': typeof AppOrganizationIdProjectIdSettingsTabsDetailsRoute
   '/$organizationId/$projectId/settings/events': typeof AppOrganizationIdProjectIdSettingsTabsEventsRoute
   '/$organizationId/$projectId/settings/imports': typeof AppOrganizationIdProjectIdSettingsTabsImportsRoute
-  '/$organizationId/$projectId/settings/mcp': typeof AppOrganizationIdProjectIdSettingsTabsMcpRoute
   '/$organizationId/$projectId/events/': typeof AppOrganizationIdProjectIdEventsTabsIndexRoute
   '/$organizationId/$projectId/notifications/': typeof AppOrganizationIdProjectIdNotificationsTabsIndexRoute
   '/$organizationId/$projectId/profiles/': typeof AppOrganizationIdProjectIdProfilesTabsIndexRoute
@@ -629,7 +621,6 @@ export interface FileRoutesByTo {
   '/$organizationId/$projectId/settings/details': typeof AppOrganizationIdProjectIdSettingsTabsDetailsRoute
   '/$organizationId/$projectId/settings/events': typeof AppOrganizationIdProjectIdSettingsTabsEventsRoute
   '/$organizationId/$projectId/settings/imports': typeof AppOrganizationIdProjectIdSettingsTabsImportsRoute
-  '/$organizationId/$projectId/settings/mcp': typeof AppOrganizationIdProjectIdSettingsTabsMcpRoute
   '/$organizationId/$projectId/profiles/$profileId/events': typeof AppOrganizationIdProjectIdProfilesProfileIdTabsEventsRoute
   '/$organizationId/$projectId/profiles/$profileId/sessions': typeof AppOrganizationIdProjectIdProfilesProfileIdTabsSessionsRoute
 }
@@ -700,7 +691,6 @@ export interface FileRoutesById {
   '/_app/$organizationId/$projectId/settings/_tabs/details': typeof AppOrganizationIdProjectIdSettingsTabsDetailsRoute
   '/_app/$organizationId/$projectId/settings/_tabs/events': typeof AppOrganizationIdProjectIdSettingsTabsEventsRoute
   '/_app/$organizationId/$projectId/settings/_tabs/imports': typeof AppOrganizationIdProjectIdSettingsTabsImportsRoute
-  '/_app/$organizationId/$projectId/settings/_tabs/mcp': typeof AppOrganizationIdProjectIdSettingsTabsMcpRoute
   '/_app/$organizationId/$projectId/events/_tabs/': typeof AppOrganizationIdProjectIdEventsTabsIndexRoute
   '/_app/$organizationId/$projectId/notifications/_tabs/': typeof AppOrganizationIdProjectIdNotificationsTabsIndexRoute
   '/_app/$organizationId/$projectId/profiles/_tabs/': typeof AppOrganizationIdProjectIdProfilesTabsIndexRoute
@@ -766,7 +756,6 @@ export interface FileRouteTypes {
     | '/$organizationId/$projectId/settings/details'
     | '/$organizationId/$projectId/settings/events'
     | '/$organizationId/$projectId/settings/imports'
-    | '/$organizationId/$projectId/settings/mcp'
     | '/$organizationId/$projectId/events/'
     | '/$organizationId/$projectId/notifications/'
     | '/$organizationId/$projectId/profiles/'
@@ -826,7 +815,6 @@ export interface FileRouteTypes {
     | '/$organizationId/$projectId/settings/details'
     | '/$organizationId/$projectId/settings/events'
     | '/$organizationId/$projectId/settings/imports'
-    | '/$organizationId/$projectId/settings/mcp'
     | '/$organizationId/$projectId/profiles/$profileId/events'
     | '/$organizationId/$projectId/profiles/$profileId/sessions'
   id:
@@ -896,7 +884,6 @@ export interface FileRouteTypes {
     | '/_app/$organizationId/$projectId/settings/_tabs/details'
     | '/_app/$organizationId/$projectId/settings/_tabs/events'
     | '/_app/$organizationId/$projectId/settings/_tabs/imports'
-    | '/_app/$organizationId/$projectId/settings/_tabs/mcp'
     | '/_app/$organizationId/$projectId/events/_tabs/'
     | '/_app/$organizationId/$projectId/notifications/_tabs/'
     | '/_app/$organizationId/$projectId/profiles/_tabs/'
@@ -1311,13 +1298,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOrganizationIdProjectIdEventsTabsIndexRouteImport
       parentRoute: typeof AppOrganizationIdProjectIdEventsTabsRoute
     }
-    '/_app/$organizationId/$projectId/settings/_tabs/mcp': {
-      id: '/_app/$organizationId/$projectId/settings/_tabs/mcp'
-      path: '/mcp'
-      fullPath: '/$organizationId/$projectId/settings/mcp'
-      preLoaderRoute: typeof AppOrganizationIdProjectIdSettingsTabsMcpRouteImport
-      parentRoute: typeof AppOrganizationIdProjectIdSettingsTabsRoute
-    }
     '/_app/$organizationId/$projectId/settings/_tabs/imports': {
       id: '/_app/$organizationId/$projectId/settings/_tabs/imports'
       path: '/imports'
@@ -1591,7 +1571,6 @@ interface AppOrganizationIdProjectIdSettingsTabsRouteChildren {
   AppOrganizationIdProjectIdSettingsTabsDetailsRoute: typeof AppOrganizationIdProjectIdSettingsTabsDetailsRoute
   AppOrganizationIdProjectIdSettingsTabsEventsRoute: typeof AppOrganizationIdProjectIdSettingsTabsEventsRoute
   AppOrganizationIdProjectIdSettingsTabsImportsRoute: typeof AppOrganizationIdProjectIdSettingsTabsImportsRoute
-  AppOrganizationIdProjectIdSettingsTabsMcpRoute: typeof AppOrganizationIdProjectIdSettingsTabsMcpRoute
   AppOrganizationIdProjectIdSettingsTabsIndexRoute: typeof AppOrganizationIdProjectIdSettingsTabsIndexRoute
 }
 
@@ -1605,8 +1584,6 @@ const AppOrganizationIdProjectIdSettingsTabsRouteChildren: AppOrganizationIdProj
       AppOrganizationIdProjectIdSettingsTabsEventsRoute,
     AppOrganizationIdProjectIdSettingsTabsImportsRoute:
       AppOrganizationIdProjectIdSettingsTabsImportsRoute,
-    AppOrganizationIdProjectIdSettingsTabsMcpRoute:
-      AppOrganizationIdProjectIdSettingsTabsMcpRoute,
     AppOrganizationIdProjectIdSettingsTabsIndexRoute:
       AppOrganizationIdProjectIdSettingsTabsIndexRoute,
   }

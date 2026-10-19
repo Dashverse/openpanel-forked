@@ -35,6 +35,13 @@ export interface ReplayBatchDeps {
   onShadowError?: (err: unknown) => void;
   /** Blob-only block write failed - the batch will be redelivered. */
   onFailClosed?: (err: unknown) => void;
+  /**
+   * Checked before the dual shadow write: false (batch deadline nearly spent)
+   * skips it. Skipping is safe: those sessions just lack blocks, and the
+   * serving guard then serves them from ClickHouse, which is complete.
+   */
+  shadowBudgetOk?: () => boolean;
+  onShadowSkipped?: () => void;
 }
 
 export interface ReplayBatchResult {
@@ -136,7 +143,9 @@ export async function writeReplayBatch(
   }
 
   // 3. Dual projects - shadow write; never blocks the batch.
-  if (dualItems.length > 0) {
+  if (dualItems.length > 0 && deps.shadowBudgetOk?.() === false) {
+    deps.onShadowSkipped?.();
+  } else if (dualItems.length > 0) {
     try {
       const { blocks, bytes } = await deps.writeBlocks(dualItems);
       result.blocks += blocks;
@@ -146,4 +155,20 @@ export async function writeReplayBatch(
     }
   }
   return result;
+}
+
+/**
+ * Backoff before a failed batch is retried: 1s, 2s, 4s ... capped at `maxMs`.
+ * The consumer pauses the partition for this long instead of re-fetching at
+ * once, so an outage is a slow retry loop, not a hot one against Azure + CH.
+ */
+export function replayRetryBackoffMs(attempt: number, maxMs = 30_000): number {
+  const n = Math.max(1, Math.floor(attempt));
+  return Math.min(maxMs, 1000 * 2 ** Math.min(n - 1, 30));
+}
+
+/** Positive integer env value, else the default (NaN would break timeouts). */
+export function positiveIntEnv(raw: string | undefined, fallback: number) {
+  const n = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }

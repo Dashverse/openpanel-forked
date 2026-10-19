@@ -1,5 +1,5 @@
 import { zstdCompressSync } from 'node:zlib';
-import { encodeReplayFrames } from '@openpanel/common';
+import { encodeReplayFrames } from '@openpanel/common/replay-frames';
 import { decompress } from 'fzstd';
 import { describe, expect, it } from 'vitest';
 import {

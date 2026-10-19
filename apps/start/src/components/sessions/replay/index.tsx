@@ -47,7 +47,12 @@ import {
 } from './replay-block-store';
 import { ReplayTime } from './replay-controls';
 import { ReplayTimeline } from './replay-timeline';
-import { formatDuration, getEventOffsetMs } from './replay-utils';
+import {
+  formatDuration,
+  getEventOffsetMs,
+  resolveActiveWindowId,
+  resolveDefaultWindowId,
+} from './replay-utils';
 
 // Which store served this replay (session.replayMeta `source`).
 const REPLAY_SOURCE_LABELS: Record<
@@ -958,21 +963,24 @@ export function ReplayShell({
       })),
     [blockList],
   );
-  const hasWindows = windows.length > 0;
 
-  // Default to the window with the most recorded (active) time. The earliest
-  // one is often a 0-2 s stub (redirect / quick reload).
-  const defaultWindowId = hasWindows
-    ? windows.reduce((best, w) =>
-        w.activeDurationMs > best.activeDurationMs ? w : best,
-      ).windowId
-    : null;
+  // Default to the window with the most recorded (active) time, pinned once
+  // resolved: live polling re-lists the windows, and a tab that later
+  // overtakes it must not swap (remount) the player mid-watch. Re-picked only
+  // if the pinned tab drops out of the list. Stored in state and updated
+  // during render (React's "adjust state on prop change" pattern).
+  const [pinnedDefaultId, setPinnedDefaultId] = useState<string | null>(null);
+  const defaultWindowId = resolveDefaultWindowId(windows, pinnedDefaultId);
+  if (defaultWindowId !== null && defaultWindowId !== pinnedDefaultId) {
+    setPinnedDefaultId(defaultWindowId);
+  }
   // A linked tab that doesn't exist (stale link) falls back to the default.
-  const activeWindowId =
-    selectedWindowId !== null &&
-    (!blockList || windows.some((w) => w.windowId === selectedWindowId))
-      ? selectedWindowId
-      : defaultWindowId;
+  const activeWindowId = resolveActiveWindowId({
+    selectedId: selectedWindowId,
+    defaultId: defaultWindowId,
+    windows,
+    listLoaded: !!blockList,
+  });
   // The shared timestamp applies only to the tab it was taken on (or the
   // default tab when the link has none), and only until the user switches.
   const linkedWindowId = initialWindowId ?? defaultWindowId;

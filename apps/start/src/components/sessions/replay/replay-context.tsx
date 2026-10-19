@@ -72,6 +72,10 @@ interface ReplayContextValue {
   initialEvents: ReplayEvent[] | null;
   // Set when the recording could not be loaded at all.
   loadError: string | null;
+  // Set when loading MORE of an already-playing recording keeps failing
+  // (shown instead of an endless "Buffering..."); retryLoad retries now.
+  bufferError: string | null;
+  retryLoad: () => void;
   // Blocks of this window and how many are in the player (diagnostics).
   blockProgress: { total: number; applied: number };
   // Playback controls
@@ -104,7 +108,7 @@ const TICK_INTERVAL_MS = 250;
 /** Failed block requests retry with exponential backoff, capped. */
 const RETRY_BASE_MS = 1_000;
 const RETRY_MAX_MS = 15_000;
-/** Initial load failures before the player shows an error. */
+/** Load failures (initial, or later while playing) before showing an error. */
 const INITIAL_FAILURES_BEFORE_ERROR = 3;
 /** Resuming from a stall with skip-inactivity on jumps idle air longer than
  * this (rrweb's own inactivity threshold) instead of waiting through it: the
@@ -114,19 +118,33 @@ const STALL_SKIP_GAP_MS = 10_000;
 /**
  * Insert sorted events into the rrweb replayer's own event list WITHOUT
  * casting them (its addEvent() casts anything older than the baseline onto
- * the current DOM). A following goto() recomputes every event's delay and
- * rebuilds from the nearest FullSnapshot. Returns false if the internal list
- * isn't reachable, so callers can fall back to addEvent().
+ * the current DOM), and forget rrweb's last played event. rrweb's play()
+ * skips every event at or before the last played one when moving forward,
+ * so without the reset a following goto(current) would never draw the
+ * inserted events behind the playhead. With it, that one goto rebuilds from
+ * the nearest FullSnapshot and replays everything in order. Returns false if
+ * the internal state isn't reachable, so callers can fall back to addEvent().
  */
 function insertEventsWithoutCasting(
   player: ReplayPlayerInstance,
   events: ReplayEvent[],
 ): boolean {
   const replayer = player.getReplayer() as unknown as {
-    service?: { state?: { context?: { events?: { timestamp: number }[] } } };
+    service?: {
+      state?: {
+        context?: {
+          events?: { timestamp: number }[];
+          lastPlayedEvent?: unknown;
+        };
+      };
+    };
   };
-  const list = replayer?.service?.state?.context?.events;
-  if (!Array.isArray(list)) return false;
+  const context = replayer?.service?.state?.context;
+  const list = context?.events;
+  if (!context || !Array.isArray(list) || !('lastPlayedEvent' in context)) {
+    return false;
+  }
+  context.lastPlayedEvent = null;
   for (const ev of events) {
     // Binary search: insert after any event with the same timestamp.
     let lo = 0;
@@ -287,6 +305,7 @@ export function ReplayProvider({
     null,
   );
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [bufferError, setBufferError] = useState<string | null>(null);
   const [blockProgress, setBlockProgress] = useState({ total: 0, applied: 0 });
   const [segments, setSegmentsState] = useState<
     { startMs: number; endMs: number }[] | null
@@ -444,6 +463,27 @@ export function ReplayProvider({
   }, []);
 
   /**
+   * Events older than rrweb's first event move its time base (offsets are
+   * relative to events[0]), but our offsets are relative to startTimeRef.
+   * Re-read the start and shift our offsets so the playhead keeps its wall
+   * position. Returns the shift (ms added to offsets), 0 if unchanged.
+   */
+  const rebaseIfStartMoved = useCallback(
+    (player: ReplayPlayerInstance): number => {
+      const base = startTimeRef.current;
+      const start = player.getMetaData().startTime;
+      if (base == null || !Number.isFinite(start) || start >= base) return 0;
+      const shift = base - start;
+      startTimeRef.current = start;
+      currentTimeRef.current += shift;
+      if (pendingSeekRef.current) pendingSeekRef.current.offsetMs += shift;
+      setStartTime(start);
+      return shift;
+    },
+    [],
+  );
+
+  /**
    * Add events (sorted) to rrweb without letting it cast any of them onto the
    * DOM currently shown. Events behind the playhead/baseline (a seek backfill,
    * a late duplicate block) would be applied synchronously out of context, so
@@ -471,7 +511,11 @@ export function ReplayProvider({
       // FullSnapshot in timestamp order. PostHog likewise never casts
       // backfilled data into a running replayer.
       if (unsafe && insertEventsWithoutCasting(player, events)) {
+        rebaseIfStartMoved(player);
         if (pendingSeekRef.current === null) {
+          // One rebuild from the nearest FullSnapshot (the insert reset
+          // rrweb's last played event). Two back-to-back gotos raced rrweb's
+          // snapshot rebuild ("Only one doctype allowed").
           gotoOffset(currentTimeRef.current, isPlayingRef.current);
         }
         return;
@@ -490,6 +534,10 @@ export function ReplayProvider({
       // rrweb applies addEvent() on a microtask: let them land before any
       // goto, or the goto would rebuild without them.
       await nextMacrotask();
+      if (playerRef.current === player) {
+        const shift = rebaseIfStartMoved(player);
+        if (restore) restore.offset += shift;
+      }
       if (
         restore &&
         playerRef.current === player &&
@@ -499,7 +547,7 @@ export function ReplayProvider({
         gotoOffset(restore.offset, restore.play);
       }
     },
-    [gotoOffset],
+    [gotoOffset, rebaseIfStartMoved],
   );
 
   /** Hand every loaded-but-not-applied block to rrweb (serialized). */
@@ -652,6 +700,7 @@ export function ReplayProvider({
           }
           loop.failures = 0;
           setLoadError(null);
+          setBufferError(null);
         })
         .catch((error) => {
           store.markUnloadedKeys(keys);
@@ -666,11 +715,14 @@ export function ReplayProvider({
             onStaleRef.current?.();
           }
           loop.failures += 1;
-          if (
-            !initialRef.current &&
-            loop.failures >= INITIAL_FAILURES_BEFORE_ERROR
-          ) {
-            setLoadError('Could not load this recording. Retrying...');
+          if (loop.failures >= INITIAL_FAILURES_BEFORE_ERROR) {
+            if (!initialRef.current) {
+              setLoadError('Could not load this recording. Retrying...');
+            } else {
+              setBufferError(
+                "Couldn't load the next part of this recording. Retrying...",
+              );
+            }
           }
           const delay = Math.min(
             RETRY_MAX_MS,
@@ -802,6 +854,16 @@ export function ReplayProvider({
       tickRef.current();
     });
   }, [subscribeToCurrentTime]);
+
+  /** Retry a failing load now instead of waiting out the backoff. */
+  const retryLoad = useCallback(() => {
+    const loop = loopRef.current;
+    if (loop.retryTimer) clearTimeout(loop.retryTimer);
+    loop.retryTimer = null;
+    loop.retryAt = 0;
+    setBufferError(null);
+    tickRef.current();
+  }, []);
 
   const onPlayerReady = useCallback(
     (player: ReplayPlayerInstance, playerStartTime: number) => {
@@ -985,6 +1047,8 @@ export function ReplayProvider({
     isBuffering,
     initialEvents,
     loadError,
+    bufferError,
+    retryLoad,
     blockProgress,
     play,
     pause,

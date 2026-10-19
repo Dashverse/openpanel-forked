@@ -84,6 +84,8 @@ export function ReplayPlayer({
     play,
     pause,
     isBuffering,
+    bufferError,
+    retryLoad,
   } = useReplayContext();
   const [importError, setImportError] = useState(false);
 
@@ -319,7 +321,24 @@ export function ReplayPlayer({
       style={!fill && boxHeight ? { height: `${boxHeight}px` } : undefined}
     >
       <div ref={containerRef} className="flex items-center justify-center" />
-      {isBuffering && (
+      {isBuffering && bufferError && (
+        <div
+          role="alert"
+          className="absolute inset-0 z-10 flex items-center justify-center"
+        >
+          <span className="flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white shadow">
+            {bufferError}
+            <button
+              type="button"
+              onClick={retryLoad}
+              className="rounded-full bg-white/15 px-2 py-0.5 font-medium hover:bg-white/25"
+            >
+              Retry
+            </button>
+          </span>
+        </div>
+      )}
+      {isBuffering && !bufferError && (
         <div
           role="status"
           className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"

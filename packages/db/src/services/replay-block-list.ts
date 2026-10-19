@@ -65,15 +65,21 @@ export const REPLAY_BLOCK_LIST_TTL_MS = 5_000;
  */
 const REPLAY_BLOCK_DATA_TTL_MS = 60_000;
 const REPLAY_BLOCK_CACHE_MAX = 200;
-/** Chunks per legacy pseudo-block (CH hot table: cheap range reads). */
-const LEGACY_CH_CHUNKS_PER_BLOCK = positiveIntEnv(
-  'REPLAY_LEGACY_BLOCK_CHUNKS_CH',
-  2,
-);
+/**
+ * Chunks per legacy pseudo-block on the CH hot table: exactly one, not
+ * configurable. A page's key is its first chunk, and the client keeps an
+ * already-applied key as is on a re-list. A live tab's pages grow (the last
+ * page goes 1 → 2 chunks) and a late chunk shifts page boundaries, so a
+ * multi-chunk page changes content under an unchanged key and the new chunk is
+ * never fetched. One chunk per page makes every key immutable: new chunks are
+ * always new keys. (CH range reads are cheap, so the extra blocks cost little.)
+ */
+const LEGACY_CH_CHUNKS_PER_BLOCK = 1;
 /**
  * Chunks per pseudo-block for the cold archive: every archive read downloads
  * the whole session file, so fewer, bigger pages (10 blocks = the old 50-chunk
- * page).
+ * page). Archived sessions are finished and immutable, so multi-chunk pages
+ * are safe here (see LEGACY_CH_CHUNKS_PER_BLOCK).
  */
 const LEGACY_BLOB_CHUNKS_PER_BLOCK = positiveIntEnv(
   'REPLAY_LEGACY_BLOCK_CHUNKS_BLOB',
@@ -555,30 +561,42 @@ export async function prepareReplayBlockData(input: {
     key: k,
     page: internal.pages.get(`${input.windowId}\u0000${k}`)!,
   }));
+  // Read the chunks BEFORE streaming starts (run holds them all anyway): a
+  // listed chunk that is gone now (CH delete cron / TTL between the list and
+  // this read) must fail with 409 so the client re-lists. Sent without it,
+  // the client would mark the block loaded and never fetch it again.
+  const lines = await readLegacyReplayChunkLines(
+    internal.src,
+    input.sessionId,
+    input.projectId,
+    input.windowId,
+    pages.flatMap(({ page }) =>
+      page.chunks.map((c) => ({
+        chunkIndex: c.chunkIndex,
+        startedMs: c.startedMs,
+      })),
+    ),
+    { signal },
+  );
+  for (const { page } of pages) {
+    for (const c of page.chunks) {
+      if (!lines.has(legacyChunkId(c.chunkIndex, c.startedMs))) {
+        throw new ReplayBlockRequestError(
+          409,
+          'a listed chunk is no longer stored; reload the block list',
+        );
+      }
+    }
+  }
   return {
     source: internal.kind,
     blockCount: pages.length,
     run: async (write) => {
-      const lines = await readLegacyReplayChunkLines(
-        internal.src,
-        input.sessionId,
-        input.projectId,
-        input.windowId,
-        pages.flatMap(({ page }) =>
-          page.chunks.map((c) => ({
-            chunkIndex: c.chunkIndex,
-            startedMs: c.startedMs,
-          })),
-        ),
-        { signal },
-      );
       await write(encodeReplayFramesHeader());
       for (const { key, page } of pages) {
-        const blockLines: string[] = [];
-        for (const c of page.chunks) {
-          const line = lines.get(legacyChunkId(c.chunkIndex, c.startedMs));
-          if (line !== undefined) blockLines.push(line);
-        }
+        const blockLines = page.chunks.map(
+          (c) => lines.get(legacyChunkId(c.chunkIndex, c.startedMs))!,
+        );
         const data = compressReplayBlock(blockLines);
         await write(
           Buffer.concat([encodeReplayFramePrefix(key, data.length), data]),

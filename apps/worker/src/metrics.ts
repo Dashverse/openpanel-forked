@@ -245,6 +245,28 @@ register.registerMetric(replayBlocksErrorsTotal);
 register.registerMetric(replayBlocksFailClosedTotal);
 register.registerMetric(replayBlobOnlyChunksTotal);
 
+export const replayBlocksShadowSkippedTotal = new client.Counter({
+  name: 'replay_blocks_shadow_skipped_total',
+  help: 'Dual-write shadow block writes skipped because the batch deadline was nearly spent (sessions then serve from ClickHouse)',
+  labelNames: ['partition'],
+});
+
+export const replayBlocksSkippedChunksTotal = new client.Counter({
+  name: 'replay_blocks_skipped_chunks_total',
+  help: 'Session-replay chunk lines left out of blocks: not JSON or no parseable started_at',
+  labelNames: ['partition'],
+});
+
+export const replayKafkaBatchRetriesTotal = new client.Counter({
+  name: 'replay_kafka_batch_retries_total',
+  help: 'Failed session-replay batches whose partition was paused for a backoff before redelivery',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(replayBlocksShadowSkippedTotal);
+register.registerMetric(replayBlocksSkippedChunksTotal);
+register.registerMetric(replayKafkaBatchRetriesTotal);
+
 queues.forEach((queue) => {
   register.registerMetric(
     new client.Gauge({

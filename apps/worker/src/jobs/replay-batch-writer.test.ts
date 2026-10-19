@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   parseBlobOnlyProjectIds,
+  positiveIntEnv,
   replayLineProjectId,
+  replayRetryBackoffMs,
   writeReplayBatch,
 } from './replay-batch-writer';
 
@@ -166,5 +168,36 @@ describe('writeReplayBatch', () => {
     );
     expect(d.insertChunks).not.toHaveBeenCalled();
     expect(d.writeBlocks).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the shadow write when the batch deadline is nearly spent', async () => {
+    const { d, chCalls, blockCalls } = deps();
+    const skipped = vi.fn();
+    const res = await writeReplayBatch(
+      batch,
+      { mode: 'dual', blobOnlyProjectIds: new Set(['frameo']) },
+      { ...d, shadowBudgetOk: () => false, onShadowSkipped: skipped },
+    );
+    // Blob-only write + CH insert still happen; only the optional shadow goes.
+    expect(blockCalls).toEqual([['frameo', 'frameo']]);
+    expect(chCalls).toHaveLength(1);
+    expect(skipped).toHaveBeenCalledTimes(1);
+    expect(res.blocks).toBe(1);
+  });
+});
+
+describe('retry helpers', () => {
+  it('backs off 1s, 2s, 4s ... capped', () => {
+    expect([1, 2, 3, 4, 6, 50].map((a) => replayRetryBackoffMs(a))).toEqual([
+      1000, 2000, 4000, 8000, 30_000, 30_000,
+    ]);
+    expect(replayRetryBackoffMs(0)).toBe(1000);
+    expect(replayRetryBackoffMs(9, 5000)).toBe(5000);
+  });
+  it('positiveIntEnv rejects NaN / non-positive', () => {
+    expect(positiveIntEnv(undefined, 25)).toBe(25);
+    expect(positiveIntEnv('abc', 25)).toBe(25);
+    expect(positiveIntEnv('0', 25)).toBe(25);
+    expect(positiveIntEnv('40000', 25)).toBe(40_000);
   });
 });

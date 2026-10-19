@@ -6,7 +6,8 @@
   "exports": {
     ".": "./index.ts",
     "./server": "./server/index.ts",
-    "./server/get-client-ip": "./server/get-client-ip.ts"
+    "./server/get-client-ip": "./server/get-client-ip.ts",
+    "./replay-frames": "./src/replay-frames.ts"
   },
   "scripts": {
     "test": "vitest",

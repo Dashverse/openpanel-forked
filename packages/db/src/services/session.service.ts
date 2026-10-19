@@ -728,6 +728,7 @@ export async function getSessionList({
         `project_id = ${sqlstring.escape(projectId)}
                   AND started_at > now() - INTERVAL ${dateIntervalInDays + 1} DAY
                   AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
+        dateIntervalInDays + 1,
       );
       rows = await chQuery<
         IClickhouseSession & { replay_ms: string; replay_tabs: string }
@@ -932,6 +933,7 @@ export async function getSessionsCount({
       `project_id = ${sqlstring.escape(projectId)}
                 AND started_at > now() - INTERVAL ${days + 1} DAY
                 AND session_id IN (SELECT id FROM ${TABLE_NAMES.sessions} ${where})`,
+      days + 1,
     );
     const rows = await chQuery<{ count: number }>(
       `SELECT count() AS count FROM (
@@ -1239,62 +1241,92 @@ async function legacyHasOlderReplay(
 }
 
 /**
- * Completeness guard (c): while ClickHouse still holds this session, does any
- * tab have more events in CH (each chunk counted once) than in the blocks?
- * That catches what (b) cannot: chunks missing AFTER the blocks' first chunk
- * (a failed dual-write shadow append mid-session) and a tab that exists only
- * in CH. A tab whose refs all carry `chunk_keys` compares DISTINCT chunks, so
- * a duplicated block (redelivered batch) can't mask a missing chunk; refs from
- * before migration 26 fall back to summed events_count, where a duplicate can.
+ * Completeness guard (c): while ClickHouse still holds this session, is there a
+ * chunk in CH that the blocks don't have? That catches what (b) cannot: chunks
+ * missing AFTER the blocks' first chunk (a failed dual-write shadow append
+ * mid-session) and a tab that exists only in CH.
+ *
+ * - A tab whose refs all carry `chunk_keys` compares SETS of
+ *   (chunk_index, started_ms): duplicated blocks (redelivered batches) can't
+ *   mask a missing chunk, and counts can't cancel out. Refs from before
+ *   migration 26 fall back to summed events_count, where a duplicate can.
+ * - In flight is not missing: dual-write inserts CH chunks before the shadow
+ *   block write of the same batch, so a live tab briefly has CH chunks the
+ *   blocks don't. A CH chunk newer than the tab's newest block AND younger
+ *   than REPLAY_GUARD_INFLIGHT_GRACE_MS is ignored; past the grace a missing
+ *   tail is a real gap. Without this a live session flipped to legacy for a
+ *   cache period every batch.
+ *
  * Reads key columns + events_count only, on the (project_id, session_id)
  * sort-key prefix. Sessions CH has already dropped are not checked here (the
- * archive index has no counts).
+ * archive index has no per-chunk data).
  */
-async function chHasMoreEventsThanBlocks(
+const REPLAY_GUARD_INFLIGHT_GRACE_MS = 2 * 60 * 1000;
+
+async function chHasChunksMissingFromBlocks(
   sessionId: string,
   projectId: string,
   refs: ReplayBlockRef[],
+  nowMs: number = Date.now(),
 ): Promise<boolean> {
   const rows = await chQuery<{
     window_id: string;
-    chunks: string;
-    events: string;
+    ms: string;
+    chunk_index: number;
+    ev: number;
   }>(
-    `SELECT window_id, toString(count()) AS chunks, toString(sum(ev)) AS events
-     FROM (
-       SELECT window_id, chunk_index, started_at, any(events_count) AS ev
-       FROM ${TABLE_NAMES.session_replay_chunks}
-       WHERE project_id = ${sqlstring.escape(projectId)}
-         AND session_id = ${sqlstring.escape(sessionId)}
-       GROUP BY window_id, chunk_index, started_at
-     )
-     GROUP BY window_id`,
+    `SELECT window_id, chunk_index,
+            toString(toUnixTimestamp64Milli(started_at)) AS ms,
+            any(events_count) AS ev
+     FROM ${TABLE_NAMES.session_replay_chunks}
+     WHERE project_id = ${sqlstring.escape(projectId)}
+       AND session_id = ${sqlstring.escape(sessionId)}
+     GROUP BY window_id, chunk_index, started_at`,
   );
   if (rows.length === 0) return false;
+
   const byWindow = new Map<
     string,
-    { keys: Set<string>; allKeyed: boolean; events: number }
+    { keys: Set<string>; allKeyed: boolean; events: number; lastMs: number }
   >();
   for (const r of refs) {
     const w = byWindow.get(r.windowId) ?? {
       keys: new Set<string>(),
       allKeyed: true,
       events: 0,
+      lastMs: Number.NEGATIVE_INFINITY,
     };
     w.events += r.eventsCount;
+    w.lastMs = Math.max(w.lastMs, r.lastStartedMs);
     if (r.chunkKeys.length === 0) w.allKeyed = false;
     for (const [chunkIndex, startedMs] of r.chunkKeys) {
       w.keys.add(`${chunkIndex}:${startedMs}`);
     }
     byWindow.set(r.windowId, w);
   }
-  return rows.some((row) => {
+
+  const chEvents = new Map<string, number>();
+  for (const row of rows) {
+    const startedMs = Number(row.ms);
     const w = byWindow.get(row.window_id);
-    if (!w) return true; // tab only in CH
-    return w.allKeyed
-      ? Number(row.chunks) > w.keys.size
-      : Number(row.events) > w.events;
-  });
+    const inFlight =
+      startedMs > (w?.lastMs ?? Number.NEGATIVE_INFINITY) &&
+      nowMs - startedMs < REPLAY_GUARD_INFLIGHT_GRACE_MS;
+    if (inFlight) continue;
+    if (!w) return true; // a tab only CH has
+    if (w.allKeyed) {
+      if (!w.keys.has(`${Number(row.chunk_index)}:${startedMs}`)) return true;
+    } else {
+      chEvents.set(
+        row.window_id,
+        (chEvents.get(row.window_id) ?? 0) + Number(row.ev),
+      );
+    }
+  }
+  for (const [windowId, events] of chEvents) {
+    if (events > byWindow.get(windowId)!.events) return true;
+  }
+  return false;
 }
 
 /**
@@ -1325,23 +1357,35 @@ async function blocksAreComplete(
 
   // (b) legacy holds chunks older than the blocks: the blocks are only the
   // tail of a resumed session, legacy.
-  // (c) CH holds more events for some tab than the blocks do: a gap inside
-  // the session (failed shadow write) or a CH-only tab, legacy.
+  // (c) CH holds a chunk the blocks don't: a gap inside the session (failed
+  // shadow write) or a CH-only tab, legacy.
+  // A guard query failure is not cached and is rethrown: decideReplayServing
+  // then serves legacy only when legacy actually has the session.
   let older: boolean;
   try {
     older =
       (await legacyHasOlderReplay(sessionId, projectId, blocksFirstMs)) ||
-      (await chHasMoreEventsThanBlocks(sessionId, projectId, refs));
+      (await chHasChunksMissingFromBlocks(sessionId, projectId, refs));
   } catch (error) {
     if (isReplayAbortError(error, signal)) throw error;
-    replayLogger.error(
-      'replay blocks completeness guard failed; serving legacy',
-      { sessionId, projectId, error },
-    );
-    return false;
+    replayLogger.error('replay blocks completeness guard failed', {
+      sessionId,
+      projectId,
+      error,
+    });
+    throw error;
   }
   cacheGuard(key, !older);
   return !older;
+}
+
+/** A transient failure deciding where a replay lives (retry, not "none"). */
+export class ReplayTemporarilyUnavailableError extends Error {
+  readonly status = 503;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReplayTemporarilyUnavailableError';
+  }
 }
 
 /**
@@ -1356,8 +1400,9 @@ export async function decideReplayServing(
   opts: { signal?: AbortSignal | null } = {},
 ): Promise<ReplayServingDecision> {
   if (isReplayBlocksServingEnabled(projectId)) {
+    let refs: ReplayBlockRef[] | null = null;
     try {
-      const refs = await fetchReplayBlockRefs(projectId, sessionId);
+      refs = await fetchReplayBlockRefs(projectId, sessionId);
       if (await blocksAreComplete(sessionId, projectId, refs, opts.signal)) {
         return { kind: 'blocks', refs };
       }
@@ -1368,6 +1413,19 @@ export async function decideReplayServing(
         projectId,
         error,
       });
+      // Legacy is only a fallback if it has the session. A Blob-only
+      // project's session (or one CH has dropped) has nothing there, and
+      // serving that would show "no replay" for a recording that exists:
+      // fail retryably instead. (Archived pre-blocks sessions have no refs,
+      // so they still reach the archive below.)
+      if (
+        (refs === null || refs.length > 0) &&
+        !(await chHasSession(sessionId, projectId))
+      ) {
+        throw new ReplayTemporarilyUnavailableError(
+          'replay storage check failed; retry',
+        );
+      }
     }
   }
   const legacy = await resolveReplaySource(sessionId, projectId);
@@ -1878,6 +1936,13 @@ const replayActiveMsExpr = `greatest(0,
 async function replayDurationRowsSource(
   projectId: string,
   where: string,
+  /**
+   * The lookback `where` applies to chunk started_at. On the blocks side
+   * started_at only exists after the ARRAY JOIN, so it can't prune partitions;
+   * the same bound on the real first_started_at column (one day of margin: a
+   * block's first chunk can precede its others) lets ClickHouse skip them.
+   */
+  sinceDays?: number,
 ): Promise<{ from: string; where: string }> {
   if (
     !isReplayBlocksServingEnabled(projectId) ||
@@ -1898,7 +1963,12 @@ async function replayDurationRowsSource(
              toBool(tupleElement(k, 4)) AS is_full_snapshot
       FROM ${TABLE_NAMES.session_replay_blocks}
       ARRAY JOIN chunk_keys AS k
-      WHERE ${where}
+      WHERE ${where}${
+        sinceDays !== undefined
+          ? `
+        AND first_started_at > now() - INTERVAL ${Math.floor(sinceDays) + 1} DAY`
+          : ''
+      }
     )`,
     where: '1',
   };

@@ -155,6 +155,8 @@ export interface ReplayLineWithOffset {
 export interface WriteBlocksResult {
   blocks: number;
   bytes: number;
+  /** Lines skipped: not JSON, or no parseable started_at (unplayable). */
+  skipped?: number;
 }
 
 /** Run `fn` over `items` with at most `limit` in flight; rejects on first error. */
@@ -187,7 +189,7 @@ export async function writeSessionReplayBlocks(
   items: ReplayLineWithOffset[],
   opts: { abortSignal?: AbortSignal } = {},
 ): Promise<WriteBlocksResult> {
-  if (items.length === 0) return { blocks: 0, bytes: 0 };
+  if (items.length === 0) return { blocks: 0, bytes: 0, skipped: 0 };
 
   // Group by session, parsing each line once. (Parsing the whole line includes
   // the fat `payload`; acceptable on the worker — see plan note on carrying
@@ -197,15 +199,29 @@ export async function writeSessionReplayBlocks(
     sessionId: string;
     windowId: string;
     firstOffset: number;
-    chunks: { chunk: IClickhouseSessionReplayChunk; line: string }[];
+    chunks: {
+      chunk: IClickhouseSessionReplayChunk;
+      line: string;
+      startedMs: number;
+    }[];
   }
   const groups = new Map<string, Group>();
+  let skipped = 0;
   for (const { line, offset } of items) {
     let chunk: IClickhouseSessionReplayChunk;
     try {
       chunk = JSON.parse(line) as IClickhouseSessionReplayChunk;
     } catch {
+      skipped++;
       continue; // malformed; CH path logs/counts it separately
+    }
+    // No usable start time = no place on the timeline (and it used to throw in
+    // the sort below, failing the batch on every redelivery). /track rejects
+    // these now; this catches lines already in Kafka.
+    const startedMs = parseReplayTimestampMs(chunk.started_at);
+    if (!Number.isFinite(startedMs)) {
+      skipped++;
+      continue;
     }
     // One block per (project, session, window): a session_id is shared across
     // tabs, and each block's ref records a single window_id.
@@ -222,7 +238,7 @@ export async function writeSessionReplayBlocks(
       groups.set(key, g);
     }
     g.firstOffset = Math.min(g.firstOffset, offset);
-    g.chunks.push({ chunk, line });
+    g.chunks.push({ chunk, line, startedMs });
   }
 
   const refs = await mapWithConcurrency(
@@ -233,15 +249,23 @@ export async function writeSessionReplayBlocks(
       // contract the reader re-derives its synthetic seq from.
       g.chunks.sort(
         (a, b) =>
-          a.chunk.started_at.localeCompare(b.chunk.started_at) ||
-          a.chunk.chunk_index - b.chunk.chunk_index,
+          a.startedMs - b.startedMs ||
+          (Number(a.chunk.chunk_index) || 0) -
+            (Number(b.chunk.chunk_index) || 0),
       );
-      const first = g.chunks[0]!.chunk;
-      const last = g.chunks[g.chunks.length - 1]!.chunk;
+      const first = g.chunks[0]!;
+      const last = g.chunks[g.chunks.length - 1]!;
+      const firstMs = first.startedMs;
+      // The chunk's own string as written to CH chunks (same parse there);
+      // a non-string (numeric seconds from an old line) as ISO.
+      const tsOf = (c: (typeof g.chunks)[number]) =>
+        typeof c.chunk.started_at === 'string'
+          ? c.chunk.started_at
+          : new Date(c.startedMs).toISOString();
       const blobPath = replayBlockBlobPath(
         g.projectId,
         g.sessionId,
-        first.started_at,
+        new Date(firstMs),
       );
       const block = compressReplayBlock(g.chunks.map((c) => c.line));
       const { byteStart, byteEnd } = await appendReplayBlock(blobPath, block, {
@@ -251,14 +275,20 @@ export async function writeSessionReplayBlocks(
       let chunkLo = Number.POSITIVE_INFINITY;
       let chunkHi = 0;
       let events = 0;
-      const chunkKeys: ReplayBlockChunkKey[] = [];
+      // All or nothing: the reader trusts a non-empty chunk_keys as the
+      // block's full index, so one unkeyable chunk means write [] and let the
+      // reader decode the block instead.
+      let chunkKeys: ReplayBlockChunkKey[] = [];
+      let allKeyed = true;
       for (const { chunk } of g.chunks) {
         chunkLo = Math.min(chunkLo, chunk.chunk_index);
         chunkHi = Math.max(chunkHi, chunk.chunk_index);
         events += chunk.events_count ?? 0;
         const key = replayChunkKeyOf(chunk);
         if (key) chunkKeys.push(key);
+        else allKeyed = false;
       }
+      if (!allKeyed) chunkKeys = [];
 
       return {
         project_id: g.projectId,
@@ -270,8 +300,8 @@ export async function writeSessionReplayBlocks(
         byte_end: byteEnd,
         chunk_lo: Number.isFinite(chunkLo) ? chunkLo : 0,
         chunk_hi: chunkHi,
-        first_started_at: first.started_at,
-        last_started_at: last.started_at,
+        first_started_at: tsOf(first),
+        last_started_at: tsOf(last),
         events_count: events,
         size_bytes: block.length,
         codec: 'zstd',
@@ -284,5 +314,6 @@ export async function writeSessionReplayBlocks(
   return {
     blocks: refs.length,
     bytes: refs.reduce((sum, r) => sum + r.size_bytes, 0),
+    skipped,
   };
 }

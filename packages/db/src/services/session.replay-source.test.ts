@@ -95,18 +95,17 @@ const chQuery = vi.fn(async (sql: string) => {
     return chOlder || archOlder ? [{ older: 1 }] : [];
   }
   if (sql.includes('any(events_count) AS ev')) {
-    // completeness guard (c): per-window events, each chunk counted once
+    // completeness guard (c): one row per distinct CH chunk
     if (failGuard) throw new Error('guard down');
-    const perWindow = new Map<string, Map<string, number>>();
+    const seen = new Map<string, Chunk>();
     for (const c of scopeOf(sql)) {
-      const w = perWindow.get(c.window_id) ?? new Map<string, number>();
-      w.set(`${c.chunk_index}:${c.started_at}`, c.events_count);
-      perWindow.set(c.window_id, w);
+      seen.set(`${c.window_id}:${c.chunk_index}:${c.started_at}`, c);
     }
-    return [...perWindow].map(([window_id, chunks]) => ({
-      window_id,
-      chunks: String(chunks.size),
-      events: String([...chunks.values()].reduce((a, b) => a + b, 0)),
+    return [...seen.values()].map((c) => ({
+      window_id: c.window_id,
+      chunk_index: c.chunk_index,
+      ms: String(ms(c.started_at)),
+      ev: c.events_count,
     }));
   }
   if (sql.includes('SELECT 1 AS one FROM session_replay_chunks')) {
@@ -521,6 +520,43 @@ describe('replay source resolution', () => {
     addBlock([cs[0]!, cs[1]!], 1, '2026-10-11T08:00:02Z');
     addBlock([cs[1]!], 2, '2026-10-11T08:00:03Z');
     expect((await svc.getSessionReplayMeta('mask', 'p1')).source).toBe('ch');
+  });
+
+  it('live tab: CH chunks newer than the blocks and still in flight are not a gap → blocks', async () => {
+    const now = Date.now();
+    const iso = (t: number) => new Date(t).toISOString();
+    const cs = [
+      mkChunk('p1', 'live', 'w', 0, iso(now - 30_000), true),
+      mkChunk('p1', 'live', 'w', 1, iso(now - 20_000)),
+      mkChunk('p1', 'live', 'w', 2, iso(now - 10_000)), // CH insert done, shadow not yet
+    ];
+    const tab = mkChunk('p1', 'live', 'w2', 0, iso(now - 5_000), true); // new tab, first batch in flight
+    chChunks.push(...cs, tab);
+    archiveRows.push({ project_id: 'p1', session_id: 'live', first_ms: now - 30_000 });
+    addBlock([cs[0]!, cs[1]!], 1, iso(now - 15_000));
+    expect((await svc.getSessionReplayMeta('live', 'p1')).source).toBe('blocks');
+  });
+
+  it('a missing tail chunk past the in-flight grace is a gap → legacy', async () => {
+    const cs = [
+      mkChunk('p1', 'tail', 'w', 0, '2026-10-11T08:00:00.000Z', true),
+      mkChunk('p1', 'tail', 'w', 1, '2026-10-11T08:00:01.000Z'),
+    ];
+    chChunks.push(...cs);
+    addBlock([cs[0]!], 1, '2026-10-11T08:00:01Z');
+    expect((await svc.getSessionReplayMeta('tail', 'p1')).source).toBe('ch');
+  });
+
+  it('guard error on a session CH no longer holds → retryable error, not an empty legacy replay', async () => {
+    const c = mkChunk('p1', 'bo', 'w', 0, '2026-10-11T08:00:00.000Z', true);
+    addBlock([c], 1, '2026-10-11T08:00:01Z'); // Blob-only: refs, no CH rows
+    failGuard = true;
+    await expect(svc.getSessionReplayMeta('bo', 'p1')).rejects.toMatchObject({
+      name: 'ReplayTemporarilyUnavailableError',
+      status: 503,
+    });
+    failGuard = false;
+    expect((await svc.getSessionReplayMeta('bo', 'p1')).source).toBe('blocks');
   });
 
   it('guard query error → legacy (fail safe), not cached', async () => {

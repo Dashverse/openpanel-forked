@@ -83,13 +83,28 @@ export async function getReplayBlocks(
             return reply.status(error.status).send({ error: error.message });
           }
           if (isReplayAbortError(error, abort.signal)) {
+            // The client is gone: nothing to send, but end the response so
+            // Fastify doesn't wait on a reply that is never sent.
+            reply.raw.destroy();
             return reply;
           }
           throw error;
         }
 
         const stream = new PassThrough();
+        const abortedWriteError = () => {
+          const e = new Error('replay blocks client went away');
+          e.name = 'AbortError';
+          return e;
+        };
         const write = (bytes: Uint8Array): void | Promise<void> => {
+          // Client already gone: 'close'/'abort' have fired, so a wait for
+          // them below would never resolve and `run` would sit holding its
+          // in-flight block reads. Fail fast; the catch below treats it as
+          // an abort.
+          if (abort.signal.aborted || stream.destroyed) {
+            throw abortedWriteError();
+          }
           if (stream.write(bytes)) return;
           return new Promise<void>((resolve) => {
             const done = () => {

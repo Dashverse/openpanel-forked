@@ -1,4 +1,4 @@
-import { decodeReplayFrames } from '@openpanel/common';
+import { decodeReplayFrames } from '@openpanel/common/replay-frames';
 
 /**
  * Decoding of the replay block data endpoint (GET /replay/blocks), shared by

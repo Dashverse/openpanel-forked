@@ -148,13 +148,33 @@ describe('writeSessionReplayBlocks', () => {
   });
 
   it('skips malformed lines and writes nothing for an empty batch', async () => {
-    expect(await writeSessionReplayBlocks([])).toEqual({ blocks: 0, bytes: 0 });
+    expect(await writeSessionReplayBlocks([])).toEqual({
+      blocks: 0,
+      bytes: 0,
+      skipped: 0,
+    });
     const res = await writeSessionReplayBlocks([
       { line: 'not json', offset: 1 },
       { line: chunk('A', 0, '2026-10-01 10:00:00.000'), offset: 2 },
     ]);
     expect(res.blocks).toBe(1);
     expect(inserted[0].block_index).toBe(2);
+  });
+
+  it('skips chunks without a parseable started_at instead of throwing', async () => {
+    const res = await writeSessionReplayBlocks([
+      { line: chunk('A', 1, '2026-10-01 10:00:01.000'), offset: 1 },
+      { line: chunk('A', 9, 'x', { started_at: 12 as unknown }), offset: 2 }, // numeric seconds: ok
+      { line: chunk('A', 7, 'garbage'), offset: 3 },
+      { line: chunk('A', 8, '', { started_at: undefined }), offset: 4 },
+      { line: chunk('A', 0, '2026-10-01 10:00:00.000'), offset: 5 },
+    ]);
+    expect(res).toMatchObject({ blocks: 1, skipped: 2 });
+    const ref = inserted[0];
+    // numeric 12s sorts first (1970); strings keep their own format
+    expect(ref.first_started_at).toBe('1970-01-01T00:00:12.000Z');
+    expect(ref.last_started_at).toBe('2026-10-01 10:00:01.000');
+    expect(ref.chunk_keys.map((k: number[]) => k[0])).toEqual([9, 0, 1]);
   });
 
   it('fills chunk_keys (block order) and tolerates a pre-migration table', async () => {

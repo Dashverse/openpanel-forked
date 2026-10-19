@@ -60,6 +60,19 @@ const chQuery = vi.fn(async (sql: string) => {
       : [];
   }
   if (sql.includes('replay_archive_index')) return [];
+  if (sql.includes('any(events_count) AS ev')) {
+    // completeness guard (c): one row per distinct CH chunk
+    const seen = new Map<string, Chunk>();
+    for (const c of chChunks.filter((x) => x.session_id === sessionOf(sql))) {
+      seen.set(`${c.window_id}|${c.chunk_index}|${c.started_ms}`, c);
+    }
+    return [...seen.values()].map((c) => ({
+      window_id: c.window_id,
+      chunk_index: c.chunk_index,
+      ms: String(c.started_ms),
+      ev: c.events_count,
+    }));
+  }
   if (sql.includes('GROUP BY window_id, chunk_index, started_at')) {
     const seen = new Set<string>();
     return chChunks
@@ -407,11 +420,33 @@ describe('getReplayBlockList', () => {
     addBlock(later, 200);
     const res = await list.getReplayBlockList('r', 'p1');
     expect(res.source).toBe('ch');
+    // CH pages are one chunk each: keys are immutable on a live tab.
     expect(res.blocks.map((b) => b.key)).toEqual([
       `c${T - 60_000}.0`,
+      `c${T}.1`,
       `c${T + 1000}.2`,
     ]);
-    expect(res.windows[0]!.blockCount).toBe(2);
+    expect(res.windows[0]!.blockCount).toBe(3);
+  });
+
+  it('live CH tab: a re-list only adds keys, never changes an existing one', async () => {
+    const first = [mk('lv', 'w', 0, -60_000, true), mk('lv', 'w', 1, -50_000)];
+    chChunks.push(...first);
+    const before = (await list.getReplayBlockList('lv', 'p1')).blocks;
+    await new Promise((r) => setTimeout(r, 0));
+    vi.useFakeTimers({ now: Date.now() + 10_000 }); // past the 5s list cache
+    chChunks.push(mk('lv', 'w', 2, -40_000), mk('lv', 'w', 3, -55_000)); // late + new
+    const after = (await list.getReplayBlockList('lv', 'p1')).blocks;
+    vi.useRealTimers();
+    const byKey = new Map(after.map((b) => [b.key, b]));
+    for (const b of before) {
+      expect(byKey.get(b.key)).toMatchObject({
+        startMs: b.startMs,
+        endMs: b.endMs,
+        eventsCount: b.eventsCount,
+      });
+    }
+    expect(after).toHaveLength(4);
   });
 
   it('not allow-listed project goes legacy without looking at refs', async () => {
@@ -475,6 +510,22 @@ describe('prepareReplayBlockData', () => {
     expect(frames.map((f) => f.key)).toEqual(blocks.map((x) => x.key));
     const lines = frames.flatMap((f) => linesOf(f.data));
     expect(lines).toEqual(cs.map(toLine));
+  });
+
+  it('legacy source: a listed chunk gone at read time → 409 before any byte', async () => {
+    const cs = [mk('gone', 'w', 0, 0, true), mk('gone', 'w', 1, 1000)];
+    chChunks.push(...cs);
+    const { blocks } = await list.getReplayBlockList('gone', 'p1');
+    chChunks.splice(chChunks.indexOf(cs[1]!), 1); // delete cron ran in between
+    await expect(
+      list.prepareReplayBlockData({
+        sessionId: 'gone',
+        projectId: 'p1',
+        windowId: 'w',
+        source: 'ch',
+        keys: blocks.map((x) => x.key),
+      }),
+    ).rejects.toMatchObject({ status: 409 });
   });
 
   it('rejects more than 100 blocks, unknown keys and a changed source', async () => {
