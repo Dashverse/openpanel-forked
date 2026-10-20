@@ -50,6 +50,21 @@ export function useColumns(): ColumnDef<
       },
     },
     {
+      accessorKey: 'expiresAt',
+      header: 'Status',
+      cell: ({ row }) => {
+        const expired = new Date(row.original.expiresAt) < new Date();
+        return expired ? (
+          <Badge variant="destructive">Expired</Badge>
+        ) : (
+          <Badge variant="secondary">Pending</Badge>
+        );
+      },
+      meta: {
+        label: 'Status',
+      },
+    },
+    {
       accessorKey: 'projectAccess',
       header: 'Access',
       cell: ({ row }) => {
@@ -62,6 +77,21 @@ export function useColumns(): ColumnDef<
     createActionColumn(({ row }) => {
       const trpc = useTRPC();
       const queryClient = useQueryClient();
+      const resend = useMutation(
+        trpc.organization.resendInvite.mutationOptions({
+          onSuccess() {
+            toast.success(`Invite re-sent to ${row.original.email}`);
+            queryClient.invalidateQueries(
+              trpc.organization.invitations.queryFilter({
+                organizationId: row.original.organizationId,
+              }),
+            );
+          },
+          onError(error) {
+            toast.error(error.message);
+          },
+        }),
+      );
       const revoke = useMutation(
         trpc.organization.revokeInvite.mutationOptions({
           onSuccess() {
@@ -80,6 +110,13 @@ export function useColumns(): ColumnDef<
 
       return (
         <>
+          <DropdownMenuItem
+            onClick={() => {
+              resend.mutate({ inviteId: row.original.id });
+            }}
+          >
+            Resend invite
+          </DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => {
               clipboard(

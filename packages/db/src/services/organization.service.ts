@@ -27,12 +27,26 @@ export async function getOrganizations(userId: string | null) {
         },
       },
     },
+    include: {
+      members: {
+        where: {
+          userId,
+        },
+        select: {
+          role: true,
+        },
+        take: 1,
+      },
+    },
     orderBy: {
       createdAt: 'desc',
     },
   });
 
-  return organizations;
+  return organizations.map(({ members, ...organization }) => ({
+    ...organization,
+    role: members[0]?.role ?? null,
+  }));
 }
 
 export function getOrganizationById(slug: string) {
@@ -159,8 +173,33 @@ export async function connectUserToOrganization({
     throw new Error('Invite expired');
   }
 
-  const member = await db.member.create({
-    data: {
+  // The invite id travels in a URL, so it is not proof of identity on its own:
+  // only the person it was addressed to may redeem it.
+  if (invite.email.toLowerCase() !== user.email.toLowerCase()) {
+    throw new Error('This invite was sent to a different email address');
+  }
+
+  const existingMember = await db.$primary().member.findUnique({
+    where: {
+      organizationId_userId: {
+        organizationId: invite.organizationId,
+        userId: user.id,
+      },
+    },
+  });
+
+  // Upsert against the (organizationId, userId) unique index so concurrent
+  // redemption cannot create duplicate memberships. An existing membership
+  // keeps its role.
+  const member = await db.member.upsert({
+    where: {
+      organizationId_userId: {
+        organizationId: invite.organizationId,
+        userId: user.id,
+      },
+    },
+    update: {},
+    create: {
       organizationId: invite.organizationId,
       userId: user.id,
       role: invite.role,
@@ -175,16 +214,33 @@ export async function connectUserToOrganization({
   });
 
   if (invite.projectAccess.length > 0) {
-    for (const projectId of invite.projectAccess) {
-      await getProjectAccess.clear({ userId: user.id, projectId });
-      await db.projectAccess.create({
-        data: {
-          projectId,
-          userId: user.id,
-          organizationId: invite.organizationId,
-          level: 'write',
-        },
-      });
+    const currentGrants = await db.$primary().projectAccess.findMany({
+      where: {
+        userId: user.id,
+        organizationId: invite.organizationId,
+      },
+    });
+
+    // No grants on an existing member means they already see every project;
+    // adding grants now would silently narrow their access.
+    const alreadyUnrestricted = !!existingMember && currentGrants.length === 0;
+
+    if (!alreadyUnrestricted) {
+      const granted = new Set(currentGrants.map((grant) => grant.projectId));
+      for (const projectId of invite.projectAccess) {
+        await getProjectAccess.clear({ userId: user.id, projectId });
+        if (granted.has(projectId)) {
+          continue;
+        }
+        await db.projectAccess.create({
+          data: {
+            projectId,
+            userId: user.id,
+            organizationId: invite.organizationId,
+            level: 'write',
+          },
+        });
+      }
     }
   }
 
@@ -195,6 +251,54 @@ export async function connectUserToOrganization({
   });
 
   return member;
+}
+
+/**
+ * Redeem every unexpired invite addressed to this user's email.
+ *
+ * Only call this for an email the identity provider has verified (Google);
+ * a self-typed email/password address proves nothing about ownership.
+ */
+export async function claimPendingInvitesForUser(user: User) {
+  const invites = await db.$primary().invite.findMany({
+    where: {
+      email: {
+        equals: user.email,
+        mode: 'insensitive',
+      },
+      expiresAt: {
+        gt: new Date(),
+      },
+    },
+  });
+
+  const claimed: string[] = [];
+  const failed: { inviteId: string; error: unknown }[] = [];
+  for (const invite of invites) {
+    try {
+      await connectUserToOrganization({ user, inviteId: invite.id });
+      claimed.push(invite.organizationId);
+    } catch (error) {
+      failed.push({ inviteId: invite.id, error });
+    }
+  }
+
+  return { claimed, failed };
+}
+
+export async function hasPendingInvite(email: string) {
+  const count = await db.$primary().invite.count({
+    where: {
+      email: {
+        equals: email,
+        mode: 'insensitive',
+      },
+      expiresAt: {
+        gt: new Date(),
+      },
+    },
+  });
+  return count > 0;
 }
 
 /**

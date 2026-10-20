@@ -2,13 +2,21 @@ import crypto from 'node:crypto';
 import type { z } from 'zod';
 
 import { stripTrailingSlash } from '@openpanel/common';
-import { db, getId, getOrganizationById, getUserById } from '@openpanel/db';
+import {
+  db,
+  getId,
+  getIsOrganizationCreationAllowed,
+  getOrganizationById,
+  getUserById,
+} from '@openpanel/db';
 import type { IServiceUser, ProjectType } from '@openpanel/db';
 import { zOnboardingProject } from '@openpanel/validation';
 
 import { hashPassword } from '@openpanel/common/server';
 import { addDays } from 'date-fns';
 import { addTrialEndingSoonJob, miscQueue } from '../../../queue';
+import { getOrganizationAccess } from '../access';
+import { TRPCAccessError } from '../errors';
 import { createTRPCRouter, protectedProcedure, publicProcedure } from '../trpc';
 
 async function createOrGetOrganization(
@@ -16,12 +24,25 @@ async function createOrGetOrganization(
   user: IServiceUser,
 ) {
   if (input.organizationId) {
+    const access = await getOrganizationAccess({
+      userId: user.id,
+      organizationId: input.organizationId,
+    });
+    if (access?.role !== 'org:admin') {
+      throw TRPCAccessError('Only organization admins can create projects');
+    }
     return await getOrganizationById(input.organizationId);
   }
 
   const TRIAL_DURATION_IN_DAYS = 30;
 
   if (input.organization) {
+    if (!(await getIsOrganizationCreationAllowed())) {
+      throw TRPCAccessError(
+        'Organizations cannot be created. Ask an admin to invite you.',
+      );
+    }
+
     const organization = await db.organization.create({
       data: {
         id: await getId('organization', input.organization),
@@ -47,6 +68,9 @@ async function createOrGetOrganization(
 }
 
 export const onboardingRouter = createTRPCRouter({
+  canCreateOrganization: protectedProcedure.query(async () => {
+    return getIsOrganizationCreationAllowed();
+  }),
   skipOnboardingCheck: publicProcedure.query(async ({ ctx }) => {
     if (!ctx.session.userId) {
       return { canSkip: false, url: null };

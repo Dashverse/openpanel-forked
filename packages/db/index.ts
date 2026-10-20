@@ -8,6 +8,7 @@ export * from './src/services/clients.service';
 export * from './src/services/dashboard.service';
 export * from './src/services/event.service';
 export * from './src/services/organization.service';
+export * from './src/services/registration.service';
 export * from './src/services/profile.service';
 export * from './src/services/project.service';
 export * from './src/services/reports.service';

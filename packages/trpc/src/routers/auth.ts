@@ -3,11 +3,13 @@ import {
   COOKIE_OPTIONS,
   createSession,
   deleteSessionTokenCookie,
+  describeAllowedDomains,
   generateSessionToken,
   github,
   google,
   hashPassword,
   invalidateSession,
+  isEmailDomainAllowed,
   setSessionTokenCookie,
   validateSessionToken,
   verifyPasswordHash,
@@ -16,6 +18,7 @@ import { generateSecureId } from '@openpanel/common/server';
 import {
   connectUserToOrganization,
   db,
+  getIsRegistrationAllowed,
   getShareOverviewById,
   getUserAccount,
 } from '@openpanel/db';
@@ -38,36 +41,28 @@ import {
 
 const zProvider = z.enum(['email', 'google', 'github']);
 
-async function getIsRegistrationAllowed(inviteId?: string | null) {
-  // ALLOW_REGISTRATION is always undefined in cloud
-  if (process.env.ALLOW_REGISTRATION === undefined) {
-    return true;
+function assertEmailDomainAllowed(email: string) {
+  if (!isEmailDomainAllowed(email)) {
+    throw TRPCAccessError(
+      `Only ${describeAllowedDomains()} accounts can use this dashboard`,
+    );
   }
+}
 
-  // Self-hosting logic
-  // 1. First user is always allowed
-  const count = await db.user.count();
-  if (count === 0) {
-    return true;
+/**
+ * Best-effort invite redemption for a user that just authenticated. A broken
+ * or expired invite must not block the sign-in itself.
+ */
+async function redeemInvite(
+  user: Parameters<typeof connectUserToOrganization>[0]['user'],
+  inviteId: string,
+  log: { warn: (obj: unknown, msg?: string) => void },
+) {
+  try {
+    await connectUserToOrganization({ user, inviteId });
+  } catch (error) {
+    log.warn({ error, inviteId, userId: user.id }, 'could not redeem invite');
   }
-
-  // 2. If there is an invite, check if it is valid
-  if (inviteId) {
-    if (process.env.ALLOW_INVITATION === 'false') {
-      return false;
-    }
-
-    const invite = await db.invite.findUnique({
-      where: {
-        id: inviteId,
-      },
-    });
-
-    return !!invite;
-  }
-
-  // 3. Otherwise, check if general registration is allowed
-  return process.env.ALLOW_REGISTRATION !== 'false';
 }
 
 export const authRouter = createTRPCRouter({
@@ -80,14 +75,9 @@ export const authRouter = createTRPCRouter({
   signInOAuth: publicProcedure
     .input(z.object({ provider: zProvider, inviteId: z.string().nullish() }))
     .mutation(async ({ input, ctx }) => {
-      const isRegistrationAllowed = await getIsRegistrationAllowed(
-        input.inviteId,
-      );
-
-      if (!isRegistrationAllowed) {
-        throw TRPCAccessError('Registrations are not allowed');
-      }
-
+      // Whether a *new* user may register is decided in the OAuth callback,
+      // once we know who they are. Checking here would also block returning
+      // users, since a sign-in and a sign-up look the same at this point.
       const { provider } = input;
 
       if (input.inviteId) {
@@ -136,12 +126,32 @@ export const authRouter = createTRPCRouter({
   signUpEmail: publicProcedure
     .input(zSignUpEmail)
     .mutation(async ({ input, ctx }) => {
-      const isRegistrationAllowed = await getIsRegistrationAllowed(
-        input.inviteId,
-      );
+      assertEmailDomainAllowed(input.email);
+
+      const isRegistrationAllowed = await getIsRegistrationAllowed({
+        inviteId: input.inviteId,
+      });
 
       if (!isRegistrationAllowed) {
-        throw TRPCAccessError('Registrations are not allowed');
+        throw TRPCAccessError(
+          'You need an invite to access OpenPanel. Ask an admin to invite you.',
+        );
+      }
+
+      // A self-typed email proves nothing, so the invite link must belong to
+      // the address signing up.
+      if (input.inviteId) {
+        const invite = await db.invite.findUnique({
+          where: { id: input.inviteId },
+        });
+        if (
+          invite &&
+          invite.email.toLowerCase() !== input.email.trim().toLowerCase()
+        ) {
+          throw TRPCAccessError(
+            'This invite was sent to a different email address',
+          );
+        }
       }
 
       const provider = 'email';
@@ -170,10 +180,7 @@ export const authRouter = createTRPCRouter({
       });
 
       if (input.inviteId) {
-        await connectUserToOrganization({
-          user: createdUser,
-          inviteId: input.inviteId,
-        });
+        await redeemInvite(createdUser, input.inviteId, ctx.req.log);
       }
 
       const token = generateSessionToken();
@@ -203,6 +210,8 @@ export const authRouter = createTRPCRouter({
         throw TRPCNotFoundError('User does not exists');
       }
 
+      assertEmailDomainAllowed(user.email);
+
       if (provider === 'email') {
         // if the password starts with $argon2 we use the new password hashing
         // otherwise its legacy from Clerk which uses bcrypt
@@ -221,6 +230,10 @@ export const authRouter = createTRPCRouter({
             'Reset your password, old password has expired',
           );
         }
+      }
+
+      if (input.inviteId) {
+        await redeemInvite(user, input.inviteId, ctx.req.log);
       }
 
       const token = generateSessionToken();
@@ -284,7 +297,7 @@ export const authRouter = createTRPCRouter({
         provider: 'email',
       });
 
-      if (!user) {
+      if (!user || !isEmailDomainAllowed(user.email)) {
         return true;
       }
 

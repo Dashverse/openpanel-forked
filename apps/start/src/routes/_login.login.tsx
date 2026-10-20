@@ -1,6 +1,5 @@
 import { Or } from '@/components/auth/or';
 import { SignInEmailForm } from '@/components/auth/sign-in-email-form';
-import { SignInGithub } from '@/components/auth/sign-in-github';
 import { SignInGoogle } from '@/components/auth/sign-in-google';
 import { LogoSquare } from '@/components/logo';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -20,24 +19,20 @@ export const Route = createFileRoute('/_login/login')({
   validateSearch: z.object({
     error: z.string().optional(),
     correlationId: z.string().optional(),
+    inviteId: z.string().optional(),
   }),
 });
 
 function LoginPage() {
-  const { error, correlationId } = Route.useSearch();
+  const { error, correlationId, inviteId } = Route.useSearch();
 
   return (
     <div className="col gap-8 w-full text-left">
       <div>
         <h1 className="text-3xl font-bold text-foreground mb-2">Sign in</h1>
         <p className="text-muted-foreground">
-          Don't have an account?{' '}
-          <a
-            href="/onboarding"
-            className="underline font-medium text-foreground"
-          >
-            Create one today
-          </a>
+          Access is by invitation only. If you don't have access yet, ask an
+          admin to invite you.
         </p>
       </div>
       {error && (
@@ -53,13 +48,7 @@ function LoginPage() {
               <>
                 <p>Correlation ID: {correlationId}</p>
                 <p className="mt-2">
-                  Contact us if you have any issues.{' '}
-                  <a
-                    className="underline font-medium"
-                    href={`mailto:hello@openpanel.dev?subject=Login%20Issue%20-%20Correlation%20ID%3A%20${correlationId}`}
-                  >
-                    hello[at]openpanel.dev
-                  </a>
+                  Share this ID with an admin if the problem continues.
                 </p>
               </>
             )}
@@ -68,11 +57,10 @@ function LoginPage() {
       )}
 
       <div className="space-y-4">
-        <SignInGoogle type="sign-in" />
-        <SignInGithub type="sign-in" />
+        <SignInGoogle type="sign-in" inviteId={inviteId} />
       </div>
       <Or />
-      <SignInEmailForm />
+      <SignInEmailForm inviteId={inviteId} />
     </div>
   );
 }
