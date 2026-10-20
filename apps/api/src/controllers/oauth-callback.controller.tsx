@@ -172,7 +172,13 @@ async function handleNewUser({
   // Enforced here rather than before the IdP redirect: this is the first point
   // where we know the person is new, so returning users are never caught by
   // it. No profile data in the log payload, the person is not a user.
-  if (!(await getIsRegistrationAllowed({ inviteId }))) {
+  // GitHub only hands us a verified primary email (getGithubEmail)
+  if (
+    !(await getIsRegistrationAllowed({
+      inviteId,
+      verifiedEmail: oauthUser.email,
+    }))
+  ) {
     throw new LogError(NO_INVITE_MESSAGE, { providerName, inviteId });
   }
 

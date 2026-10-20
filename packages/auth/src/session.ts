@@ -95,7 +95,8 @@ export async function validateSessionToken(
   // Sessions minted before the domain allow-list existed (or for a domain
   // removed from it since) stop working instead of living out their 30 days.
   if (!isEmailDomainAllowed(user.email)) {
-    await db.session.delete({ where: { id: sessionId } });
+    // deleteMany: parallel requests with the same cookie all land here
+    await db.session.deleteMany({ where: { id: sessionId } });
     return EMPTY_SESSION;
   }
   if (Date.now() >= session.expiresAt.getTime()) {

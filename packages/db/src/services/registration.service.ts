@@ -11,7 +11,9 @@ import { db } from '../prisma-client';
  * - The very first user of an install is always allowed (bootstrap).
  * - Otherwise a valid invite is required when ALLOW_REGISTRATION=false: either
  *   the invite id they arrived with, or, for an email the identity provider
- *   verified, any unexpired invite addressed to it.
+ *   verified, any unexpired invite addressed to it. When both are known the
+ *   invite link must be addressed to that email, so a forwarded link cannot
+ *   create an account for someone else.
  */
 export async function getIsRegistrationAllowed({
   inviteId,
@@ -41,7 +43,12 @@ export async function getIsRegistrationAllowed({
     const invite = await db.$primary().invite.findUnique({
       where: { id: inviteId },
     });
-    if (invite && invite.expiresAt > new Date()) {
+    if (
+      invite &&
+      invite.expiresAt > new Date() &&
+      (!verifiedEmail ||
+        invite.email.toLowerCase() === verifiedEmail.toLowerCase())
+    ) {
       return true;
     }
   }

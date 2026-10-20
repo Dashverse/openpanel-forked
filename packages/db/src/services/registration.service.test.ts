@@ -69,6 +69,34 @@ describe('getIsRegistrationAllowed', () => {
     );
   });
 
+  it('rejects an invite link addressed to a different verified email', async () => {
+    mocks.inviteFindUnique.mockResolvedValue({
+      id: 'i',
+      email: 'someone.else@dashverse.ai',
+      expiresAt: future(),
+    });
+    await expect(
+      getIsRegistrationAllowed({
+        inviteId: 'i',
+        verifiedEmail: 'x@dashverse.ai',
+      }),
+    ).resolves.toBe(false);
+  });
+
+  it('accepts an invite link addressed to the verified email, any case', async () => {
+    mocks.inviteFindUnique.mockResolvedValue({
+      id: 'i',
+      email: 'X@Dashverse.ai',
+      expiresAt: future(),
+    });
+    await expect(
+      getIsRegistrationAllowed({
+        inviteId: 'i',
+        verifiedEmail: 'x@dashverse.ai',
+      }),
+    ).resolves.toBe(true);
+  });
+
   it('rejects an expired invite link', async () => {
     mocks.inviteFindUnique.mockResolvedValue({ id: 'i', expiresAt: past() });
     await expect(getIsRegistrationAllowed({ inviteId: 'i' })).resolves.toBe(
