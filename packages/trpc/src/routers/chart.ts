@@ -233,7 +233,7 @@ export const chartRouter = createTRPCRouter({
     .query(async ({ input: { projectId } }) => {
       const [events, meta, customEvents] = await Promise.all([
         chQuery<{ name: string; count: number }>(
-          `SELECT name, count(name) as count FROM ${TABLE_NAMES.event_names_mv} WHERE project_id = ${sqlstring.escape(projectId)} GROUP BY name ORDER BY count DESC, name ASC`,
+          `SELECT name, sum(event_count) as count FROM ${TABLE_NAMES.event_names_mv} WHERE project_id = ${sqlstring.escape(projectId)} GROUP BY name ORDER BY count DESC, name ASC`,
         ),
         getEventMetasCached(projectId),
         db.customEvent.findMany({

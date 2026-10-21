@@ -2123,10 +2123,10 @@ export function getChartPrevStartEndDate({
 }
 
 /**
- * All distinct event names for a project. Cached in Redis for 1h because the
- * distinct-name scan over `distinct_event_names_mv` is ~2s / hundreds of
- * millions of rows (the MV isn't pre-deduplicated) — far too slow to run on
- * every query. Paid once per project per hour, then instant.
+ * All distinct event names for a project. `distinct_event_names_mv` is an
+ * AggregatingMergeTree keyed (project_id, name) — ~1 row per name once merged —
+ * so this read is cheap; the 1h Redis cache just saves a ClickHouse round-trip
+ * on every MCP funnel / conversion validation.
  */
 const getProjectEventNamesCached = cacheable(
   async function getProjectEventNames(projectId: string): Promise<string[]> {
