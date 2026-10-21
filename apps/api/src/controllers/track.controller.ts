@@ -13,6 +13,7 @@ import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
 import {
   getProfileById,
   getSalts,
+  normalizeReplayChunkFields,
   replayBuffer,
   sessionBuffer,
   upsertAlias,
@@ -455,18 +456,23 @@ async function handleReplay({
     });
   }
 
+  // Reject a chunk whose fields the storage can't order or parse: downstream
+  // a bad started_at would fail the Kafka batch on every redelivery.
+  const checked = normalizeReplayChunkFields(
+    payload as unknown as Record<string, unknown>,
+  );
+  if (!checked.ok) {
+    throw new HttpError(`invalid replay chunk: ${checked.error}`, {
+      status: 400,
+    });
+  }
   const chunk = {
     project_id: projectId,
     session_id: sessionId,
     // Empty string for older SDKs — CH column defaults to '' so the raw
     // JSONEachRow passthrough stays valid.
-    window_id: payload.window_id ?? '',
-    chunk_index: payload.chunk_index,
-    started_at: payload.started_at,
-    ended_at: payload.ended_at,
-    events_count: payload.events_count,
-    is_full_snapshot: payload.is_full_snapshot,
-    payload: payload.payload,
+    window_id: typeof payload.window_id === 'string' ? payload.window_id : '',
+    ...checked.fields,
   };
 
   // Redis-free Kafka path, flag-gated per project (REPLAY_KAFKA_PROJECT_IDS).

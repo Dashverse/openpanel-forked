@@ -50,6 +50,7 @@ import mcpRouter from './routes/mcp.router';
 import miscRouter from './routes/misc.router';
 import oauthRouter from './routes/oauth-callback.router';
 import profileRouter from './routes/profile.router';
+import replayRouter from './routes/replay.router';
 import trackRouter from './routes/track.router';
 import webhookRouter from './routes/webhook.router';
 import { HttpError } from './utils/errors';
@@ -99,6 +100,7 @@ const startServer = async () => {
           '/oauth',
           '/misc',
           '/ai',
+          '/replay',
         ];
 
         const isPrivatePath = corsPaths.some((path) =>
@@ -192,6 +194,7 @@ const startServer = async () => {
       instance.register(oauthRouter, { prefix: '/oauth' });
       instance.register(miscRouter, { prefix: '/misc' });
       instance.register(aiRouter, { prefix: '/ai' });
+      instance.register(replayRouter, { prefix: '/replay' });
     });
 
     // Public API

@@ -1,5 +1,24 @@
-import type { IServiceEvent } from '@openpanel/db';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  ReplayProvider,
+  useCurrentTime,
+  useReplayContext,
+} from '@/components/sessions/replay/replay-context';
+import { ReplayEventFeed } from '@/components/sessions/replay/replay-event-feed';
+import { ReplayPlayer } from '@/components/sessions/replay/replay-player';
+import { Button } from '@/components/ui/button';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useAppContext } from '@/hooks/use-app-context';
+import { useTRPC } from '@/integrations/trpc/react';
+import { cn } from '@/utils/cn';
+import type { IServiceEvent, ReplayBlockList } from '@openpanel/db';
+import { useQuery } from '@tanstack/react-query';
 import {
   AppWindowIcon,
   FastForwardIcon,
@@ -20,27 +39,58 @@ import {
   useState,
 } from 'react';
 import { BrowserChrome } from './browser-chrome';
+import { createReplayBlockFetcher } from './replay-block-client';
+import {
+  DEFAULT_IDLE_GAP_MS,
+  type ReplayBlockMeta,
+  computeBlockSegments,
+} from './replay-block-store';
 import { ReplayTime } from './replay-controls';
 import { ReplayTimeline } from './replay-timeline';
-import { formatDuration, getEventOffsetMs } from './replay-utils';
 import {
-  ReplayProvider,
-  useCurrentTime,
-  useReplayContext,
-} from '@/components/sessions/replay/replay-context';
-import { ReplayEventFeed } from '@/components/sessions/replay/replay-event-feed';
-import { ReplayPlayer } from '@/components/sessions/replay/replay-player';
-import { Button } from '@/components/ui/button';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { useTRPC } from '@/integrations/trpc/react';
-import { cn } from '@/utils/cn';
+  formatDuration,
+  getEventOffsetMs,
+  resolveActiveWindowId,
+  resolveDefaultWindowId,
+} from './replay-utils';
+
+// Which store served this replay (session.replayMeta `source`).
+const REPLAY_SOURCE_LABELS: Record<
+  'ch' | 'blob' | 'blocks',
+  {
+    badge: string;
+    short: string;
+    title: string;
+    log: string;
+    color: string;
+    badgeClass: string;
+  }
+> = {
+  ch: {
+    badge: 'ClickHouse',
+    short: 'Live',
+    title: 'Served from the ClickHouse hot table',
+    log: 'CLICKHOUSE',
+    color: '#6b7280',
+    badgeClass: 'bg-neutral-500',
+  },
+  blob: {
+    badge: 'Azure Blob',
+    short: 'Archive',
+    title: 'Served from the Azure Blob archive',
+    log: 'AZURE BLOB',
+    color: '#2563eb',
+    badgeClass: 'bg-blue-600',
+  },
+  blocks: {
+    badge: 'Blob blocks',
+    short: 'Blocks',
+    title: 'Served from Azure Blob replay blocks',
+    log: 'BLOB BLOCKS',
+    color: '#0d9488',
+    badgeClass: 'bg-teal-600',
+  },
+};
 
 function BrowserUrlBar({ events }: { events: IServiceEvent[] }) {
   const { startTime } = useReplayContext();
@@ -69,69 +119,6 @@ function BrowserUrlBar({ events }: { events: IServiceEvent[] }) {
   }, [events, currentTime, startTime]);
 
   return <span className="truncate text-muted-foreground">{currentUrl}</span>;
-}
-
-/**
- * Feeds remaining chunks into the player after it's ready.
- * Receives already-fetched chunks from the initial batch, then pages
- * through the rest using replayChunksFrom. Each chunk goes through
- * markChunkLoaded so the buffer (used by the buffer-aware seek path) stays
- * in sync.
- */
-function ReplayChunkLoader({
-  sessionId,
-  projectId,
-  fromIndex,
-  windowId,
-}: {
-  sessionId: string;
-  projectId: string;
-  fromIndex: number;
-  windowId?: string;
-}) {
-  const trpc = useTRPC();
-  const queryClient = useQueryClient();
-  const { markChunkLoaded } = useReplayContext();
-
-  useEffect(() => {
-    let cancelled = false;
-    function recursive(fromIndex: number) {
-      queryClient
-        .fetchQuery(
-          trpc.session.replayChunksFrom.queryOptions({
-            sessionId,
-            projectId,
-            fromIndex,
-            windowId,
-          }),
-        )
-        .then((res) => {
-          if (cancelled) return;
-          res.data.forEach((row) => {
-            if (!row) return;
-            markChunkLoaded({
-              chunkIndex: row.chunkIndex,
-              startedAtMs: row.startedAtMs,
-              endedAtMs: row.endedAtMs,
-              events: row.events ?? [],
-            });
-          });
-          if (res.hasMore) {
-            recursive(fromIndex + res.data.length);
-          }
-        })
-        .catch(() => {
-          // chunk loading failed — replay may be incomplete
-        });
-    }
-
-    recursive(fromIndex);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return null;
 }
 
 function FullscreenButton({
@@ -172,83 +159,6 @@ function FullscreenButton({
       )}
     </button>
   );
-}
-
-/**
- * Inside the provider, seed the buffer with first-batch chunks (events already
- * passed to rrweb at construction — no addToPlayer) and register the prefetch
- * function so the buffer-aware seek path can fetch chunks on demand.
- */
-function ReplayBufferBootstrap({
-  sessionId,
-  projectId,
-  firstBatch,
-  windowId,
-}: {
-  sessionId: string;
-  projectId: string;
-  firstBatch: { chunkIndex: number; startedAtMs: number; endedAtMs: number; events: { type: number; data: unknown; timestamp: number }[] }[];
-  windowId?: string;
-}) {
-  const trpc = useTRPC();
-  const queryClient = useQueryClient();
-  const { markChunkLoaded, setPrefetchChunks, setSeekFetch, isReady } =
-    useReplayContext();
-
-  // Seed the buffer once the player is ready (so duration recompute uses the
-  // real rrweb metadata, not 0).
-  useEffect(() => {
-    if (!isReady || firstBatch.length === 0) return;
-    for (const row of firstBatch) {
-      markChunkLoaded(row, { addToPlayer: false });
-    }
-  }, [isReady, firstBatch, markChunkLoaded]);
-
-  // Register the prefetch function that the seek slow-path calls.
-  useEffect(() => {
-    setPrefetchChunks(async (fromIndex, toIndex) => {
-      const res = await queryClient.fetchQuery(
-        trpc.session.replayChunksByIndexRange.queryOptions({
-          sessionId,
-          projectId,
-          fromIndex,
-          toIndex,
-          windowId,
-        }),
-      );
-      return res.data.map((row) => ({
-        chunkIndex: row.chunkIndex,
-        startedAtMs: row.startedAtMs,
-        endedAtMs: row.endedAtMs,
-        events: row.events ?? [],
-      }));
-    });
-    return () => setPrefetchChunks(null);
-  }, [sessionId, projectId, windowId, queryClient, trpc, setPrefetchChunks]);
-
-  // Register the smart-seek fetcher. Used by seek() to jump to the latest
-  // full DOM snapshot before the target time — one round trip, no walking.
-  useEffect(() => {
-    setSeekFetch(async (targetMs) => {
-      const res = await queryClient.fetchQuery(
-        trpc.session.replayChunksAroundTime.queryOptions({
-          sessionId,
-          projectId,
-          targetMs,
-          windowId,
-        }),
-      );
-      return res.data.map((row) => ({
-        chunkIndex: row.chunkIndex,
-        startedAtMs: row.startedAtMs,
-        endedAtMs: row.endedAtMs,
-        events: row.events ?? [],
-      }));
-    });
-    return () => setSeekFetch(null);
-  }, [sessionId, projectId, windowId, queryClient, trpc, setSeekFetch]);
-
-  return null;
 }
 
 /**
@@ -313,6 +223,10 @@ function displayToWallOffset(
 // Lead-up before a linked absolute moment (`initialAtMs`), so the viewer sees
 // what the user was doing right before it (e.g. before a funnel drop-off).
 const INITIAL_AT_LEAD_MS = 3000;
+/** A recording whose newest block is younger than this is treated as live. */
+const LIVE_RECORDING_WINDOW_MS = 2 * 60 * 1000;
+/** How often a live recording's block list is re-fetched. */
+const LIVE_REFETCH_INTERVAL_MS = 10_000;
 
 /**
  * Seeks once to a shared link's timestamp (display seconds) after the player is
@@ -380,205 +294,92 @@ function SeekBridge({
   return null;
 }
 
-function ReplayContent({
-  sessionId,
-  projectId,
-  windowId,
-  windowDurationMs,
-  showEventFeed = true,
-  controlsRef,
-  layout = 'default',
-  header,
-  userPanel,
-  initialTimeSec,
-  initialAtMs,
+type SourceLabel =
+  (typeof REPLAY_SOURCE_LABELS)[keyof typeof REPLAY_SOURCE_LABELS];
+
+/**
+ * The player area (inside the provider): loading / empty / error states, or
+ * the rrweb player once the loader has the initial events.
+ */
+function ReplayStage({
+  layout,
+  showEventFeed,
+  hasReplay,
+  listLoading,
+  skipInactive,
+  sourceLabel,
 }: {
-  // Seek here (display seconds) once loaded — from a shared link.
-  initialTimeSec?: number;
-  // Or to this absolute moment (epoch ms, minus a short lead-up). Wins over
-  // initialTimeSec.
-  initialAtMs?: number;
-  // 'studio' = Session Replays page (Mixpanel-style: header, dark stage,
-  // controls bar, Activity/User side panel). 'default' = session detail page.
-  layout?: 'default' | 'studio';
-  // Studio only: rendered above the player (session header + tab switcher).
-  header?: ReactNode;
-  // Studio only: content of the side panel's "User" tab.
-  userPanel?: ReactNode;
-  sessionId: string;
-  projectId: string;
-  // When set, only this recorder's (tab's) chunks are loaded — keeps
-  // multi-tab sessions playable. undefined = legacy behaviour (all chunks).
-  windowId?: string;
-  // Per-window duration from the windows list. Overrides the session-wide
-  // replayMeta duration so the timeline matches the selected recording.
-  windowDurationMs?: number;
-  // When false, render the player full-width without the side event feed.
-  // Used by the Session Replays tab, which keeps events in its own left list.
-  showEventFeed?: boolean;
-  // Populated with the player's seek controls so external UIs (the replays
-  // event list) can jump the player to an event's timestamp.
-  controlsRef?: MutableRefObject<ReplaySeekControls | null>;
+  layout: 'default' | 'studio';
+  showEventFeed: boolean;
+  hasReplay: boolean;
+  listLoading: boolean;
+  skipInactive: boolean;
+  sourceLabel: SourceLabel | null;
 }) {
-  const trpc = useTRPC();
-  const containerRef = useRef<HTMLDivElement>(null);
+  const { initialEvents, loadError } = useReplayContext();
+  const loading =
+    listLoading || (hasReplay && initialEvents === null && !loadError);
+  // On the Session Replays tab (showEventFeed=false) the loading + empty
+  // states use the same dark, tall box as the player, so the UI doesn't jump
+  // (small light box -> big dark player) once data arrives. On the session
+  // detail page they stay compact.
+  const placeholder =
+    layout === 'studio'
+      ? 'h-full min-h-[320px] bg-neutral-950 text-neutral-400'
+      : showEventFeed
+        ? 'h-[320px] bg-background'
+        : 'h-[calc(100vh-11rem)] bg-neutral-950';
 
-  const { data: eventsData } = useQuery(
-    trpc.event.events.queryOptions({
-      projectId,
-      sessionId,
-      filters: [],
-      // Only this tab's events (plus tab-less server events), fetched
-      // server-side. A session-wide fetch under a cap returned the NEWEST N of
-      // ALL tabs — a busy tab showed 858 of its 4,790 events.
-      windowId,
-      take: 20000,
-      // Request window_id so the feed can scope events to the current tab
-      // (with an empty-string fallback for backend / pre-window_id events).
-      columnVisibility: { windowId: true },
-    })
-  );
-
-  // Fetch first batch of chunks (includes chunk 0 for player init + more)
-  const { data: firstBatch, isLoading: replayLoading } = useQuery(
-    trpc.session.replayChunksFrom.queryOptions({
-      sessionId,
-      projectId,
-      fromIndex: 0,
-      windowId,
-    })
-  );
-
-  // Definitive replay duration. One cheap min/max query — shown as the
-  // canonical timeline length from first paint instead of rrweb's progressive
-  // totalTime that grows as chunks load.
-  const { data: replayMeta } = useQuery(
-    trpc.session.replayMeta.queryOptions({ sessionId, projectId }),
-  );
-
-  // Surface which store this replay is served from (Azure Blob archive vs the
-  // ClickHouse hot table). Logged once per session; also shown as a badge below.
-  const replaySource = replayMeta?.source;
-  useEffect(() => {
-    if (replaySource) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `%c[replay] session ${sessionId} served from ${
-          replaySource === 'blob' ? 'AZURE BLOB' : 'CLICKHOUSE'
-        }`,
-        `color:#fff;background:${replaySource === 'blob' ? '#2563eb' : '#6b7280'};padding:2px 6px;border-radius:4px`,
-      );
-    }
-  }, [replaySource, sessionId]);
-
-  // Active recording segments (idle gaps collapsed) for the playing window —
-  // drives the gap-collapsed scrubber + time readout (display space).
-  const { data: segments } = useQuery(
-    trpc.session.replayWindowSegments.queryOptions({
-      sessionId,
-      projectId,
-      windowId,
-    }),
-  );
-
-  // Scope events to the tab (window) being played. Events with an empty
-  // window_id — backend events, and every event in a pre-window_id (legacy)
-  // session — always show. That empty-string arm IS the fallback: a legacy
-  // session has windowId=undefined and all events '' → the filter is a no-op
-  // and you get today's session-wide, timestamp-ordered behaviour.
-  const events = (eventsData?.data ?? []).filter(
-    (e) => !windowId || !e.windowId || e.windowId === windowId,
-  );
-  // Memoize the flat events array so its identity is stable across re-renders
-  // (replayMeta landing, buffering state flipping, etc.) — otherwise rrweb's
-  // useEffect would tear down and recreate the player on every parent render,
-  // visibly resetting playback to 0:00.
-  const playerEvents = useMemo(
-    () => firstBatch?.data.flatMap((row) => row?.events ?? []) ?? [],
-    [firstBatch],
-  );
-  // Stable reference for the same reason — passed into ReplayBufferBootstrap.
-  const firstBatchData = useMemo(
-    () => firstBatch?.data ?? [],
-    [firstBatch],
-  );
-  const hasMore = firstBatch?.hasMore ?? false;
-  const hasReplay = playerEvents.length !== 0;
-  // Skip idle periods by default — a mostly-idle recording plays through in
-  // its seconds of real activity instead of frozen minutes. User-toggleable.
-  const [skipInactive, setSkipInactive] = useState(true);
-
-  function renderReplay() {
-    // On the Session Replays tab (showEventFeed=false) the loading + empty
-    // states use the same dark, tall box as the player, so the UI doesn't jump
-    // (small light box → big dark player) once chunks arrive. On the session
-    // detail page they stay compact.
-    const placeholder =
-      layout === 'studio'
-        ? 'h-full min-h-[320px] bg-neutral-950 text-neutral-400'
-        : showEventFeed
-          ? 'h-[320px] bg-background'
-          : 'h-[calc(100vh-11rem)] bg-neutral-950';
-    if (replayLoading && layout === 'studio') {
-      return (
-        <div
-          role="status"
-          className="flex h-full min-h-[320px] flex-col items-center justify-center gap-3 bg-neutral-950"
-        >
-          <Loader2Icon className="size-6 animate-spin text-neutral-400" />
-          <span className="text-sm text-neutral-300">Loading recording…</span>
-        </div>
-      );
-    }
-    if (!hasReplay && layout === 'studio') {
+  if (loading && layout === 'studio') {
+    return (
+      <div
+        role="status"
+        className="flex h-full min-h-[320px] flex-col items-center justify-center gap-3 bg-neutral-950"
+      >
+        <Loader2Icon className="size-6 animate-spin text-neutral-400" />
+        <span className="text-sm text-neutral-300">Loading recording…</span>
+      </div>
+    );
+  }
+  if (loading) {
+    return (
+      <div
+        className={cn(
+          'flex flex-col items-center justify-center gap-3 text-sm text-muted-foreground',
+          placeholder,
+        )}
+      >
+        <div className="size-8 animate-pulse rounded-full bg-muted" />
+        Loading session replay…
+      </div>
+    );
+  }
+  if (hasReplay && initialEvents === null && loadError) {
+    return (
+      <div
+        role="alert"
+        className={cn(
+          'flex flex-col items-center justify-center gap-2 text-center text-sm',
+          placeholder,
+        )}
+      >
+        <MonitorOffIcon className="size-6 text-neutral-500" />
+        <span>{loadError}</span>
+      </div>
+    );
+  }
+  if (!hasReplay || initialEvents === null) {
+    if (layout === 'studio') {
       return (
         <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-2 bg-neutral-950 text-center">
           <MonitorOffIcon className="size-6 text-neutral-500" />
-          <span className="text-sm text-neutral-300">No recording for this tab</span>
+          <span className="text-sm text-neutral-300">
+            No recording for this tab
+          </span>
           <span className="max-w-xs text-xs text-neutral-500">
             The recording may still be processing, or this tab captured no
             activity. Try another tab above.
           </span>
-        </div>
-      );
-    }
-    if (replayLoading) {
-      return (
-        <div
-          className={cn(
-            'flex flex-col items-center justify-center gap-3 text-sm text-muted-foreground',
-            placeholder,
-          )}
-        >
-          <div className="size-8 animate-pulse rounded-full bg-muted" />
-          Loading session replay…
-        </div>
-      );
-    }
-    if (hasReplay && layout === 'studio') {
-      return (
-        <ReplayPlayer events={playerEvents} skipInactive={skipInactive} fill />
-      );
-    }
-    if (hasReplay) {
-      return (
-        <div className="relative">
-          {replaySource ? (
-            <div
-              className={cn(
-                'absolute right-2 top-2 z-10 rounded px-2 py-0.5 text-xs font-medium text-white shadow',
-                replaySource === 'blob' ? 'bg-blue-600' : 'bg-neutral-500',
-              )}
-              title={
-                replaySource === 'blob'
-                  ? 'Served from Azure Blob archive'
-                  : 'Served from ClickHouse hot table'
-              }
-            >
-              {replaySource === 'blob' ? 'Azure Blob' : 'ClickHouse'}
-            </div>
-          ) : null}
-          <ReplayPlayer events={playerEvents} skipInactive={skipInactive} />
         </div>
       );
     }
@@ -593,142 +394,339 @@ function ReplayContent({
       </div>
     );
   }
-
-  const loaders = (
-    <>
-      {hasReplay && (
-        <ReplayBufferBootstrap
-          firstBatch={firstBatchData}
-          projectId={projectId}
-          sessionId={sessionId}
-          windowId={windowId}
-        />
-      )}
-      {hasReplay && hasMore && (
-        <ReplayChunkLoader
-          fromIndex={firstBatch?.data?.length ?? 0}
-          projectId={projectId}
-          sessionId={sessionId}
-          windowId={windowId}
-        />
-      )}
-    </>
+  if (layout === 'studio') {
+    return (
+      <ReplayPlayer events={initialEvents} skipInactive={skipInactive} fill />
+    );
+  }
+  return (
+    <div className="relative">
+      {sourceLabel ? (
+        <div
+          className={cn(
+            'absolute right-2 top-2 z-10 rounded px-2 py-0.5 text-xs font-medium text-white shadow',
+            sourceLabel.badgeClass,
+          )}
+          title={sourceLabel.title}
+        >
+          {sourceLabel.badge}
+        </div>
+      ) : null}
+      <ReplayPlayer events={initialEvents} skipInactive={skipInactive} />
+    </div>
   );
+}
+
+/** Event feed whose "loading" follows the player's initial load. */
+function ReplayFeed({
+  events,
+  listLoading,
+  hasReplay,
+  bare,
+}: {
+  events: IServiceEvent[];
+  listLoading: boolean;
+  hasReplay: boolean;
+  bare?: boolean;
+}) {
+  const { initialEvents, loadError } = useReplayContext();
+  const loading =
+    listLoading || (hasReplay && initialEvents === null && !loadError);
+  return (
+    <ReplayEventFeed events={events} replayLoading={loading} bare={bare} />
+  );
+}
+
+/**
+ * Builds this window's block fetcher (GET /replay/blocks + decode worker).
+ * One per player; disposed (worker terminated) on unmount / window switch.
+ */
+function useReplayBlockFetcher(input: {
+  projectId: string;
+  sessionId: string;
+  windowId?: string;
+  source?: string;
+}) {
+  const { apiUrl } = useAppContext();
+  const { projectId, sessionId, windowId, source } = input;
+  // Created inside the effect (not useMemo): React may run an effect's
+  // cleanup and then mount it again (StrictMode in dev, fast refresh). With
+  // useMemo the cleanup disposed a fetcher that was then reused, so every
+  // request failed instantly as aborted.
+  const [fetcher, setFetcher] = useState<ReturnType<
+    typeof createReplayBlockFetcher
+  > | null>(null);
+  useEffect(() => {
+    if (windowId === undefined || !source) {
+      setFetcher(null);
+      return;
+    }
+    const f = createReplayBlockFetcher({
+      apiUrl,
+      projectId,
+      sessionId,
+      windowId,
+      source,
+    });
+    setFetcher(f);
+    return () => {
+      f.dispose();
+      setFetcher((cur) => (cur === f ? null : cur));
+    };
+  }, [apiUrl, projectId, sessionId, windowId, source]);
+  return fetcher;
+}
+
+function ReplayContent({
+  sessionId,
+  projectId,
+  windowId,
+  blockList,
+  onStaleList,
+  showEventFeed = true,
+  controlsRef,
+  layout = 'default',
+  header,
+  userPanel,
+  initialTimeSec,
+  initialAtMs,
+}: {
+  // Seek here (display seconds) once loaded: from a shared link.
+  initialTimeSec?: number;
+  // Or to this absolute moment (epoch ms, minus a short lead-up). Wins over
+  // initialTimeSec.
+  initialAtMs?: number;
+  // 'studio' = Session Replays page (Mixpanel-style: header, dark stage,
+  // controls bar, Activity/User side panel). 'default' = session detail page.
+  layout?: 'default' | 'studio';
+  // Studio only: rendered above the player (session header + tab switcher).
+  header?: ReactNode;
+  // Studio only: content of the side panel's "User" tab.
+  userPanel?: ReactNode;
+  sessionId: string;
+  projectId: string;
+  // The recorder (tab) to play. undefined while the block list is loading.
+  windowId?: string;
+  // session.replayBlocks: source, windows and blocks (undefined = loading).
+  blockList?: ReplayBlockList;
+  // The server refused a block request as stale: refetch the list.
+  onStaleList?: () => void;
+  // When false, render the player full-width without the side event feed.
+  // Used by the Session Replays tab, which keeps events in its own left list.
+  showEventFeed?: boolean;
+  // Populated with the player's seek controls so external UIs (the replays
+  // event list) can jump the player to an event's timestamp.
+  controlsRef?: MutableRefObject<ReplaySeekControls | null>;
+}) {
+  const trpc = useTRPC();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const listLoading = blockList === undefined;
+
+  const { data: eventsData } = useQuery({
+    ...trpc.event.events.queryOptions({
+      projectId,
+      sessionId,
+      filters: [],
+      // Only this tab's events (plus tab-less server events), fetched
+      // server-side. A session-wide fetch under a cap returned the NEWEST N of
+      // ALL tabs: a busy tab showed 858 of its 4,790 events.
+      windowId,
+      take: 20000,
+      // Request window_id so the feed can scope events to the current tab
+      // (with an empty-string fallback for backend / pre-window_id events).
+      columnVisibility: { windowId: true },
+    }),
+    // Wait for the tab to be known, so the events aren't fetched twice.
+    enabled: !listLoading,
+  });
+
+  // This window's blocks, in time order. Stable identity per list/window.
+  const windowBlocks = useMemo<ReplayBlockMeta[] | undefined>(
+    () =>
+      blockList && windowId !== undefined
+        ? blockList.blocks.filter((b) => b.windowId === windowId)
+        : undefined,
+    [blockList, windowId],
+  );
+  const windowInfo = blockList?.windows.find((w) => w.windowId === windowId);
+  const hasReplay = (windowBlocks?.length ?? 0) > 0;
+
+  // Active recording segments (idle gaps collapsed) from the block spans:
+  // the gap-collapsed scrubber + time readout, before any data loads.
+  const segments = useMemo(
+    () =>
+      windowBlocks
+        ? computeBlockSegments(
+            windowBlocks,
+            blockList?.idleGapMs ?? DEFAULT_IDLE_GAP_MS,
+          )
+        : undefined,
+    [windowBlocks, blockList?.idleGapMs],
+  );
+
+  // Surface which store this replay is served from. Logged once per session;
+  // also shown as a badge.
+  const replaySource = blockList?.source;
+  const sourceLabel = replaySource ? REPLAY_SOURCE_LABELS[replaySource] : null;
+  useEffect(() => {
+    if (replaySource) {
+      const label = REPLAY_SOURCE_LABELS[replaySource];
+      // eslint-disable-next-line no-console
+      console.log(
+        `%c[replay] session ${sessionId} served from ${label.log}`,
+        `color:#fff;background:${label.color};padding:2px 6px;border-radius:4px`,
+      );
+    }
+  }, [replaySource, sessionId]);
+
+  const fetcher = useReplayBlockFetcher({
+    projectId,
+    sessionId,
+    windowId,
+    source: replaySource,
+  });
+
+  // Scope events to the tab (window) being played. Events with an empty
+  // window_id (backend events, and every event in a pre-window_id session)
+  // always show.
+  const events = (eventsData?.data ?? []).filter(
+    (e) => !windowId || !e.windowId || e.windowId === windowId,
+  );
+  // Skip idle periods by default: a mostly-idle recording plays through in
+  // its seconds of real activity instead of frozen minutes. User-toggleable.
+  const [skipInactive, setSkipInactive] = useState(true);
+
+  const stage = (
+    <ReplayStage
+      layout={layout}
+      showEventFeed={showEventFeed}
+      hasReplay={hasReplay}
+      listLoading={listLoading}
+      skipInactive={skipInactive}
+      sourceLabel={sourceLabel}
+    />
+  );
+
+  const providerProps = {
+    totalDurationMs: windowInfo?.durationMs,
+    blocks: windowBlocks,
+    fetchBlocks: fetcher?.fetchBlocks,
+    onStale: onStaleList,
+    skipInactive,
+  };
 
   if (layout === 'studio') {
     return (
-      <ReplayProvider
-        totalDurationMs={windowDurationMs ?? replayMeta?.totalDurationMs}
-      >
+      <ReplayProvider {...providerProps}>
         <ActiveReplayWindowContext.Provider value={windowId}>
-        <SeekBridge controlsRef={controlsRef} />
-        <ReplaySegmentsBootstrap segments={segments} />
-        <InitialSeek
-          initialTimeSec={initialTimeSec}
-          initialAtMs={initialAtMs}
-          segments={segments}
-        />
-        <div
-          ref={containerRef}
-          id="replay"
-          className="grid h-full min-h-0 grid-cols-1 bg-background lg:grid-cols-[minmax(0,1fr)_360px]"
-        >
-          <div className="flex min-h-0 min-w-0 flex-col">
-            {header}
-            {/* Current page URL — follows the playhead. */}
-            <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/40 px-4 text-xs">
-              <GlobeIcon className="size-3.5 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1 truncate font-mono">
-                {hasReplay ? <BrowserUrlBar events={events} /> : null}
+          <SeekBridge controlsRef={controlsRef} />
+          <ReplaySegmentsBootstrap segments={segments} />
+          <InitialSeek
+            initialTimeSec={initialTimeSec}
+            initialAtMs={initialAtMs}
+            segments={segments}
+          />
+          <div
+            ref={containerRef}
+            id="replay"
+            className="grid h-full min-h-0 grid-cols-1 bg-background lg:grid-cols-[minmax(0,1fr)_360px]"
+          >
+            <div className="flex min-h-0 min-w-0 flex-col">
+              {header}
+              {/* Current page URL: follows the playhead. */}
+              <div className="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/40 px-4 text-xs">
+                <GlobeIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1 truncate font-mono">
+                  {hasReplay ? <BrowserUrlBar events={events} /> : null}
+                </div>
+                {sourceLabel && (
+                  <span
+                    className="shrink-0 text-muted-foreground"
+                    title={sourceLabel.title}
+                  >
+                    {sourceLabel.short}
+                  </span>
+                )}
               </div>
-              {replaySource && (
-                <span
-                  className="shrink-0 text-muted-foreground"
-                  title={
-                    replaySource === 'blob'
-                      ? 'Served from the Azure Blob archive'
-                      : 'Served from the ClickHouse hot table'
+              <div className="relative min-h-0 flex-1 bg-neutral-950">
+                {stage}
+              </div>
+              {(hasReplay || listLoading) && (
+                <ReplayTimeline
+                  events={events}
+                  variant="studio"
+                  trailing={
+                    <>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        aria-pressed={skipInactive}
+                        onClick={() => setSkipInactive((v) => !v)}
+                        className={cn(
+                          'h-8 gap-1.5 px-2 text-xs',
+                          skipInactive
+                            ? 'text-primary hover:text-primary'
+                            : 'text-muted-foreground',
+                        )}
+                        title={
+                          skipInactive
+                            ? 'Skipping inactivity: click to play idle periods too'
+                            : 'Playing everything: click to skip idle periods'
+                        }
+                      >
+                        <FastForwardIcon className="size-3.5" />
+                        Skip inactivity
+                      </Button>
+                      <FullscreenButton containerRef={containerRef} />
+                    </>
                   }
-                >
-                  {replaySource === 'blob' ? 'Archive' : 'Live'}
-                </span>
+                />
               )}
             </div>
-            <div className="relative min-h-0 flex-1 bg-neutral-950">
-              {renderReplay()}
-            </div>
-            {(hasReplay || replayLoading) && (
-              <ReplayTimeline
-                events={events}
-                variant="studio"
-                trailing={
-                  <>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      aria-pressed={skipInactive}
-                      onClick={() => setSkipInactive((v) => !v)}
-                      className={cn(
-                        'h-8 gap-1.5 px-2 text-xs',
-                        skipInactive
-                          ? 'text-primary hover:text-primary'
-                          : 'text-muted-foreground',
-                      )}
-                      title={
-                        skipInactive
-                          ? 'Skipping inactivity — click to play idle periods too'
-                          : 'Playing everything — click to skip idle periods'
-                      }
-                    >
-                      <FastForwardIcon className="size-3.5" />
-                      Skip inactivity
-                    </Button>
-                    <FullscreenButton containerRef={containerRef} />
-                  </>
-                }
-              />
-            )}
-          </div>
-          <aside className="hidden min-h-0 flex-col border-l lg:flex">
-            <Tabs defaultValue="activity" className="flex h-full min-h-0 flex-col">
-              <TabsList className="shrink-0 px-2">
-                <TabsTrigger value="activity" className="py-2">
-                  Activity
-                  <span className="ml-1.5 tabular-nums text-muted-foreground">
-                    {eventsData ? events.length : ''}
-                  </span>
-                </TabsTrigger>
-                <TabsTrigger value="user" className="py-2">
-                  User
-                </TabsTrigger>
-              </TabsList>
-              <TabsContent
-                value="activity"
-                className="mt-0 min-h-0 flex-1 data-[state=active]:flex data-[state=active]:flex-col"
+            <aside className="hidden min-h-0 flex-col border-l lg:flex">
+              <Tabs
+                defaultValue="activity"
+                className="flex h-full min-h-0 flex-col"
               >
-                <ReplayEventFeed
-                  events={events}
-                  replayLoading={replayLoading}
-                  bare
-                />
-              </TabsContent>
-              <TabsContent value="user" className="mt-0 min-h-0 flex-1 overflow-y-auto">
-                {userPanel}
-              </TabsContent>
-            </Tabs>
-          </aside>
-        </div>
-        {loaders}
+                <TabsList className="shrink-0 px-2">
+                  <TabsTrigger value="activity" className="py-2">
+                    Activity
+                    <span className="ml-1.5 tabular-nums text-muted-foreground">
+                      {eventsData ? events.length : ''}
+                    </span>
+                  </TabsTrigger>
+                  <TabsTrigger value="user" className="py-2">
+                    User
+                  </TabsTrigger>
+                </TabsList>
+                <TabsContent
+                  value="activity"
+                  className="mt-0 min-h-0 flex-1 data-[state=active]:flex data-[state=active]:flex-col"
+                >
+                  <ReplayFeed
+                    events={events}
+                    listLoading={listLoading}
+                    hasReplay={hasReplay}
+                    bare
+                  />
+                </TabsContent>
+                <TabsContent
+                  value="user"
+                  className="mt-0 min-h-0 flex-1 overflow-y-auto"
+                >
+                  {userPanel}
+                </TabsContent>
+              </Tabs>
+            </aside>
+          </div>
         </ActiveReplayWindowContext.Provider>
       </ReplayProvider>
     );
   }
 
   return (
-    <ReplayProvider
-      totalDurationMs={windowDurationMs ?? replayMeta?.totalDurationMs}
-    >
+    <ReplayProvider {...providerProps}>
       <SeekBridge controlsRef={controlsRef} />
       <ReplaySegmentsBootstrap segments={segments} />
       <div
@@ -751,8 +749,8 @@ function ReplayContent({
                     onClick={() => setSkipInactive((v) => !v)}
                     title={
                       skipInactive
-                        ? 'Skipping inactivity — click to play idle periods too'
-                        : 'Playing everything — click to skip idle periods'
+                        ? 'Skipping inactivity: click to play idle periods too'
+                        : 'Playing everything: click to skip idle periods'
                     }
                     className={
                       skipInactive
@@ -775,19 +773,22 @@ function ReplayContent({
               )
             }
           >
-            {renderReplay()}
+            {stage}
             {hasReplay && <ReplayTimeline events={events} />}
           </BrowserChrome>
         </div>
         {showEventFeed && (
           <div className="relative hidden lg:block">
             <div className="absolute inset-0">
-              <ReplayEventFeed events={events} replayLoading={replayLoading} />
+              <ReplayFeed
+                events={events}
+                listLoading={listLoading}
+                hasReplay={hasReplay}
+              />
             </div>
           </div>
         )}
       </div>
-      {loaders}
     </ReplayProvider>
   );
 }
@@ -836,7 +837,11 @@ function WindowSwitcher({
           </SelectTrigger>
           <SelectContent>
             {windows.map((w, i) => (
-              <SelectItem key={w.windowId || 'legacy'} value={w.windowId} className="text-xs">
+              <SelectItem
+                key={w.windowId || 'legacy'}
+                value={w.windowId}
+                className="text-xs"
+              >
                 <span className="inline-flex w-full items-center gap-3">
                   <span className="font-medium">{label(w, i)}</span>
                   <span className="font-mono tabular-nums text-muted-foreground">
@@ -899,7 +904,7 @@ export function ReplayShell({
   // From a shared link: open this tab, at this display time (seconds).
   initialWindowId?: string;
   initialTimeSec?: number;
-  // Or at this absolute moment (epoch ms) — wins over initialTimeSec.
+  // Or at this absolute moment (epoch ms): wins over initialTimeSec.
   initialAtMs?: number;
   sessionId: string;
   projectId: string;
@@ -925,55 +930,86 @@ export function ReplayShell({
     setSelectedWindowId(windowId);
   };
 
-  // List the distinct recorders (tabs) that wrote to this session. Each is a
-  // separate rrweb recording — the player must play one at a time to avoid
-  // mixing DOM mirror states across concurrent tabs.
-  const { data: windows } = useQuery(
-    trpc.session.replayWindows.queryOptions({ sessionId, projectId }),
+  // The block list: source, recorders (tabs) and every block's time span. No
+  // payload. Short-lived on both sides (server ~5 s) because live sessions
+  // grow; a refused (stale) block request refetches it.
+  const { data: blockList, refetch: refetchBlockList } = useQuery({
+    ...trpc.session.replayBlocks.queryOptions({ sessionId, projectId }),
+    staleTime: 5_000,
+    gcTime: 30_000,
+    // A recording still in progress keeps growing: re-list its blocks while
+    // the newest one is recent (PostHog polls a live recording the same
+    // way). The store merges new blocks by key, so playback just extends.
+    refetchInterval: (query) => {
+      const blocks = query.state.data?.blocks;
+      if (!blocks || blocks.length === 0) return false;
+      let newest = 0;
+      for (const b of blocks) newest = Math.max(newest, b.endMs);
+      return Date.now() - newest < LIVE_RECORDING_WINDOW_MS
+        ? LIVE_REFETCH_INTERVAL_MS
+        : false;
+    },
+  });
+  const onStaleList = useCallback(() => {
+    void refetchBlockList();
+  }, [refetchBlockList]);
+
+  const windows: ReplayWindow[] = useMemo(
+    () =>
+      (blockList?.windows ?? []).map((w) => ({
+        windowId: w.windowId,
+        startedAtMs: w.startMs,
+        activeDurationMs: w.activeMs,
+      })),
+    [blockList],
   );
 
-  const hasWindows = (windows?.length ?? 0) > 0;
-
-  // Default to the window with the most recorded (active) time. The earliest
-  // one is often a 0–2s stub (redirect / quick reload) — opening it made the
-  // player look broken next to the list's duration.
-  const defaultWindowId = hasWindows
-    ? windows!.reduce((best, w) =>
-        w.activeDurationMs > best.activeDurationMs ? w : best,
-      ).windowId
-    : null;
+  // Default to the window with the most recorded (active) time, pinned once
+  // resolved: live polling re-lists the windows, and a tab that later
+  // overtakes it must not swap (remount) the player mid-watch. Re-picked only
+  // if the pinned tab drops out of the list. Stored in state and updated
+  // during render (React's "adjust state on prop change" pattern).
+  const [pinnedDefaultId, setPinnedDefaultId] = useState<string | null>(null);
+  const defaultWindowId = resolveDefaultWindowId(windows, pinnedDefaultId);
+  if (defaultWindowId !== null && defaultWindowId !== pinnedDefaultId) {
+    setPinnedDefaultId(defaultWindowId);
+  }
   // A linked tab that doesn't exist (stale link) falls back to the default.
-  const activeWindowId =
-    selectedWindowId !== null &&
-    (!windows || windows.some((w) => w.windowId === selectedWindowId))
-      ? selectedWindowId
-      : defaultWindowId;
-  const activeWindow = windows?.find((w) => w.windowId === activeWindowId);
+  const activeWindowId = resolveActiveWindowId({
+    selectedId: selectedWindowId,
+    defaultId: defaultWindowId,
+    windows,
+    listLoaded: !!blockList,
+  });
   // The shared timestamp applies only to the tab it was taken on (or the
   // default tab when the link has none), and only until the user switches.
   const linkedWindowId = initialWindowId ?? defaultWindowId;
   const linkActive = !linkConsumed && activeWindowId === linkedWindowId;
-  const seekTo = linkActive && initialTimeSec != null ? initialTimeSec : undefined;
+  const seekTo =
+    linkActive && initialTimeSec != null ? initialTimeSec : undefined;
   const seekToAtMs =
     linkActive && initialAtMs != null ? initialAtMs : undefined;
 
   const switcher = (
     <WindowSwitcher
-      windows={windows ?? []}
+      windows={windows}
       activeWindowId={activeWindowId}
       onSelect={selectWindow}
     />
   );
 
-  // Remount ReplayContent on window switch (key) so the rrweb player, chunk
-  // buffer, and all internal state reset cleanly to the selected recording.
+  // Remount ReplayContent per window (key) so the rrweb player, block store
+  // and loader reset cleanly to the selected recording (and the previous
+  // window's in-flight request is aborted). Nothing mounts a loader until the
+  // block list is known: no throwaway first mount.
   const content = (studioHeader?: ReactNode) => (
     <ReplayContent
-      key={activeWindowId ?? 'default'}
+      key={blockList ? `w:${activeWindowId ?? ''}` : 'pending'}
       projectId={projectId}
       sessionId={sessionId}
-      windowId={activeWindowId ?? undefined}
-      windowDurationMs={activeWindow?.durationMs}
+      windowId={blockList ? (activeWindowId ?? '') : undefined}
+      blockList={blockList}
+      onStaleList={onStaleList}
       showEventFeed={showEventFeed}
       controlsRef={controlsRef}
       layout={layout}
@@ -985,7 +1021,7 @@ export function ReplayShell({
   );
 
   if (layout === 'studio') {
-    const multi = (windows?.length ?? 0) > 1;
+    const multi = windows.length > 1;
     return content(
       <>
         {header}

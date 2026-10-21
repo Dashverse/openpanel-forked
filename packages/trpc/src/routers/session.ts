@@ -6,6 +6,7 @@ import {
 } from '@openpanel/constants';
 import {
   batchSessionReplayDuration,
+  getReplayBlockList,
   getReplaySessionFilterValues,
   getSessionList,
   getSessionReplayChunksAroundTime,
@@ -169,6 +170,18 @@ export const sessionRouter = createTRPCRouter({
       return sessionHasReplay(sessionId, projectId);
     }),
 
+  /**
+   * PostHog-style block list for the replay player: which store serves this
+   * session ('blocks' | 'ch' | 'blob'), its windows (tabs) and every block
+   * with its time span. No payload, no block decoding; cached ~5 s server
+   * side because live sessions grow. Block bytes come from GET /replay/blocks.
+   */
+  replayBlocks: protectedProcedure
+    .input(z.object({ sessionId: z.string(), projectId: z.string() }))
+    .query(({ input: { sessionId, projectId }, signal }) => {
+      return getReplayBlockList(sessionId, projectId, { signal });
+    }),
+
   replayChunksFrom: protectedProcedure
     .input(
       z.object({
@@ -181,25 +194,28 @@ export const sessionRouter = createTRPCRouter({
         windowId: z.string().optional(),
       }),
     )
-    .query(({ input: { sessionId, projectId, fromIndex, windowId } }) => {
-      return getSessionReplayChunksFrom(
-        sessionId,
-        projectId,
-        fromIndex,
-        windowId,
-      );
-    }),
+    .query(
+      ({ input: { sessionId, projectId, fromIndex, windowId }, signal }) => {
+        return getSessionReplayChunksFrom(
+          sessionId,
+          projectId,
+          fromIndex,
+          windowId,
+          { signal },
+        );
+      },
+    ),
 
   replayWindows: protectedProcedure
     .input(z.object({ sessionId: z.string(), projectId: z.string() }))
-    .query(({ input: { sessionId, projectId } }) => {
-      return getSessionWindows(sessionId, projectId);
+    .query(({ input: { sessionId, projectId }, signal }) => {
+      return getSessionWindows(sessionId, projectId, { signal });
     }),
 
   replayMeta: protectedProcedure
     .input(z.object({ sessionId: z.string(), projectId: z.string() }))
-    .query(({ input: { sessionId, projectId } }) => {
-      return getSessionReplayMeta(sessionId, projectId);
+    .query(({ input: { sessionId, projectId }, signal }) => {
+      return getSessionReplayMeta(sessionId, projectId, { signal });
     }),
 
   // Active recording segments for a window (idle gaps collapsed) — drives the
@@ -213,8 +229,10 @@ export const sessionRouter = createTRPCRouter({
         windowId: z.string().optional(),
       }),
     )
-    .query(({ input: { sessionId, projectId, windowId } }) => {
-      return getSessionWindowSegments(sessionId, projectId, windowId);
+    .query(({ input: { sessionId, projectId, windowId }, signal }) => {
+      return getSessionWindowSegments(sessionId, projectId, windowId, {
+        signal,
+      });
     }),
 
   replayChunksByIndexRange: protectedProcedure
@@ -228,13 +246,17 @@ export const sessionRouter = createTRPCRouter({
       }),
     )
     .query(
-      ({ input: { sessionId, projectId, fromIndex, toIndex, windowId } }) => {
+      ({
+        input: { sessionId, projectId, fromIndex, toIndex, windowId },
+        signal,
+      }) => {
         return getSessionReplayChunksByIndexRange(
           sessionId,
           projectId,
           fromIndex,
           toIndex,
           windowId,
+          { signal },
         );
       },
     ),
@@ -259,13 +281,17 @@ export const sessionRouter = createTRPCRouter({
       }),
     )
     .query(
-      ({ input: { sessionId, projectId, targetMs, lookaheadMs, windowId } }) => {
+      ({
+        input: { sessionId, projectId, targetMs, lookaheadMs, windowId },
+        signal,
+      }) => {
         return getSessionReplayChunksAroundTime(
           sessionId,
           projectId,
           targetMs,
           lookaheadMs,
           windowId,
+          { signal },
         );
       },
     ),

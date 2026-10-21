@@ -35,3 +35,6 @@ export * from './src/services/cohort.service';
 export * from './src/services/custom-event.service';
 export * from './src/services/replay-block.service';
 export * from './src/blob/replay-blocks';
+export * from './src/services/replay-block-reader';
+export * from './src/services/replay-block-list';
+export * from './src/services/replay-chunk-input';

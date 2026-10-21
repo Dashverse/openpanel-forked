@@ -17,14 +17,26 @@ import {
   withSpan,
 } from '@openpanel/telemetry';
 import {
+  replayBlobOnlyChunksTotal,
   replayBlocksBytesTotal,
   replayBlocksErrorsTotal,
+  replayBlocksFailClosedTotal,
+  replayBlocksShadowSkippedTotal,
+  replayBlocksSkippedChunksTotal,
   replayBlocksWrittenTotal,
+  replayKafkaBatchRetriesTotal,
   replayKafkaConsumeErrorsTotal,
   replayKafkaConsumedTotal,
   replayKafkaConsumerLag,
 } from '../metrics';
 import { logger } from '../utils/logger';
+import {
+  type ReplayBlocksMode,
+  parseBlobOnlyProjectIds,
+  positiveIntEnv,
+  replayRetryBackoffMs,
+  writeReplayBatch,
+} from './replay-batch-writer';
 
 export interface ReplayKafkaConsumerHandle {
   stop: () => Promise<void>;
@@ -35,11 +47,13 @@ export interface ReplayKafkaConsumerHandle {
 //   dual           — ALSO write zstd blocks to Azure Blob + refs to CH, as a
 //                    SHADOW write: the CH chunk insert stays the source of truth,
 //                    a blob/ref failure is counted + logged but never blocks it.
-// There is deliberately no "blocks only" mode yet: the session list, player and
-// agent still read session_replay_chunks only, so stopping the CH insert would
-// make replays vanish until serving from blocks ships.
+// Per-project Blob-only (REPLAY_BLOB_ONLY_PROJECT_IDS, CSV) skips the CH insert
+// for those projects: blocks are their only copy, so a block/ref failure fails
+// the batch (redelivery) instead of being swallowed. Requires mode=dual (which
+// requires the blob store); otherwise those projects keep writing CH. Turn it
+// on only for projects the API serves from blocks
+// (REPLAY_SERVE_BLOCKS_PROJECT_IDS), or their new replays won't list/play.
 // Flip via `kubectl set env` + rollout.
-type ReplayBlocksMode = 'off' | 'dual';
 const REPLAY_BLOCKS_MODE: ReplayBlocksMode = ((): ReplayBlocksMode => {
   const v = (process.env.REPLAY_BLOCKS_MODE || 'off').trim().toLowerCase();
   if (v === 'dual') {
@@ -58,20 +72,60 @@ const REPLAY_BLOCKS_MODE: ReplayBlocksMode = ((): ReplayBlocksMode => {
   }
   return 'off';
 })();
+const REPLAY_BLOB_ONLY_PROJECT_IDS: ReadonlySet<string> = (() => {
+  const ids = parseBlobOnlyProjectIds(process.env.REPLAY_BLOB_ONLY_PROJECT_IDS);
+  if (ids.size > 0 && REPLAY_BLOCKS_MODE !== 'dual') {
+    // Never write nowhere: without blocks these projects stay on CH.
+    logger.error(
+      'REPLAY_BLOB_ONLY_PROJECT_IDS is set but replay blocks are off (needs REPLAY_BLOCKS_MODE=dual + AZURE_BLOB_CONNECTION_STRING); writing ClickHouse for those projects',
+      { projects: Array.from(ids) },
+    );
+    return new Set<string>();
+  }
+  if (ids.size > 0) {
+    // These replays exist only in blocks: the API must serve them from
+    // blocks, which it does when the same REPLAY_BLOB_ONLY_PROJECT_IDS is
+    // set on it too.
+    logger.info(
+      'replay Blob-only projects (no ClickHouse chunk insert); set the same REPLAY_BLOB_ONLY_PROJECT_IDS on the API so they are served',
+      { projects: Array.from(ids) },
+    );
+  }
+  return ids;
+})();
+
 // Overall bound on one batch's blob appends + ref insert. With the CH insert's
 // own INSERT_TIMEOUT_MS this keeps a batch well inside the rebalance timeout.
 // A non-positive/non-numeric value falls back to the default: NaN would make
 // AbortSignal.timeout throw on every batch (silently, inside the shadow catch).
-const BLOCKS_TIMEOUT_MS = (() => {
-  const n = Number.parseInt(process.env.REPLAY_BLOCKS_TIMEOUT_MS ?? '', 10);
-  return Number.isFinite(n) && n > 0 ? n : 20_000;
-})();
+const BLOCKS_TIMEOUT_MS = positiveIntEnv(
+  process.env.REPLAY_BLOCKS_TIMEOUT_MS,
+  20_000,
+);
+
+// One deadline for the whole batch (Blob-only write + CH insert + shadow
+// write). The per-step timeouts alone add up to 65s, past kafkajs' default 60s
+// rebalance timeout. The shadow write is skipped when less than
+// SHADOW_MIN_BUDGET_MS is left: it's optional, and skipping it only means those
+// sessions serve from ClickHouse.
+const BATCH_DEADLINE_MS = positiveIntEnv(
+  process.env.REPLAY_KAFKA_BATCH_DEADLINE_MS,
+  45_000,
+);
+const SHADOW_MIN_BUDGET_MS = 5_000;
+// Longest pause before a failed batch is retried (exponential from 1s).
+const RETRY_BACKOFF_MAX_MS = positiveIntEnv(
+  process.env.REPLAY_KAFKA_RETRY_BACKOFF_MAX_MS,
+  30_000,
+);
 
 // Replay is MUCH simpler than the events consumer: a chunk is a self-contained
 // row — there is no session read-modify-write to serialize, so we don't group by
 // key and there's no dedup. A batch is: decompress every value → collect the
 // JSONEachRow lines → insert the CH chunks (then, in dual mode, shadow-write
-// blob blocks) → resolve the whole batch. On a decompress or CH insert error we
+// blob blocks; Blob-only projects get blocks only, fail-closed - see
+// replay-batch-writer.ts) → resolve the whole batch. On a CH insert or
+// Blob-only block error we
 // DON'T resolve, so kafkajs redelivers the batch (at-least-once) rather than
 // dropping replay — a redelivery at worst duplicates (CH chunks and block refs
 // are both de-duped by chunk at serving), it never loses a chunk.
@@ -84,9 +138,9 @@ const POD = process.env.HOSTNAME || process.env.POD_NAME || 'unknown';
 // heartbeat every HEARTBEAT_EVERY_MS, and abort the insert after INSERT_TIMEOUT_MS
 // (below sessionTimeout) — a timed-out insert takes the normal failure path.
 const HEARTBEAT_EVERY_MS = 3_000;
-const INSERT_TIMEOUT_MS = Number.parseInt(
-  process.env.REPLAY_KAFKA_INSERT_TIMEOUT_MS || '25000',
-  10,
+const INSERT_TIMEOUT_MS = positiveIntEnv(
+  process.env.REPLAY_KAFKA_INSERT_TIMEOUT_MS,
+  25_000,
 );
 
 export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHandle> {
@@ -102,6 +156,9 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
   // gauges for partitions that moved to another member (a left-behind lag
   // series would be summed across pods and multiply the reported lag).
   let ownedPartitions = new Set<number>();
+  // Consecutive failures of the batch at the head of each partition (keyed by
+  // its first offset), for the retry backoff. Reset when that batch succeeds.
+  const failures = new Map<number, { offset: string; attempts: number }>();
 
   consumer.on(consumer.events.GROUP_JOIN, ({ payload }) => {
     const assignment = (payload.memberAssignment?.[KAFKA_REPLAY_TOPIC] ?? []) as
@@ -116,6 +173,7 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
     // labelled counter until it is incremented).
     for (const partition of partitions) {
       replayKafkaConsumeErrorsTotal.inc({ partition: String(partition) }, 0);
+      replayKafkaBatchRetriesTotal.inc({ partition: String(partition) }, 0);
     }
 
     // Release lag gauges for partitions we owned before this rebalance but no
@@ -127,6 +185,9 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
       }
     }
     ownedPartitions = assignedNow;
+    for (const p of failures.keys()) {
+      if (!assignedNow.has(p)) failures.delete(p);
+    }
 
     logger.info('replay kafka consumer joined group', {
       memberId: payload.memberId,
@@ -212,6 +273,10 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
         // bound each below the rebalance timeout (INSERT_TIMEOUT_MS /
         // BLOCKS_TIMEOUT_MS).
         await heartbeat();
+        const batchStarted = Date.now();
+        const deadline = AbortSignal.timeout(BATCH_DEADLINE_MS);
+        const stepSignal = (ms: number) =>
+          AbortSignal.any([deadline, AbortSignal.timeout(ms)]);
         const keepAlive = setInterval(() => {
           heartbeat().catch(() => {
             // a failed heartbeat surfaces via the consumer's own events
@@ -229,31 +294,79 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
                   },
                 },
                 async () => {
-                  // CH chunks are the source of truth: a failure here means we
-                  // don't resolve → the batch redelivers.
-                  await insertReplayChunks(lines, {
-                    abortSignal: AbortSignal.timeout(INSERT_TIMEOUT_MS),
-                  });
-                  if (REPLAY_BLOCKS_MODE !== 'dual') {
-                    return;
+                  // CH chunks (dual/off projects) are the source of truth and
+                  // Blob-only projects' blocks are their only copy: a failure
+                  // of either throws → we don't resolve → the batch
+                  // redelivers. Dual projects' blocks are a shadow write: an
+                  // Azure outage or slow call must not stall live replay, so
+                  // those errors are counted + logged, never thrown.
+                  const res = await writeReplayBatch(
+                    linesWithOffsets,
+                    {
+                      mode: REPLAY_BLOCKS_MODE,
+                      blobOnlyProjectIds: REPLAY_BLOB_ONLY_PROJECT_IDS,
+                    },
+                    {
+                      insertChunks: (chLines) =>
+                        insertReplayChunks(chLines, {
+                          abortSignal: stepSignal(INSERT_TIMEOUT_MS),
+                        }),
+                      writeBlocks: async (items) => {
+                        const r = await writeSessionReplayBlocks(items, {
+                          abortSignal: stepSignal(BLOCKS_TIMEOUT_MS),
+                        });
+                        if (r.skipped) {
+                          replayBlocksSkippedChunksTotal.inc(
+                            { partition },
+                            r.skipped,
+                          );
+                        }
+                        return r;
+                      },
+                      shadowBudgetOk: () =>
+                        BATCH_DEADLINE_MS - (Date.now() - batchStarted) >=
+                        SHADOW_MIN_BUDGET_MS,
+                      onShadowSkipped: () => {
+                        replayBlocksShadowSkippedTotal.inc({ partition });
+                        logger.warn(
+                          'replay shadow block write skipped (batch deadline)',
+                          { partition: batch.partition },
+                        );
+                      },
+                      onShadowError: (err) => {
+                        replayBlocksErrorsTotal.inc({ partition });
+                        logger.error(
+                          'replay blob blocks write failed (shadow)',
+                          {
+                            error: err,
+                            partition: batch.partition,
+                            messages: batch.messages.length,
+                          },
+                        );
+                      },
+                      onFailClosed: (err) => {
+                        replayBlocksErrorsTotal.inc({ partition });
+                        replayBlocksFailClosedTotal.inc({ partition });
+                        logger.error(
+                          'replay blob blocks write failed (blob-only, batch will redeliver)',
+                          {
+                            error: err,
+                            partition: batch.partition,
+                            messages: batch.messages.length,
+                          },
+                        );
+                      },
+                    },
+                  );
+                  if (res.blocks > 0) {
+                    replayBlocksWrittenTotal.inc({ partition }, res.blocks);
+                    replayBlocksBytesTotal.inc(res.bytes);
                   }
-                  // Shadow write: an Azure outage or slow call must not stall
-                  // live replay (and let the short-retention topic age it out),
-                  // so blob/ref errors are counted + logged, never thrown.
-                  try {
-                    const { blocks, bytes } = await writeSessionReplayBlocks(
-                      linesWithOffsets,
-                      { abortSignal: AbortSignal.timeout(BLOCKS_TIMEOUT_MS) },
+                  if (res.blobOnlyChunks > 0) {
+                    replayBlobOnlyChunksTotal.inc(
+                      { partition },
+                      res.blobOnlyChunks,
                     );
-                    replayBlocksWrittenTotal.inc({ partition }, blocks);
-                    replayBlocksBytesTotal.inc(bytes);
-                  } catch (err) {
-                    replayBlocksErrorsTotal.inc({ partition });
-                    logger.error('replay blob blocks write failed (shadow)', {
-                      error: err,
-                      partition: batch.partition,
-                      messages: batch.messages.length,
-                    });
                   }
                 },
               ),
@@ -281,6 +394,29 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
               Number(batch.highWatermark) - Number(batch.messages[0]!.offset),
             ),
           );
+          // Back off before the redelivery: pause this partition (other
+          // partitions keep flowing) and resume after 1s, 2s, 4s ... capped.
+          // Without this an outage re-fetched and re-failed the batch in a
+          // hot loop.
+          const firstOffset = batch.messages[0]!.offset;
+          const prev = failures.get(batch.partition);
+          const attempts =
+            prev && prev.offset === firstOffset ? prev.attempts + 1 : 1;
+          failures.set(batch.partition, { offset: firstOffset, attempts });
+          const backoffMs = replayRetryBackoffMs(
+            attempts,
+            RETRY_BACKOFF_MAX_MS,
+          );
+          replayKafkaBatchRetriesTotal.inc({ partition });
+          const tp = [{ topic: batch.topic, partitions: [batch.partition] }];
+          consumer.pause(tp);
+          setTimeout(() => consumer.resume(tp), backoffMs).unref();
+          logger.warn('replay kafka partition paused before retry', {
+            partition: batch.partition,
+            offset: firstOffset,
+            attempts,
+            backoffMs,
+          });
           return;
         } finally {
           clearInterval(keepAlive);
@@ -289,6 +425,7 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
 
       // Insert succeeded (or the batch was all-empty/undecompressable) — resolve
       // every offset in the batch. batch.messages is ordered by offset.
+      failures.delete(batch.partition);
       for (const m of batch.messages) {
         resolveOffset(m.offset);
       }

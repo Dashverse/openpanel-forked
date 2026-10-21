@@ -3,6 +3,8 @@ import {
   type IClickhouseSession,
   chQuery,
   getSessionList,
+  isReplayBlocksServingEnabled,
+  replayBlockSessionIdsSql,
   transformSession,
 } from '@openpanel/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
@@ -56,6 +58,13 @@ export async function listUserSessions(
           SELECT DISTINCT session_id
           FROM ${TABLE_NAMES.session_replay_chunks}
           WHERE project_id = ${sqlstring.escape(PROJECT_ID)}
+          ${
+            // Blocks-served project: Blob-only sessions (refs, no CH chunks)
+            // have a replay too.
+            isReplayBlocksServingEnabled(PROJECT_ID)
+              ? `UNION DISTINCT ${replayBlockSessionIdsSql(PROJECT_ID)}`
+              : ''
+          }
         )
       ORDER BY created_at DESC
       LIMIT ${limit}

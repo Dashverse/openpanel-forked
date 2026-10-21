@@ -219,13 +219,53 @@ export const replayBlocksBytesTotal = new client.Counter({
 
 export const replayBlocksErrorsTotal = new client.Counter({
   name: 'replay_blocks_errors_total',
-  help: 'Session-replay batches whose blob block write/ref insert failed',
+  help: 'Session-replay batches whose blob block write/ref insert failed (shadow + Blob-only)',
+  labelNames: ['partition'],
+});
+
+// Blob-only projects (REPLAY_BLOB_ONLY_PROJECT_IDS): blocks are the only copy,
+// so a failed block write fails the batch (offsets not resolved → redelivery).
+// Each such failure counts in replay_blocks_errors_total AND here, so
+// errors_total − fail_closed_total = swallowed shadow (dual) failures.
+export const replayBlocksFailClosedTotal = new client.Counter({
+  name: 'replay_blocks_fail_closed_total',
+  help: 'Session-replay batches redelivered because a Blob-only block write/ref insert failed',
+  labelNames: ['partition'],
+});
+
+export const replayBlobOnlyChunksTotal = new client.Counter({
+  name: 'replay_blob_only_chunks_total',
+  help: 'Session-replay chunks written to Blob blocks only (no ClickHouse chunk insert)',
   labelNames: ['partition'],
 });
 
 register.registerMetric(replayBlocksWrittenTotal);
 register.registerMetric(replayBlocksBytesTotal);
 register.registerMetric(replayBlocksErrorsTotal);
+register.registerMetric(replayBlocksFailClosedTotal);
+register.registerMetric(replayBlobOnlyChunksTotal);
+
+export const replayBlocksShadowSkippedTotal = new client.Counter({
+  name: 'replay_blocks_shadow_skipped_total',
+  help: 'Dual-write shadow block writes skipped because the batch deadline was nearly spent (sessions then serve from ClickHouse)',
+  labelNames: ['partition'],
+});
+
+export const replayBlocksSkippedChunksTotal = new client.Counter({
+  name: 'replay_blocks_skipped_chunks_total',
+  help: 'Session-replay chunk lines left out of blocks: not JSON or no parseable started_at',
+  labelNames: ['partition'],
+});
+
+export const replayKafkaBatchRetriesTotal = new client.Counter({
+  name: 'replay_kafka_batch_retries_total',
+  help: 'Failed session-replay batches whose partition was paused for a backoff before redelivery',
+  labelNames: ['partition'],
+});
+
+register.registerMetric(replayBlocksShadowSkippedTotal);
+register.registerMetric(replayBlocksSkippedChunksTotal);
+register.registerMetric(replayKafkaBatchRetriesTotal);
 
 queues.forEach((queue) => {
   register.registerMetric(
