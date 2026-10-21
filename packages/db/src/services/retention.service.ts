@@ -216,7 +216,7 @@ function utc(date: string | Date) {
  * into reporting different retention numbers.
  *
  * Retention reads raw `events` (routed to `events_v2` when enabled) instead of
- * the anon-excluding `cohort_events_mv`, and resolves each event to its
+ * the anon-excluding (now dropped) `cohort_events_mv`, and resolves each event to its
  * canonical person so a user's anonymous + identified activity — and logins
  * across devices — collapse to one (see #479). With the alias dictionary off
  * (self-hosted / dev) it falls back to the raw `profile_id`: still

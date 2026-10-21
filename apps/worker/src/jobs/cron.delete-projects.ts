@@ -16,13 +16,19 @@ export async function jobdeleteProjects(job: Job<CronQueuePayload>) {
     return;
   }
 
-  await deleteProjects(projects.map((project) => project.id));
+  const projectIds = projects.map((project) => project.id);
 
   logger.info('Deleting projects', {
     projects,
   });
 
-  await deleteFromClickhouse(projects.map((project) => project.id));
+  // ClickHouse FIRST: if it throws, the Postgres rows (with deleteAt in the
+  // past) are kept and this hourly cron retries the whole delete next run.
+  // deleteFromClickhouse is idempotent, so re-running it is safe. Deleting the
+  // Postgres rows first would orphan the ClickHouse data permanently.
+  await deleteFromClickhouse(projectIds);
+
+  await deleteProjects(projectIds);
 
   logger.info(`Deleted ${projects.length} projects`, {
     projects,
