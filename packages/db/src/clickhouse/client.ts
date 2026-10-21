@@ -231,11 +231,6 @@ function getClickhouseSettings(): ClickHouseSettings {
   return {
     date_time_input_format: 'best_effort',
     ...(queryLimit ? { max_concurrent_queries_for_user: queryLimit } : {}),
-    ...(!process.env.CLICKHOUSE_SETTINGS_REMOVE_CONVERT_ANY_JOIN
-      ? {
-          query_plan_convert_any_join_to_semi_or_anti_join: 0,
-        }
-      : {}),
     ...additionalSettings,
   };
 }
