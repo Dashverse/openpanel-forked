@@ -428,4 +428,96 @@ describe('incomingEvent', () => {
 
     expect(sessionsQueue.add).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [
+      'should keep the client device id and path on a late browser event',
+      {
+        uaInfo,
+        currentDeviceId,
+        expected: {
+          deviceId: currentDeviceId,
+          sessionId: '',
+          path: '/landing',
+          os: 'Windows',
+          country: 'US',
+        },
+      },
+    ],
+    [
+      'should attach a late browser event to the live session of its device',
+      {
+        uaInfo,
+        currentDeviceId: 'last-device-123',
+        expected: {
+          deviceId: 'last-device-123',
+          sessionId: 'last-session-456',
+          path: '/landing',
+          os: 'Windows',
+          country: 'US',
+        },
+      },
+    ],
+    [
+      'should borrow the profile session on a late server event',
+      {
+        uaInfo: uaInfoServer,
+        currentDeviceId: '',
+        expected: {
+          deviceId: 'last-device-123',
+          sessionId: 'last-session-456',
+          path: '/last-path',
+          os: 'iOS',
+          country: 'CA',
+        },
+      },
+    ],
+  ] as const)('%s', async (_, { uaInfo, currentDeviceId, expected }) => {
+    const session = {
+      id: 'last-session-456',
+      project_id: projectId,
+      profile_id: 'profile-123',
+      device_id: 'last-device-123',
+      exit_path: '/last-path',
+      exit_origin: 'https://example.com',
+      os: 'iOS',
+      browser: 'Safari',
+      country: 'CA',
+      city: 'Toronto',
+    } as IClickhouseSession;
+
+    vi.mocked(sessionBuffer.getExistingSession).mockImplementationOnce(
+      async (options) =>
+        'profileId' in options &&
+        [session.profile_id, session.device_id].includes(options.profileId)
+          ? session
+          : null,
+    );
+
+    await incomingEvent({
+      geo,
+      event: {
+        name: 'landingPageViewed',
+        timestamp: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        properties: { __path: 'https://example.com/landing' },
+        profileId: 'profile-123',
+        isTimestampFromThePast: true,
+      },
+      headers: {
+        'request-id': '123',
+        'user-agent': uaInfo.isServer
+          ? 'OpenPanel Server/1.0'
+          : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'openpanel-sdk-name': uaInfo.isServer ? 'server' : 'web',
+        'openpanel-sdk-version': '1.0.0',
+      },
+      projectId,
+      currentDeviceId,
+      previousDeviceId: '',
+      uaInfo,
+    });
+
+    expect((createEvent as Mock).mock.calls[0]![0]).toMatchObject(expected);
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+  });
 });
