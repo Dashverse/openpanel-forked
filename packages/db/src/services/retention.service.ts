@@ -199,6 +199,9 @@ export interface RetentionQueryInput {
   firstEventFilters?: IChartEventFilter[];
   /** Property filters applied only to the return ("second") event. */
   secondEventFilters?: IChartEventFilter[];
+  /** How each event's property filters combine (match all / match any). */
+  firstEventFilterOperator?: 'and' | 'or';
+  secondEventFilterOperator?: 'and' | 'or';
 }
 
 function utc(date: string | Date) {
@@ -282,7 +285,10 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
   // and cohort filters are dropped here (the event WHERE can't resolve them);
   // mirrors the safe pattern in funnel.service.ts. When a side has no filters its
   // fragment is '' so that side's SQL stays byte-identical to the no-filter case.
-  const toFilterSql = (filters: IChartEventFilter[] | undefined) => {
+  const toFilterSql = (
+    filters: IChartEventFilter[] | undefined,
+    filterOperator?: 'and' | 'or',
+  ) => {
     const conditions = Object.values(
       getEventFiltersWhereClause(
         (filters ?? []).filter(
@@ -293,14 +299,21 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
             f.operator !== 'notInCohort',
         ),
         projectId,
+        filterOperator,
       ),
     );
     return conditions.length
       ? `\n        ${conditions.map((c) => `AND (${c})`).join('\n        ')}`
       : '';
   };
-  const cohortFilterSql = toFilterSql(input.firstEventFilters);
-  const returnFilterSql = toFilterSql(input.secondEventFilters);
+  const cohortFilterSql = toFilterSql(
+    input.firstEventFilters,
+    input.firstEventFilterOperator,
+  );
+  const returnFilterSql = toFilterSql(
+    input.secondEventFilters,
+    input.secondEventFilterOperator,
+  );
 
   // Columns are table-qualified so the resolved expression's inner `profile_id`
   // binds to the column, not the `AS profile_id` output alias (avoids
