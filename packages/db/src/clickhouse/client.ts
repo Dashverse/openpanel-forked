@@ -66,7 +66,6 @@ export const TABLE_NAMES = {
   dau_mv: 'dau_mv',
   event_names_mv: 'distinct_event_names_mv',
   event_property_values_mv: 'event_property_values_mv',
-  cohort_events_mv: 'cohort_events_mv',
   sessions: 'sessions',
   events_imports: 'events_imports_v2',
   cohort_members: 'cohort_members',
@@ -74,6 +73,9 @@ export const TABLE_NAMES = {
   profile_event_summary_mv: 'profile_event_summary_mv',
   session_replay_chunks: 'session_replay_chunks',
   session_replay_blocks: 'session_replay_blocks',
+  replay_archive_index: 'replay_archive_index',
+  device_first_seen: 'device_first_seen',
+  first_event_dedup_device: 'first_event_dedup_device',
 };
 
 /**
