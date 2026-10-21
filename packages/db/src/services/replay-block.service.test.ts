@@ -29,7 +29,9 @@ vi.mock('../clickhouse/client', () => ({
   ch: { insert: (args: any) => insertMock(args) },
 }));
 
-const { writeSessionReplayBlocks } = await import('./replay-block.service');
+const { writeSessionReplayBlocks, replayBlockRefsInsertSettings } = await import(
+  './replay-block.service'
+);
 const { decompressReplayBlock } = await import('../blob/replay-blocks');
 
 const chunk = (
@@ -206,6 +208,23 @@ describe('writeSessionReplayBlocks', () => {
       insertMock.mock.calls[0]![0].clickhouse_settings
         .input_format_skip_unknown_fields,
     ).toBe(1);
+  });
+
+  it('ref inserts use a fixed async-insert flush window (default 2 s)', async () => {
+    await writeSessionReplayBlocks([
+      { line: chunk('A', 0, '2026-10-01 10:00:00.000'), offset: 1 },
+    ]);
+    expect(insertMock.mock.calls[0]![0].clickhouse_settings).toMatchObject({
+      async_insert: 1,
+      wait_for_async_insert: 1,
+      async_insert_use_adaptive_busy_timeout: 0,
+      async_insert_busy_timeout_ms: 2000,
+    });
+    // 0 falls back to ClickHouse's adaptive default
+    const off = replayBlockRefsInsertSettings(0);
+    expect(off).not.toHaveProperty('async_insert_busy_timeout_ms');
+    expect(off).not.toHaveProperty('async_insert_use_adaptive_busy_timeout');
+    expect(off.wait_for_async_insert).toBe(1);
   });
 
   it('propagates an append failure (caller decides) and inserts no refs', async () => {

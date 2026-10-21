@@ -129,6 +129,38 @@ const BLOCK_WRITE_CONCURRENCY = (() => {
   return Number.isFinite(n) && n > 0 ? n : 4;
 })();
 
+// How long ClickHouse may hold ref inserts to coalesce them into one part.
+// The default adaptive async-insert timeout flushes within ~200 ms, which in
+// prod (2026-10-21) made ~31,500 new parts/hour for a few KB of refs, and with
+// them ~62,000 merges, ~63,000 replica downloads and ~158,000 part removals per
+// hour across the 3 replicas (Keeper and merge CPU, not query CPU). A fixed
+// window turns that into roughly one part per node per window. The consumer
+// waits for the flush (wait_for_async_insert) before resolving offsets, so the
+// window is added latency per Kafka batch, well inside the batch deadline.
+// 0 = ClickHouse's default (adaptive) behaviour.
+const REFS_ASYNC_INSERT_TIMEOUT_MS = (() => {
+  const n = Number.parseInt(
+    process.env.REPLAY_BLOCKS_ASYNC_INSERT_TIMEOUT_MS ?? '',
+    10,
+  );
+  return Number.isFinite(n) && n >= 0 ? n : 2000;
+})();
+
+/** ClickHouse settings for a refs insert (exported for tests). */
+export function replayBlockRefsInsertSettings(timeoutMs: number) {
+  return {
+    async_insert: 1,
+    wait_for_async_insert: 1,
+    input_format_skip_unknown_fields: 1,
+    ...(timeoutMs > 0
+      ? {
+          async_insert_use_adaptive_busy_timeout: 0,
+          async_insert_busy_timeout_ms: timeoutMs,
+        }
+      : {}),
+  } as const;
+}
+
 export async function insertReplayBlocks(
   rows: IClickhouseSessionReplayBlock[],
   opts: { abortSignal?: AbortSignal } = {},
@@ -143,12 +175,11 @@ export async function insertReplayBlocks(
     // a part per batch, so let ClickHouse coalesce them (async_insert) — and wait
     // for the write, because the consumer resolves Kafka offsets after this ack.
     // skip_unknown_fields: a writer deployed before migration 26 (chunk_keys)
-    // must not fail the insert on the new field.
-    clickhouse_settings: {
-      async_insert: 1,
-      wait_for_async_insert: 1,
-      input_format_skip_unknown_fields: 1,
-    },
+    // must not fail the insert on the new field. Flush window: see
+    // REFS_ASYNC_INSERT_TIMEOUT_MS.
+    clickhouse_settings: replayBlockRefsInsertSettings(
+      REFS_ASYNC_INSERT_TIMEOUT_MS,
+    ),
   });
 }
 
