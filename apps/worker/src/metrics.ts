@@ -11,6 +11,7 @@ import {
 } from '@openpanel/db';
 import { cronQueue, eventsGroupQueues, sessionsQueue } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
+import { REPLAY_BATCH_BYTES_BUCKETS } from './jobs/replay-parts';
 
 const bufferRedis = getRedisCache();
 
@@ -266,6 +267,45 @@ export const replayKafkaBatchRetriesTotal = new client.Counter({
 register.registerMetric(replayBlocksShadowSkippedTotal);
 register.registerMetric(replayBlocksSkippedChunksTotal);
 register.registerMetric(replayKafkaBatchRetriesTotal);
+
+// Split chunks (transport parts): sets joined back into one chunk, sets
+// dropped because they can never complete (reason = invalid | abandoned |
+// unfetchable, see jobs/replay-parts.ts), and how often a partition waited for
+// the rest of a set at the head of its batch.
+export const replayKafkaChunksReassembledTotal = new client.Counter({
+  name: 'replay_kafka_chunks_reassembled_total',
+  help: 'Split session-replay chunks whose transport parts were joined back into one chunk',
+  labelNames: ['partition'],
+});
+
+export const replayKafkaPartSetsDroppedTotal = new client.Counter({
+  name: 'replay_kafka_part_sets_dropped_total',
+  help: 'Split session-replay chunks dropped because their part set can never complete, by reason',
+  labelNames: ['partition', 'reason'],
+});
+
+export const replayKafkaPartsWaitsTotal = new client.Counter({
+  name: 'replay_kafka_parts_waits_total',
+  help: 'Times a replay partition paused because the part set at the head of its batch was still incomplete',
+  labelNames: ['partition'],
+});
+
+// Value bytes of each replay batch (one partition's share of a fetch). A split
+// set only completes when all its parts arrive in one batch, so this shows
+// whether Event Hubs really returns up to KAFKA_REPLAY_MAX_BYTES_PER_PARTITION
+// (5 MiB) per partition, or stops near 1 MiB. Check it before enabling the
+// split (REPLAY_KAFKA_SPLIT_ENABLED).
+export const replayKafkaBatchBytes = new client.Histogram({
+  name: 'replay_kafka_batch_bytes',
+  help: 'Sum of message value bytes per session-replay Kafka batch (one partition fetch)',
+  labelNames: ['partition'],
+  buckets: REPLAY_BATCH_BYTES_BUCKETS,
+});
+
+register.registerMetric(replayKafkaBatchBytes);
+register.registerMetric(replayKafkaChunksReassembledTotal);
+register.registerMetric(replayKafkaPartSetsDroppedTotal);
+register.registerMetric(replayKafkaPartsWaitsTotal);
 
 queues.forEach((queue) => {
   register.registerMetric(

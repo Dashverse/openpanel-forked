@@ -36,7 +36,9 @@ const SESSION_ID_KEY = '_op_session_id';
 const SESSION_START_KEY = '_op_session_start_ms';
 const LAST_ACTIVITY_KEY = '_op_last_activity_ms';
 
-const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min
+// Exported: the replay recorder goes dormant inside this window (see
+// stopAfterIdleMs), so the two must come from the same constant.
+export const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min
 const DEFAULT_MAX_SESSION_MS = 24 * 60 * 60 * 1000; // 24 hrs
 
 export type SessionIdChangedCallback = (

@@ -1,5 +1,9 @@
 import type { eventWithTime } from 'rrweb';
 import { record } from 'rrweb';
+import { ReplayRecorderCore } from './recorder-core';
+import type { ReplayChunkPayload } from './recorder-core';
+
+export type { ReplayChunkPayload } from './recorder-core';
 
 export type ReplayRecorderConfig = {
   maskAllInputs?: boolean;
@@ -8,54 +12,48 @@ export type ReplayRecorderConfig = {
   blockSelector?: string;
   blockClass?: string;
   ignoreSelector?: string;
+  /** How often buffered events are sent as a chunk. Default 10 s. */
   flushIntervalMs?: number;
+  /**
+   * How often a fresh FullSnapshot is taken while the user is active.
+   * Default 5 min (matches PostHog). Independent of flushIntervalMs: a full
+   * snapshot re-serializes the whole page, so taking one per flush made
+   * snapshots the bulk of every recording. Paused while idle; on the first
+   * activity after idle one is taken if the last is older than this. 0 turns
+   * periodic and wake-up snapshots off (the initial one still happens).
+   */
+  fullSnapshotIntervalMs?: number;
   maxEventsPerChunk?: number;
+  /**
+   * Soft cap on a chunk's payload size in bytes. A chunk is flushed early
+   * as soon as the next event would push it over, so only a single huge
+   * event can exceed it (it is sent alone). Default 800 KB.
+   */
   maxPayloadBytes?: number;
   /**
+   * A single event larger than this has its data URIs replaced (images by a
+   * small placeholder, everything else removed) before it is sent. Default
+   * 5 MB (matches PostHog's ensureMaxMessageSize).
+   */
+  maxEventBytes?: number;
+  /**
    * How long (ms) without a real user interaction before the recorder goes
-   * idle and stops capturing. Default 5 min (matches PostHog). While idle,
-   * background DOM churn (a poll re-rendering, a "5 minutes ago" label
-   * ticking, an animation) is dropped instead of recorded — so a forgotten
-   * tab does not produce a multi-hour ghost recording.
+   * idle. Default 5 min (matches PostHog). Idle only pauses the periodic
+   * full snapshots: every change (a video rendering, a chat answer
+   * streaming) is still recorded, unlike PostHog, which drops events while
+   * idle.
    */
   idleThresholdMs?: number;
-};
-
-// rrweb IncrementalSource values that represent genuine USER activity.
-// Notably absent: source 0 (Mutation) — DOM mutations happen from background
-// work too, so they must NOT count as activity. Mirrors PostHog's ACTIVE_SOURCES.
-//   1 MouseMove · 2 MouseInteraction · 3 Scroll · 4 ViewportResize
-//   5 Input · 6 TouchMove · 7 MediaInteraction · 12 Drag
-const ACTIVE_SOURCES = new Set([1, 2, 3, 4, 5, 6, 7, 12]);
-
-const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000; // 5 min (matches PostHog)
-
-// Absolute ceiling for a SINGLE event sent as its own chunk. maxPayloadBytes
-// (default 1 MB) is only the batch-split threshold — a single event that
-// exceeds it is still sent alone, because dropping it corrupts the recording:
-// dropping a FullSnapshot leaves the player with no rebuild anchor (seek
-// lands on "Node not found" → black frame), and dropping a mutation breaks
-// the DOM mirror chain for everything after it. Only beyond this hard cap do
-// we drop, loudly. The ingest API accepts far larger bodies (500 MB).
-const HARD_EVENT_CAP_BYTES = 10 * 1024 * 1024; // 10 MB
-
-/** An event counts as user activity only if it's an interactive incremental. */
-function isInteractiveEvent(event: eventWithTime): boolean {
-  return (
-    event.type === 3 /* IncrementalSnapshot */ &&
-    ACTIVE_SOURCES.has(
-      (event.data as { source?: number } | undefined)?.source ?? -1,
-    )
-  );
-}
-
-export type ReplayChunkPayload = {
-  chunk_index: number;
-  events_count: number;
-  is_full_snapshot: boolean;
-  started_at: string;
-  ended_at: string;
-  payload: string;
+  /**
+   * Stop capturing after this long without a real user interaction (or the
+   * tab coming back into view): flush, then drop everything until the user
+   * returns, when a fresh FullSnapshot is taken. Default the SDK's 30 min
+   * session idle timeout; capture stops 1 min before it so the last chunk
+   * never rotates the session. Without this a forgotten tab with any DOM
+   * churn would record forever, opening a new session every 30 min.
+   * 0 disables it.
+   */
+  stopAfterIdleMs?: number;
 };
 
 let stopRecording: (() => void) | null = null;
@@ -65,10 +63,16 @@ export function startReplayRecorder(
   sendChunk: (payload: ReplayChunkPayload) => void,
   /**
    * Called on each genuine user interaction (mouse/click/scroll/input/...).
-   * The SDK uses this to bump session activity — so ONLY real interactions
+   * The SDK uses this to bump session activity - so ONLY real interactions
    * extend the session, never background DOM churn.
    */
   onUserActivity?: () => void,
+  /**
+   * First chunk_index to emit. A restart within the same window_id must
+   * continue the sequence, or different chunks collide on
+   * (window_id, chunk_index). Default 0.
+   */
+  startChunkIndex = 0,
 ): void {
   if (typeof document === 'undefined' || typeof window === 'undefined') {
     return;
@@ -79,126 +83,37 @@ export function startReplayRecorder(
     stopRecording();
   }
 
-  const maxEventsPerChunk = config.maxEventsPerChunk ?? 200;
-  const flushIntervalMs = config.flushIntervalMs ?? 10_000;
-  const maxPayloadBytes = config.maxPayloadBytes ?? 1_048_576; // 1 MB
-  const idleThresholdMs = config.idleThresholdMs ?? DEFAULT_IDLE_THRESHOLD_MS;
-
-  let buffer: eventWithTime[] = [];
-  let chunkIndex = 0;
-  let flushTimer: ReturnType<typeof setInterval> | null = null;
-
-  // Idle state (PostHog-style). We start "active" so the initial snapshot is
-  // always captured. lastActivityMs tracks the last real user interaction.
-  let isIdle = false;
-  let lastActivityMs = Date.now();
-  // MouseMove/Scroll fire many times a second and each onUserActivity() bump
-  // writes localStorage. Throttle the notify to at most once/sec — lastActivityMs
-  // still updates on every interactive event (in-memory, cheap).
-  let lastActivityNotifyMs = 0;
-
-  function flush(): void {
-    if (buffer.length === 0) return;
-
-    const payloadJson = JSON.stringify(buffer);
-    const payloadBytes = new TextEncoder().encode(payloadJson).length;
-
-    if (payloadBytes > maxPayloadBytes) {
-      // Recursively split oversized batches so each request stays small.
-      if (buffer.length > 1) {
-        const mid = Math.floor(buffer.length / 2);
-        const firstHalf = buffer.slice(0, mid);
-        const secondHalf = buffer.slice(mid);
-        buffer = firstHalf;
-        flush();
-        buffer = secondHalf;
-        flush();
-        return;
-      }
-      // A single event over the split threshold is sent as its own chunk —
-      // see HARD_EVENT_CAP_BYTES for why dropping it is never acceptable.
-      if (payloadBytes > HARD_EVENT_CAP_BYTES) {
-        console.warn(
-          '[OpenPanel.replay] dropping oversized event — replay may be broken from this point',
-          { type: buffer[0]!.type, bytes: payloadBytes },
-        );
-        buffer = [];
-        return;
-      }
-    }
-
-    // A chunk "is" a full snapshot iff it actually contains a type-2 event.
-    // Derived from content — never from the checkout flag — because the
-    // dashboard's seek anchoring queries chunks by this column.
-    const isFullSnapshot = buffer.some((e) => e.type === 2);
-    const startedAt = buffer[0]!.timestamp;
-    const endedAt = buffer[buffer.length - 1]!.timestamp;
-
-    try {
-      sendChunk({
-        chunk_index: chunkIndex,
-        events_count: buffer.length,
-        is_full_snapshot: isFullSnapshot,
-        started_at: new Date(startedAt).toISOString(),
-        ended_at: new Date(endedAt).toISOString(),
-        payload: payloadJson,
-      });
-      chunkIndex += 1;
-      buffer = [];
-    } catch (err) {
-      console.error('[OpenPanel.replay] sendChunk failed', err);
-      throw err;
-    }
-  }
-
-  function flushIfNeeded(isCheckout: boolean): void {
-    // On checkout, flush immediately so the FullSnapshot begins a fresh,
-    // cleanly-bounded chunk (the is_full_snapshot column is derived from
-    // chunk content inside flush()).
-    if (buffer.length >= maxEventsPerChunk || (isCheckout && buffer.length > 0)) {
-      flush();
-    }
-  }
+  const core = new ReplayRecorderCore(
+    {
+      flushIntervalMs: config.flushIntervalMs,
+      fullSnapshotIntervalMs: config.fullSnapshotIntervalMs,
+      idleThresholdMs: config.idleThresholdMs,
+      stopAfterIdleMs: config.stopAfterIdleMs,
+      maxEventsPerChunk: config.maxEventsPerChunk,
+      maxPayloadBytes: config.maxPayloadBytes,
+      maxEventBytes: config.maxEventBytes,
+      startChunkIndex,
+    },
+    {
+      sendChunk,
+      onUserActivity,
+      // record.takeFullSnapshot targets the most recent record() call, which
+      // is this recorder for as long as the core is not stopped.
+      takeFullSnapshot: () => record.takeFullSnapshot?.(true),
+    },
+  );
 
   const maskAllText = config.maskAllText !== false;
   const unmaskTextSelector = config.unmaskTextSelector;
 
+  // No checkoutEveryNms: rrweb checks it on every emitted event, so it keeps
+  // re-snapshotting an idle tab with background churn, and it cannot be
+  // paused. The core runs its own snapshot timer instead
+  // (PostHog does the same with setInterval + takeFullSnapshot).
   const stopFn = record({
-    emit(event: eventWithTime, isCheckout?: boolean) {
-      const interactive = isInteractiveEvent(event);
-
-      if (interactive) {
-        lastActivityMs = event.timestamp;
-        if (event.timestamp - lastActivityNotifyMs >= 1000) {
-          lastActivityNotifyMs = event.timestamp;
-          onUserActivity?.();
-        }
-        if (isIdle) {
-          // Returning from idle. The player's DOM mirror is stale (we dropped
-          // the mutations that happened while idle), so force a fresh
-          // FullSnapshot to give playback a clean anchor before resuming.
-          isIdle = false;
-          try {
-            record.takeFullSnapshot?.(true);
-          } catch {
-            // takeFullSnapshot unavailable — the next checkoutEveryNms snapshot
-            // will re-anchor shortly; not fatal.
-          }
-        }
-      } else if (!isIdle && event.timestamp - lastActivityMs > idleThresholdMs) {
-        // No real interaction for idleThresholdMs. Go idle: flush what we have
-        // and stop capturing so background churn doesn't grow a ghost recording.
-        isIdle = true;
-        flush();
-      }
-
-      // While idle, drop events entirely — no buffering, no chunks.
-      if (isIdle) return;
-
-      buffer.push(event);
-      flushIfNeeded(!!isCheckout);
+    emit(event: eventWithTime) {
+      core.handleEvent(event);
     },
-    checkoutEveryNms: flushIntervalMs,
     maskAllInputs: config.maskAllInputs ?? true,
     maskTextSelector: maskAllText ? '*' : '[data-openpanel-replay-mask]',
     maskTextFn:
@@ -213,35 +128,31 @@ export function startReplayRecorder(
     ignoreSelector: config.ignoreSelector,
   });
 
-  flushTimer = setInterval(() => {
-    flush();
-  }, flushIntervalMs);
+  core.start();
 
   function onVisibilityChange(): void {
-    if (document.visibilityState === 'hidden') {
-      flush();
-    }
+    core.handleVisibilityChange(document.visibilityState !== 'hidden');
   }
 
   function onPageHide(): void {
-    flush();
+    core.flush();
   }
 
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('pagehide', onPageHide);
 
-  stopRecording = () => {
-    // Final flush before teardown
-    flush();
-    if (flushTimer) {
-      clearInterval(flushTimer);
-      flushTimer = null;
-    }
+  const stop = () => {
+    if (stopRecording === stop) stopRecording = null;
     document.removeEventListener('visibilitychange', onVisibilityChange);
     window.removeEventListener('pagehide', onPageHide);
+    // Stop rrweb FIRST, then the final flush. The flush can rotate the
+    // session and synchronously start the next recorder; stopping rrweb
+    // after that would clear rrweb's module-level `recording` flag under the
+    // new recorder and break its takeFullSnapshot.
     stopFn?.();
-    stopRecording = null;
+    core.stop();
   };
+  stopRecording = stop;
 }
 
 export function stopReplayRecorder(): void {
