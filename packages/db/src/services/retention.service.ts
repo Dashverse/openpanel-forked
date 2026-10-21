@@ -14,7 +14,6 @@ import {
   aliasResolutionNeedsCte,
   chMcp,
   chQuery,
-  getEventsTableForRange,
   resolvedPersonIdSql,
 } from '../clickhouse/client';
 import { getEventFiltersWhereClause } from './chart.service';
@@ -215,8 +214,8 @@ function utc(date: string | Date) {
  * tRPC procedure and the MCP `get_retention` tool, so the two can never drift
  * into reporting different retention numbers.
  *
- * Retention reads raw `events` (routed to `events_v2` when enabled) instead of
- * the anon-excluding `cohort_events_mv`, and resolves each event to its
+ * Retention reads raw `events` instead of
+ * the anon-excluding (now dropped) `cohort_events_mv`, and resolves each event to its
  * canonical person so a user's anonymous + identified activity — and logins
  * across devices — collapse to one (see #479). With the alias dictionary off
  * (self-hosted / dev) it falls back to the raw `profile_id`: still
@@ -305,7 +304,7 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
   // Columns are table-qualified so the resolved expression's inner `profile_id`
   // binds to the column, not the `AS profile_id` output alias (avoids
   // NOT_AN_AGGREGATE / ambiguous identifier — the #432 trap).
-  const eventsTable = getEventsTableForRange(utc(startDate));
+  const eventsTable = TABLE_NAMES.events;
   const personSql = aliasResolutionNeedsCte()
     ? `${eventsTable}.profile_id`
     : resolvedPersonIdSql(

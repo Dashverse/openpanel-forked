@@ -11,7 +11,6 @@ import {
   ch,
   chMcp,
   formatClickhouseDate,
-  getEventsTableForRange,
   resolvedPersonIdSql,
   aliasResolutionNeedsCte,
 } from '../clickhouse/client';
@@ -169,7 +168,7 @@ export class ConversionService {
       // extended window for the end-event CTE, so the all-time-first can fall
       // anywhere in the conversion window. See first-time.service.ts.
       const firstTimeWhere = event.firstTime
-        ? ` AND (${getEventsTableForRange(startDate)}.profile_id, ${getEventsTableForRange(startDate)}.created_at) IN (${buildFirstTimeSubquery(
+        ? ` AND (${TABLE_NAMES.events}.profile_id, ${TABLE_NAMES.events}.created_at) IN (${buildFirstTimeSubquery(
             {
               projectId,
               eventName: event.name,
@@ -209,7 +208,7 @@ export class ConversionService {
             }),
           ),
         ];
-        profileJoinClause = `\n        LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = ${getEventsTableForRange(startDate)}.profile_id`;
+        profileJoinClause = `\n        LEFT JOIN (SELECT id, ${profileColumns.join(', ')} FROM ${TABLE_NAMES.profiles} FINAL WHERE project_id = '${projectId}') AS profile ON profile.id = ${TABLE_NAMES.events}.profile_id`;
       }
 
       // Minimal SELECT: only the columns actually needed downstream
@@ -224,8 +223,8 @@ export class ConversionService {
       // resolution: an unqualified `profile_id` in the JOIN ON / coalesce binds to
       // the SELECT output alias (also `profile_id`), yielding a circular join key
       // (al.alias = coalesce(al.canonical, profile_id)) that ClickHouse rejects.
-      const rawProfileId = `${getEventsTableForRange(startDate)}.profile_id`;
-      const rawDeviceId = `${getEventsTableForRange(startDate)}.device_id`;
+      const rawProfileId = `${TABLE_NAMES.events}.profile_id`;
+      const rawDeviceId = `${TABLE_NAMES.events}.device_id`;
       // profile_aliases is keyed on $device_id (= device_id column), NOT the anon
       // distinct_id that the proxy lands in profile_id. Resolve on device_id, fall
       // back to profile_id. dict on -> dictGet (no JOIN); dict off -> al CTE + JOIN.
@@ -255,7 +254,7 @@ export class ConversionService {
       // or depend on the profile LEFT JOIN executed after PREWHERE.
       return `${cteName} AS (
         SELECT ${selectList}
-        FROM ${getEventsTableForRange(startDate)}${profileJoinClause}${aliasJoin}
+        FROM ${TABLE_NAMES.events}${profileJoinClause}${aliasJoin}
         PREWHERE project_id = '${projectId}'
           AND name = '${event.name}'
           AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
@@ -289,7 +288,7 @@ export class ConversionService {
     // If no custom events, use regular events table
     if (customEvents.every((ce) => !ce)) {
       return {
-        fromClause: getEventsTableForRange(startDate),
+        fromClause: TABLE_NAMES.events,
         ctes: [],
         needsDateFilter: true,
       };
@@ -341,7 +340,7 @@ export class ConversionService {
       } else {
         // Regular event - include materialized columns to match custom events
         unionParts.push(`
-          SELECT *${materializedColumnsSelect} FROM ${getEventsTableForRange(startDate)}
+          SELECT *${materializedColumnsSelect} FROM ${TABLE_NAMES.events}
           WHERE project_id = '${projectId}'
             AND name = '${event.name}'
             AND created_at BETWEEN toDateTime('${startDate}') AND toDateTime('${endDate}')
@@ -453,7 +452,7 @@ export class ConversionService {
       allFilterClauses.length > 0
         ? `filtered_profiles AS (
         SELECT DISTINCT profile_id
-        FROM ${getEventsTableForRange(startDate)}
+        FROM ${TABLE_NAMES.events}
         WHERE project_id = '${projectLiteral}'
           AND name IN ('${firstNameLiteral}', '${lastNameLiteral}')
           AND created_at >= ${startTs}
@@ -463,7 +462,7 @@ export class ConversionService {
       ),`
         : '';
 
-    const E = getEventsTableForRange(startDate);
+    const E = TABLE_NAMES.events;
 
     const filteredProfilesJoin =
       allFilterClauses.length > 0
