@@ -61,6 +61,14 @@ export function parseProjectAllowList(raw: string | undefined): {
 const SERVE_BLOCKS = parseProjectAllowList(
   process.env.REPLAY_SERVE_BLOCKS_PROJECT_IDS,
 );
+// Projects the worker writes to Blob only have nothing on the legacy path, so
+// they must be served from blocks: a Blob-only project missing from the serve
+// list would record replays nobody can play. Set REPLAY_BLOB_ONLY_PROJECT_IDS
+// on the API too (same value as the worker) and those projects are served
+// whatever REPLAY_SERVE_BLOCKS_PROJECT_IDS says.
+const BLOB_ONLY = parseProjectAllowList(
+  process.env.REPLAY_BLOB_ONLY_PROJECT_IDS,
+);
 
 const DEFAULT_COMPLETE_SINCE = '2026-10-10T00:00:00Z';
 /**
@@ -79,7 +87,11 @@ export const REPLAY_BLOCKS_COMPLETE_SINCE_MS = (() => {
 /** Serve this project's replays from blocks (allow-listed AND blob configured). */
 export function isReplayBlocksServingEnabled(projectId: string): boolean {
   if (!isReplayBlockStoreConfigured()) return false;
-  return SERVE_BLOCKS.all || SERVE_BLOCKS.ids.has(projectId);
+  return (
+    SERVE_BLOCKS.all ||
+    SERVE_BLOCKS.ids.has(projectId) ||
+    BLOB_ONLY.ids.has(projectId)
+  );
 }
 
 const READ_CONCURRENCY = positiveIntEnv('REPLAY_BLOCKS_READ_CONCURRENCY', 4);

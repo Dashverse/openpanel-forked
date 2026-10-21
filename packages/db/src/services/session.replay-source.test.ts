@@ -537,6 +537,19 @@ describe('replay source resolution', () => {
     expect((await svc.getSessionReplayMeta('live', 'p1')).source).toBe('blocks');
   });
 
+  it('Kafka backlog: chunks recorded 10 min ago, blocks written just now, tail in flight → blocks', async () => {
+    const now = Date.now();
+    const iso = (t: number) => new Date(t).toISOString();
+    const cs = [
+      mkChunk('p1', 'lag', 'w', 0, iso(now - 600_000), true),
+      mkChunk('p1', 'lag', 'w', 1, iso(now - 590_000)), // CH insert done, shadow pending
+    ];
+    chChunks.push(...cs);
+    archiveRows.push({ project_id: 'p1', session_id: 'lag', first_ms: now - 600_000 });
+    addBlock([cs[0]!], 1, iso(now - 2_000)); // consumer is behind: written now
+    expect((await svc.getSessionReplayMeta('lag', 'p1')).source).toBe('blocks');
+  });
+
   it('a missing tail chunk past the in-flight grace is a gap → legacy', async () => {
     const cs = [
       mkChunk('p1', 'tail', 'w', 0, '2026-10-11T08:00:00.000Z', true),

@@ -1,3 +1,5 @@
+import { parseReplayTimestampMs } from './replay-block.service';
+
 /**
  * Validation of an SDK replay chunk's scalar fields at ingest (/track).
  *
@@ -20,13 +22,11 @@ export interface ReplayChunkFields {
 
 const UINT16_MAX = 65_535;
 
+// Same parsing as the worker and readers (parseReplayTimestampMs): ISO and
+// ClickHouse datetime strings, and epoch numbers or numeric strings in
+// seconds or milliseconds.
 function toIso(v: unknown): string | null {
-  const ms =
-    typeof v === 'number'
-      ? v
-      : typeof v === 'string' && v.trim() !== ''
-        ? Date.parse(v)
-        : Number.NaN;
+  const ms = parseReplayTimestampMs(v);
   if (!Number.isFinite(ms)) return null;
   const d = new Date(ms);
   return Number.isNaN(d.getTime()) ? null : d.toISOString();

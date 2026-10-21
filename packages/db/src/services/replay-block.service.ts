@@ -57,14 +57,21 @@ const CH_DATETIME_RE =
  * UTC server): ISO / 'YYYY-MM-DD hh:mm:ss[.fff]' with no zone = UTC, sub-ms
  * digits truncated, numeric = Unix seconds. NaN when unparseable.
  */
+// A numeric timestamp at or above this is epoch MILLISECONDS (JS Date.now()),
+// below it epoch seconds (ClickHouse's JSON reading). 1e11 s is the year 5138
+// and 1e11 ms is 1973, so real values on either side can't be confused.
+const EPOCH_MS_THRESHOLD = 1e11;
+const epochToMs = (n: number) =>
+  n >= EPOCH_MS_THRESHOLD ? Math.floor(n) : Math.floor(n * 1000);
+
 export function parseReplayTimestampMs(value: unknown): number {
   if (typeof value === 'number') {
-    return Number.isFinite(value) ? Math.floor(value * 1000) : Number.NaN;
+    return Number.isFinite(value) ? epochToMs(value) : Number.NaN;
   }
   if (typeof value !== 'string') return Number.NaN;
   const v = value.trim();
   if (/^\d+(\.\d+)?$/.test(v)) {
-    return Math.floor(Number(v) * 1000);
+    return epochToMs(Number(v));
   }
   const m = CH_DATETIME_RE.exec(v);
   if (m) {

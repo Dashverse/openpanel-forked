@@ -1252,10 +1252,14 @@ async function legacyHasOlderReplay(
  *   migration 26 fall back to summed events_count, where a duplicate can.
  * - In flight is not missing: dual-write inserts CH chunks before the shadow
  *   block write of the same batch, so a live tab briefly has CH chunks the
- *   blocks don't. A CH chunk newer than the tab's newest block AND younger
- *   than REPLAY_GUARD_INFLIGHT_GRACE_MS is ignored; past the grace a missing
- *   tail is a real gap. Without this a live session flipped to legacy for a
- *   cache period every batch.
+ *   blocks don't. A CH chunk newer than the tab's newest block is ignored
+ *   while that tab's newest block was WRITTEN less than
+ *   REPLAY_GUARD_INFLIGHT_GRACE_MS ago (ref created_at: ClickHouse server
+ *   time, set in the same consumer batch as the CH insert). Measuring from
+ *   the browser's started_at instead would flip live sessions to legacy
+ *   during a Kafka backlog and let a fast visitor clock hide a missing tail.
+ *   Once the tab's blocks stop advancing for the grace, a missing tail is a
+ *   real gap. A tab with no refs at all uses the session's newest ref.
  *
  * Reads key columns + events_count only, on the (project_id, session_id)
  * sort-key prefix. Sessions CH has already dropped are not checked here (the
@@ -1287,17 +1291,27 @@ async function chHasChunksMissingFromBlocks(
 
   const byWindow = new Map<
     string,
-    { keys: Set<string>; allKeyed: boolean; events: number; lastMs: number }
+    {
+      keys: Set<string>;
+      allKeyed: boolean;
+      events: number;
+      lastMs: number;
+      lastWrittenMs: number;
+    }
   >();
+  let sessionLastWrittenMs = Number.NEGATIVE_INFINITY;
   for (const r of refs) {
     const w = byWindow.get(r.windowId) ?? {
       keys: new Set<string>(),
       allKeyed: true,
       events: 0,
       lastMs: Number.NEGATIVE_INFINITY,
+      lastWrittenMs: Number.NEGATIVE_INFINITY,
     };
     w.events += r.eventsCount;
     w.lastMs = Math.max(w.lastMs, r.lastStartedMs);
+    w.lastWrittenMs = Math.max(w.lastWrittenMs, r.createdAtMs);
+    sessionLastWrittenMs = Math.max(sessionLastWrittenMs, r.createdAtMs);
     if (r.chunkKeys.length === 0) w.allKeyed = false;
     for (const [chunkIndex, startedMs] of r.chunkKeys) {
       w.keys.add(`${chunkIndex}:${startedMs}`);
@@ -1311,7 +1325,8 @@ async function chHasChunksMissingFromBlocks(
     const w = byWindow.get(row.window_id);
     const inFlight =
       startedMs > (w?.lastMs ?? Number.NEGATIVE_INFINITY) &&
-      nowMs - startedMs < REPLAY_GUARD_INFLIGHT_GRACE_MS;
+      nowMs - (w?.lastWrittenMs ?? sessionLastWrittenMs) <
+        REPLAY_GUARD_INFLIGHT_GRACE_MS;
     if (inFlight) continue;
     if (!w) return true; // a tab only CH has
     if (w.allKeyed) {
@@ -1382,6 +1397,8 @@ async function blocksAreComplete(
 /** A transient failure deciding where a replay lives (retry, not "none"). */
 export class ReplayTemporarilyUnavailableError extends Error {
   readonly status = 503;
+  // Fastify's error handler reads statusCode.
+  readonly statusCode = 503;
   constructor(message: string) {
     super(message);
     this.name = 'ReplayTemporarilyUnavailableError';

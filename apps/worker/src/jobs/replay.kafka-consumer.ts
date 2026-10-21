@@ -83,9 +83,13 @@ const REPLAY_BLOB_ONLY_PROJECT_IDS: ReadonlySet<string> = (() => {
     return new Set<string>();
   }
   if (ids.size > 0) {
-    logger.info('replay Blob-only projects (no ClickHouse chunk insert)', {
-      projects: Array.from(ids),
-    });
+    // These replays exist only in blocks: the API must serve them from
+    // blocks, which it does when the same REPLAY_BLOB_ONLY_PROJECT_IDS is
+    // set on it too.
+    logger.info(
+      'replay Blob-only projects (no ClickHouse chunk insert); set the same REPLAY_BLOB_ONLY_PROJECT_IDS on the API so they are served',
+      { projects: Array.from(ids) },
+    );
   }
   return ids;
 })();

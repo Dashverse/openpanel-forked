@@ -27,6 +27,14 @@ describe('normalizeReplayChunkFields', () => {
     expect(r.ok && r.fields.ended_at).toBe('2026-10-19T09:00:10.000Z');
   });
 
+  it('reads epoch seconds and numeric strings like the worker does', () => {
+    const at = Date.parse('2026-10-19T09:00:00Z');
+    for (const started_at of [at / 1000, String(at / 1000), String(at)]) {
+      const r = normalizeReplayChunkFields({ ...base, started_at });
+      expect(r.ok && r.fields.started_at).toBe('2026-10-19T09:00:00.000Z');
+    }
+  });
+
   it.each([
     ['missing started_at', { started_at: undefined }],
     ['garbage started_at', { started_at: 'yesterday-ish' }],

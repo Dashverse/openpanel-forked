@@ -57,6 +57,8 @@ const positiveIntEnv = (name: string, fallback: number): number => {
 
 /** PostHog's cap on blocks per data request. */
 export const REPLAY_BLOCKS_MAX_PER_REQUEST = 100;
+/** Legacy (CH / archive) pages per request: their chunks are held in memory. */
+export const REPLAY_LEGACY_MAX_PER_REQUEST = 25;
 /** Live sessions grow, so the list is only cached briefly (PostHog: 5 s). */
 export const REPLAY_BLOCK_LIST_TTL_MS = 5_000;
 /**
@@ -557,6 +559,14 @@ export async function prepareReplayBlockData(input: {
     };
   }
 
+  // Legacy chunks are read whole before streaming (so a gone chunk can 409),
+  // so bound what one request holds: the player asks for 10 at a time.
+  if (keys.length > REPLAY_LEGACY_MAX_PER_REQUEST) {
+    throw new ReplayBlockRequestError(
+      400,
+      `at most ${REPLAY_LEGACY_MAX_PER_REQUEST} legacy blocks per request`,
+    );
+  }
   const pages = keys.map((k) => ({
     key: k,
     page: internal.pages.get(`${input.windowId}\u0000${k}`)!,
