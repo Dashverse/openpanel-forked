@@ -215,7 +215,7 @@ function utc(date: string | Date) {
  * tRPC procedure and the MCP `get_retention` tool, so the two can never drift
  * into reporting different retention numbers.
  *
- * Retention reads raw `events` (routed to `events_v2` when enabled) instead of
+ * Retention reads raw `events` instead of
  * the anon-excluding (now dropped) `cohort_events_mv`, and resolves each event to its
  * canonical person so a user's anonymous + identified activity — and logins
  * across devices — collapse to one (see #479). With the alias dictionary off
