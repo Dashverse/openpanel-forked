@@ -9,7 +9,6 @@ import type { IChartEventFilter } from '@openpanel/validation';
 import { aliasBuffer, profileBuffer } from '../buffers';
 import {
   TABLE_NAMES,
-  ch,
   chQuery,
   convertClickhouseDateToJs,
   formatClickhouseDate,
@@ -1083,9 +1082,9 @@ export interface IServiceUpsertAlias {
  * We follow Mixpanel's identity model: we never rewrite event rows. The alias
  * row is written once on sign-in and resolved at query time (in a later PR).
  *
- * Volume is one row per sign-in transition, so we insert directly rather than
- * going through a buffer. Guards drop self-maps / empty ids so we never create
- * a chain (an alias that is also a canonical) or a no-op row.
+ * Rows are written through `aliasBuffer` (batched + deduped per flush). Guards
+ * drop self-maps / empty ids so we never create a chain (an alias that is also
+ * a canonical) or a no-op row.
  */
 export async function upsertAlias({
   projectId,
@@ -1103,34 +1102,9 @@ export async function upsertAlias({
     created_at: formatClickhouseDate(new Date()),
   };
 
-  // Kill switch (ALIAS_BUFFER_ENABLED): route alias writes through the batched,
-  // in-batch-deduped Redis buffer. The proxy re-emits the same mapping on every
-  // event batch, so the direct path below produced a flood of duplicate rows +
-  // tiny parts into the profile_aliases ReplacingMergeTree, driving huge merge
-  // CPU. The buffer collapses per-batch re-emissions and coalesces parts.
-  // Unset/false keeps the original direct async insert, so the buffer can be
-  // disabled instantly with an env flip + worker restart (the flush cron still
-  // drains anything already buffered).
-  if (
-    process.env.ALIAS_BUFFER_ENABLED === '1' ||
-    process.env.ALIAS_BUFFER_ENABLED === 'true'
-  ) {
-    await aliasBuffer.add(row);
-    return;
-  }
-
-  await ch.insert({
-    table: TABLE_NAMES.alias,
-    values: [row],
-    format: 'JSONEachRow',
-    // Aliases are written one row at a time per sign-in batch (the proxy
-    // re-emits per batch). async_insert lets ClickHouse coalesce these into
-    // server-side batches (~1 part/sec) instead of a part per insert, which
-    // matters at scale on this single-partition ReplacingMergeTree. The
-    // client-level CLICKHOUSE_SETTINGS does not enable it, so set it here.
-    clickhouse_settings: {
-      async_insert: 1,
-      wait_for_async_insert: 0,
-    },
-  });
+  // Writes go through the batched, in-batch-deduped Redis buffer: the proxy
+  // re-emits the same mapping on every event batch, and one direct insert per
+  // emission flooded the profile_aliases ReplacingMergeTree with duplicate rows
+  // and tiny parts (huge merge CPU). The buffer's flush cron coalesces them.
+  await aliasBuffer.add(row);
 }
