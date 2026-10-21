@@ -11,6 +11,7 @@ import {
 } from '@openpanel/db';
 import { cronQueue, eventsGroupQueues, sessionsQueue } from '@openpanel/queue';
 import { getRedisCache } from '@openpanel/redis';
+import { REPLAY_BATCH_BYTES_BUCKETS } from './jobs/replay-parts';
 
 const bufferRedis = getRedisCache();
 
@@ -289,6 +290,19 @@ export const replayKafkaPartsWaitsTotal = new client.Counter({
   labelNames: ['partition'],
 });
 
+// Value bytes of each replay batch (one partition's share of a fetch). A split
+// set only completes when all its parts arrive in one batch, so this shows
+// whether Event Hubs really returns up to KAFKA_REPLAY_MAX_BYTES_PER_PARTITION
+// (5 MiB) per partition, or stops near 1 MiB. Check it before enabling the
+// split (REPLAY_KAFKA_SPLIT_ENABLED).
+export const replayKafkaBatchBytes = new client.Histogram({
+  name: 'replay_kafka_batch_bytes',
+  help: 'Sum of message value bytes per session-replay Kafka batch (one partition fetch)',
+  labelNames: ['partition'],
+  buckets: REPLAY_BATCH_BYTES_BUCKETS,
+});
+
+register.registerMetric(replayKafkaBatchBytes);
 register.registerMetric(replayKafkaChunksReassembledTotal);
 register.registerMetric(replayKafkaPartSetsDroppedTotal);
 register.registerMetric(replayKafkaPartsWaitsTotal);

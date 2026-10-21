@@ -44,6 +44,16 @@ export type ReplayRecorderConfig = {
    * idle.
    */
   idleThresholdMs?: number;
+  /**
+   * Stop capturing after this long without a real user interaction (or the
+   * tab coming back into view): flush, then drop everything until the user
+   * returns, when a fresh FullSnapshot is taken. Default the SDK's 30 min
+   * session idle timeout; capture stops 1 min before it so the last chunk
+   * never rotates the session. Without this a forgotten tab with any DOM
+   * churn would record forever, opening a new session every 30 min.
+   * 0 disables it.
+   */
+  stopAfterIdleMs?: number;
 };
 
 let stopRecording: (() => void) | null = null;
@@ -78,6 +88,7 @@ export function startReplayRecorder(
       flushIntervalMs: config.flushIntervalMs,
       fullSnapshotIntervalMs: config.fullSnapshotIntervalMs,
       idleThresholdMs: config.idleThresholdMs,
+      stopAfterIdleMs: config.stopAfterIdleMs,
       maxEventsPerChunk: config.maxEventsPerChunk,
       maxPayloadBytes: config.maxPayloadBytes,
       maxEventBytes: config.maxEventBytes,

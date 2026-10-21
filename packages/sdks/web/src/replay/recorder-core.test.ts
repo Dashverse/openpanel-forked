@@ -106,7 +106,8 @@ describe('full snapshot scheduling', () => {
     const r = setup();
     // A video rendering / an answer streaming: changes, no input.
     let n = 0;
-    every(r.core, 10_000, 30 * MIN, () =>
+    // 25 min: inside the 30 min session window, so nothing goes dormant.
+    every(r.core, 10_000, 25 * MIN, () =>
       n++ % 2 === 0 ? mutation(`frame ${n}`) : canvas(),
     );
     expect(r.snapshots()).toBe(0);
@@ -117,7 +118,8 @@ describe('full snapshot scheduling', () => {
     expect(sent).toHaveLength(2 + n); // initial Meta + FullSnapshot + all
     expect(sent.filter((e) => e.type === 2)).toHaveLength(1);
     const last = Math.max(...sent.map((e) => e.timestamp));
-    expect(last - Date.parse('2026-10-19T10:00:00.000Z')).toBe(30 * MIN);
+    expect(last - Date.parse('2026-10-19T10:00:00.000Z')).toBe(25 * MIN);
+    expect(r.core.dormant).toBe(false);
   });
 
   it('takes none on a static page with no events at all', () => {
@@ -233,6 +235,123 @@ describe('full snapshot scheduling', () => {
     expect(sent.some((e) => e.type === 3 && (e.data as any).source === 2)).toBe(
       false,
     );
+  });
+});
+
+const T0 = Date.parse('2026-10-19T10:00:00.000Z');
+const sinceStart = (ts: number) => ts - T0;
+
+describe('dormancy (stop after the session idle timeout)', () => {
+  it('a churning tab with no input stops sending before the session expires, then sends nothing', () => {
+    const r = setup();
+    every(r.core, 10_000, 120 * MIN, () => mutation('churn'));
+    expect(r.core.dormant).toBe(true);
+    const sentAtDormancy = r.chunks.length;
+
+    every(r.core, 10_000, 60 * MIN, () => mutation('churn'));
+    vi.advanceTimersByTime(10 * MIN);
+    // No sends after dormancy, so the replay path never reads (and rotates)
+    // the session; no activity bumps either.
+    expect(r.chunks.length).toBe(sentAtDormancy);
+    expect(r.onUserActivity).not.toHaveBeenCalled();
+    // Recorded up to 1 min before the 30 min session timeout.
+    const last = Math.max(...r.events().map((e) => e.timestamp));
+    expect(sinceStart(last)).toBeLessThan(29 * MIN);
+    expect(sinceStart(last)).toBeGreaterThan(28.5 * MIN);
+    expect(r.snapshots()).toBe(0);
+  });
+
+  it('resumes on the first activity with an immediate snapshot', () => {
+    const r = setup({ fullSnapshotIntervalMs: 0 });
+    every(r.core, 10_000, 45 * MIN, () => mutation('churn'));
+    expect(r.core.dormant).toBe(true);
+
+    r.core.handleEvent(click());
+    expect(r.core.dormant).toBe(false);
+    expect(r.core.idle).toBe(false);
+    expect(r.onUserActivity).toHaveBeenCalledTimes(1);
+    // Mirror is out of sync, so even with periodic snapshots off.
+    expect(r.snapshots()).toBe(1);
+
+    r.core.handleEvent(mutation('after'));
+    vi.advanceTimersByTime(10_000);
+    const tail = JSON.parse(r.chunks[r.chunks.length - 1]!.payload).map(
+      (e: eventWithTime) => e.type,
+    );
+    expect(tail).toEqual([4, 2, 3, 3]);
+    expect(r.chunks[r.chunks.length - 1]!.is_full_snapshot).toBe(true);
+  });
+
+  it('resumes periodic snapshots after waking from dormancy', () => {
+    const r = setup();
+    vi.advanceTimersByTime(40 * MIN);
+    r.core.handleEvent(click());
+    expect(r.snapshots()).toBe(1);
+    every(r.core, MIN, 5 * MIN, mouseMove);
+    expect(r.snapshots()).toBe(2);
+  });
+
+  it('wakes when the tab becomes visible again', () => {
+    const r = setup();
+    r.core.handleVisibilityChange(false);
+    every(r.core, 10_000, 40 * MIN, () => mutation('bg'));
+    expect(r.core.dormant).toBe(true);
+    r.onUserActivity.mockClear();
+
+    r.core.handleVisibilityChange(true);
+    expect(r.core.dormant).toBe(false);
+    expect(r.onUserActivity).toHaveBeenCalledTimes(1);
+    expect(r.snapshots()).toBe(1);
+  });
+
+  it('a static page goes dormant via the timer', () => {
+    const r = setup();
+    vi.advanceTimersByTime(28 * MIN);
+    expect(r.core.dormant).toBe(false);
+    vi.advanceTimersByTime(MIN + 10_000);
+    expect(r.core.dormant).toBe(true);
+    expect(r.snapshots()).toBe(0);
+  });
+
+  it('discards instead of sending when dormancy is detected late (session may have expired)', () => {
+    const r = setup();
+    every(r.core, 10_000, 28 * MIN, () => mutation('churn'));
+    vi.advanceTimersByTime(5_000);
+    r.core.handleEvent(mutation('buffered'));
+    const sent = r.chunks.length;
+    // A hidden tab whose timers ran late: the next thing we see is 31 min in.
+    vi.setSystemTime(T0 + 31 * MIN);
+    r.core.handleEvent(mutation('late'));
+    expect(r.core.dormant).toBe(true);
+    expect(r.chunks.length).toBe(sent);
+  });
+
+  it('stopAfterIdleMs 0 disables dormancy', () => {
+    const r = setup({ stopAfterIdleMs: 0 });
+    every(r.core, 10_000, 120 * MIN, () => mutation('churn'));
+    vi.advanceTimersByTime(10_000);
+    expect(r.core.dormant).toBe(false);
+    const last = Math.max(...r.events().map((e) => e.timestamp));
+    expect(sinceStart(last)).toBe(120 * MIN);
+  });
+
+  it('frameo config (idleThresholdMs 30 min): snapshots every 5 min, then dormancy wins with no extra snapshot', () => {
+    const r = setup({ idleThresholdMs: 30 * MIN });
+    every(r.core, 10_000, 60 * MIN, () => mutation('generating'));
+    // 5, 10, 15, 20, 25 min; dormant at 29 min before the 30 min idle pause
+    // or the 30 min tick could take another one.
+    expect(r.snapshots()).toBe(5);
+    expect(r.core.dormant).toBe(true);
+    const fulls = r
+      .events()
+      .filter((e) => e.type === 2)
+      .map((e) => sinceStart(e.timestamp));
+    expect(fulls).toEqual([0, 5, 10, 15, 20, 25].map((m) => m * MIN));
+    const last = Math.max(...r.events().map((e) => e.timestamp));
+    expect(sinceStart(last)).toBeLessThan(29 * MIN);
+
+    r.core.handleEvent(click());
+    expect(r.snapshots()).toBe(6);
   });
 });
 

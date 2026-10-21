@@ -96,9 +96,7 @@ describe('compressReplayLine / decompressReplayLine', () => {
       './replay-kafka'
     );
     // include multibyte chars to prove the TextEncoder/TextDecoder path is safe
-    const line = JSON.stringify(
-      makeChunk(`${rrwebPayload(1_000_000)}···né😀`),
-    );
+    const line = JSON.stringify(makeChunk(`${rrwebPayload(1_000_000)}···né😀`));
     const value = compressReplayLine(line);
     // real rrweb JSON compresses well — sanity check it actually shrank
     expect(value.length).toBeLessThan(Buffer.byteLength(line, 'utf8'));

@@ -26,6 +26,7 @@ import {
   replayBlocksShadowSkippedTotal,
   replayBlocksSkippedChunksTotal,
   replayBlocksWrittenTotal,
+  replayKafkaBatchBytes,
   replayKafkaBatchRetriesTotal,
   replayKafkaChunksReassembledTotal,
   replayKafkaConsumeErrorsTotal,
@@ -42,7 +43,12 @@ import {
   replayRetryBackoffMs,
   writeReplayBatch,
 } from './replay-batch-writer';
-import { reassembleReplayBatch } from './replay-parts';
+import {
+  type PartsWaitState,
+  nextPartsWait,
+  reassembleReplayBatch,
+  replayBatchValueBytes,
+} from './replay-parts';
 
 export interface ReplayKafkaConsumerHandle {
   stop: () => Promise<void>;
@@ -160,16 +166,25 @@ const PARTS_ABANDON_MS = positiveIntEnv(
 );
 // Last resort: a set at the head of a batch that never reaches the tail and
 // never completes (the broker returns less per fetch than asked) is dropped
-// after this long, instead of stalling the partition forever.
+// after this long, instead of stalling the partition forever. If Event Hubs
+// returns less than a set per partition fetch, every split set costs this
+// stall, so check replay_kafka_batch_bytes before turning the split on.
 const PARTS_MAX_HEAD_BLOCKED_MS = positiveIntEnv(
   process.env.REPLAY_KAFKA_PARTS_MAX_HEAD_BLOCKED_MS,
-  600_000,
+  120_000,
 );
-// Pause before refetching a partition whose head set is still in flight, so
-// waiting for the producer's next part is not a hot fetch loop.
+// Pause before refetching a partition whose head set is still incomplete, so
+// waiting for the producer's next part is not a hot fetch loop. Each refetch
+// re-reads up to a whole set (~3 MB) and counts against Event Hubs egress on
+// the shared namespace, so the pause backs off per blocked head: 250ms,
+// 500ms, 1s ... capped, reset when the head moves on.
 const PARTS_WAIT_MS = positiveIntEnv(
   process.env.REPLAY_KAFKA_PARTS_WAIT_MS,
   250,
+);
+const PARTS_WAIT_MAX_MS = positiveIntEnv(
+  process.env.REPLAY_KAFKA_PARTS_WAIT_MAX_MS,
+  4_000,
 );
 
 export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHandle> {
@@ -191,6 +206,8 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
   // Partitions whose batch head is an incomplete part set: the offset and
   // when it was first blocked away from the tail (for the last-resort drop).
   const headBlocked = new Map<number, { offset: string; since: number }>();
+  // Consecutive waits on the same blocked head per partition (wait backoff).
+  const headWaits = new Map<number, PartsWaitState>();
 
   consumer.on(consumer.events.GROUP_JOIN, ({ payload }) => {
     const assignment = (payload.memberAssignment?.[KAFKA_REPLAY_TOPIC] ?? []) as
@@ -222,6 +239,9 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
     }
     for (const p of headBlocked.keys()) {
       if (!assignedNow.has(p)) headBlocked.delete(p);
+    }
+    for (const p of headWaits.keys()) {
+      if (!assignedNow.has(p)) headWaits.delete(p);
     }
 
     logger.info('replay kafka consumer joined group', {
@@ -274,6 +294,13 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
       const headOffset = batch.messages[0]!.offset;
       const lastOffset = batch.messages[batch.messages.length - 1]!.offset;
       const atTail = Number(lastOffset) >= Number(batch.highWatermark) - 1;
+      // How much one partition fetch really returns (Event Hubs may return
+      // less than maxBytesPerPartition): a split set only completes when all
+      // its parts arrive in one batch.
+      replayKafkaBatchBytes.observe(
+        { partition },
+        replayBatchValueBytes(batch.messages),
+      );
       const blockedSince = headBlocked.get(batch.partition);
       const headBlockedMs =
         blockedSince && blockedSince.offset === headOffset
@@ -284,6 +311,7 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
         decode: decodeReplayValue,
         maxParts: REPLAY_KAFKA_MAX_PARTS,
         abandonAfterMs: PARTS_ABANDON_MS,
+        now: Date.now(),
         atTail,
         maxBytesPerPartition: REPLAY_KAFKA_MAX_BYTES_PER_PARTITION,
         maxMessageBytes: REPLAY_KAFKA_MAX_BYTES,
@@ -494,9 +522,10 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
       );
 
       if (assembled.blockedAt === headOffset) {
-        // Nothing past the head can move until its parts arrive: wait a beat
-        // before refetching (pausing also leaves this fetch's bytes to the
-        // other partitions). Away from the tail, start the last-resort clock.
+        // Nothing past the head can move until its parts arrive: wait before
+        // refetching, backing off while the same head stays blocked (pausing
+        // also leaves this fetch's bytes to the other partitions). Away from
+        // the tail, start the last-resort clock.
         if (atTail) {
           headBlocked.delete(batch.partition);
         } else if (blockedSince?.offset !== headOffset) {
@@ -505,12 +534,19 @@ export async function startKafkaReplayConsumer(): Promise<ReplayKafkaConsumerHan
             since: Date.now(),
           });
         }
+        const { state, waitMs } = nextPartsWait(
+          headWaits.get(batch.partition),
+          headOffset,
+          (n) => replayRetryBackoffMs(n, PARTS_WAIT_MAX_MS, PARTS_WAIT_MS),
+        );
+        headWaits.set(batch.partition, state);
         replayKafkaPartsWaitsTotal.inc({ partition });
         const tp = [{ topic: batch.topic, partitions: [batch.partition] }];
         consumer.pause(tp);
-        setTimeout(() => consumer.resume(tp), PARTS_WAIT_MS).unref();
+        setTimeout(() => consumer.resume(tp), waitMs).unref();
       } else {
         headBlocked.delete(batch.partition);
+        headWaits.delete(batch.partition);
       }
 
       await heartbeat();

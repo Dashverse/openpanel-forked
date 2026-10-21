@@ -34,11 +34,20 @@ import {
  *  invalid     bad/inconsistent headers (index or count not an integer, count
  *              < 2 or > maxParts, index >= count, counts disagree within the
  *              chunk id) → the set is dropped. It can never be joined.
- *  abandoned   incomplete, and the batch holds a message after its first part
- *              that was produced >= abandonAfterMs after it. The producer
+ *  abandoned   incomplete, and either the batch holds a message after its
+ *              first part that was produced >= abandonAfterMs after it, or
+ *              the batch reaches the partition tail (nothing more to fetch)
+ *              and part 0 is >= abandonAfterMs older than `now`. The producer
  *              gives up on a set well within that window (parts deadline +
- *              one send's retries), so the missing parts will never come
- *              (send failed mid-way, pod died) → dropped.
+ *              one send's retries, ~55s), so the missing parts will never come
+ *              (send failed mid-way, pod died) → dropped. The tail rule covers
+ *              an orphan with no newer traffic behind it; it needs the tail so
+ *              a lagging consumer whose fetch merely cut a set short never
+ *              drops it by wall-clock age. It compares the worker's clock with
+ *              the message timestamp (API pod clock or broker time): the
+ *              ~65s between the producer's give-up and abandonAfterMs absorbs
+ *              that skew; a worker clock more than that ahead could drop a set
+ *              whose last part is still in flight.
  *  unfetchable incomplete at the HEAD of a batch that is not at the partition
  *              tail and whose bytes already reached the per-partition fetch
  *              limit (within one message: the broker stops when the next
@@ -77,6 +86,8 @@ export interface ReassembleOptions {
   /** Max declared part count accepted (REPLAY_KAFKA_MAX_PARTS). */
   maxParts: number;
   abandonAfterMs: number;
+  /** Wall-clock now (ms), for the tail abandon rule. */
+  now: number;
   /** The batch reaches the partition high-watermark (nothing more to fetch). */
   atTail: boolean;
   /** Consumer maxBytesPerPartition and the producer's per-message limit. */
@@ -203,7 +214,6 @@ export function reassembleReplayBatch(
 
   // 2. Classify. The first part's offset is where a set starts; every other
   // member comes after it in a sane log, but use the lowest member to be safe.
-  const offsetAt = (i: number) => Number(messages[i]!.offset);
   const firstMember = (s: PartSet) => s.members[0]!;
   const isComplete = (s: PartSet) =>
     !s.invalid && s.declared !== null && s.parts.size === s.declared;
@@ -217,8 +227,11 @@ export function reassembleReplayBatch(
     if (!s.parts.has(0) || isComplete(s)) continue; // leftover / complete
     const first = firstMember(s);
     const firstTs = Number(messages[s.parts.get(0)!]!.timestamp);
-    let abandoned = false;
-    if (Number.isFinite(firstTs)) {
+    let abandoned =
+      opts.atTail &&
+      Number.isFinite(firstTs) &&
+      opts.now - firstTs >= opts.abandonAfterMs;
+    if (!abandoned && Number.isFinite(firstTs)) {
       for (let j = first + 1; j < messages.length; j++) {
         const ts = Number(messages[j]!.timestamp);
         if (Number.isFinite(ts) && ts - firstTs >= opts.abandonAfterMs) {
@@ -332,4 +345,52 @@ export function reassembleReplayBatch(
     }
   }
   return result;
+}
+
+/** Sum of message value bytes in a batch (for replay_kafka_batch_bytes). */
+export function replayBatchValueBytes(messages: ReplayKafkaMessage[]): number {
+  let bytes = 0;
+  for (const m of messages) bytes += m.value?.length ?? 0;
+  return bytes;
+}
+
+const MiB = 1024 * 1024;
+/**
+ * replay_kafka_batch_bytes buckets: fine around 1 MiB (an Event Hubs fetch that
+ * stops near one message) and at 2/3/4/4.5/5 MiB (the 5 MiB partition fetch,
+ * which a split set needs).
+ */
+export const REPLAY_BATCH_BYTES_BUCKETS = [
+  64 * 1024,
+  256 * 1024,
+  512 * 1024,
+  0.9 * MiB,
+  1 * MiB,
+  1.5 * MiB,
+  2 * MiB,
+  3 * MiB,
+  4 * MiB,
+  4.5 * MiB,
+  5 * MiB,
+  10 * MiB,
+];
+
+export interface PartsWaitState {
+  offset: string;
+  attempts: number;
+}
+
+/**
+ * Next wait for a partition whose batch head is a blocked part set: counts
+ * consecutive waits on the SAME head offset (a new head restarts at 1; the
+ * caller drops the state once the head is no longer blocked) and returns the
+ * backoff via `backoff(attempts)`.
+ */
+export function nextPartsWait(
+  prev: PartsWaitState | undefined,
+  headOffset: string,
+  backoff: (attempts: number) => number,
+): { state: PartsWaitState; waitMs: number } {
+  const attempts = prev?.offset === headOffset ? prev.attempts + 1 : 1;
+  return { state: { offset: headOffset, attempts }, waitMs: backoff(attempts) };
 }

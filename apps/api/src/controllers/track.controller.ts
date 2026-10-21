@@ -3,11 +3,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
 import {
-  replayKafkaChunksSplitTotal,
+  recordReplayProduceResult,
   replayKafkaDroppedTotal,
-  replayKafkaOversizeBytes,
-  replayKafkaPartsProducedTotal,
-  replayKafkaProducedTotal,
 } from '@/metrics';
 import { HttpError } from '@/utils/errors';
 import { buildEventJobId } from '@/utils/event-job-id';
@@ -491,19 +488,7 @@ async function handleReplay({
     // simpler, better-distributed key and skips the getSalts()/hash work.)
     try {
       const result = await produceReplayChunk(chunk, sessionId);
-      if (result.status === 'oversize') {
-        replayKafkaDroppedTotal.inc({ reason: 'oversize' });
-        replayKafkaOversizeBytes.observe(
-          { is_full_snapshot: chunk.is_full_snapshot ? 'true' : 'false' },
-          result.compressedBytes,
-        );
-      } else {
-        replayKafkaProducedTotal.inc();
-        if (result.parts > 1) {
-          replayKafkaChunksSplitTotal.inc();
-          replayKafkaPartsProducedTotal.inc(result.parts);
-        }
-      }
+      recordReplayProduceResult(result, Boolean(chunk.is_full_snapshot));
     } catch (err) {
       // Separate admission-cap backpressure (the SDK retries → not a confirmed
       // drop) from a genuine produce failure, so dropped_total stays a

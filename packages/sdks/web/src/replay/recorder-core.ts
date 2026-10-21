@@ -1,4 +1,5 @@
 import type { eventWithTime } from 'rrweb';
+import { DEFAULT_IDLE_TIMEOUT_MS } from '../session-id-manager';
 import { shrinkDataUris, utf8ByteLength } from './size-utils';
 
 /**
@@ -35,6 +36,13 @@ export const DEFAULT_FLUSH_INTERVAL_MS = 10_000;
 export const DEFAULT_FULL_SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000; // PostHog: FIVE_MINUTES
 export const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000; // PostHog: RECORDING_IDLE_THRESHOLD_MS
 export const DEFAULT_MAX_EVENTS_PER_CHUNK = 200;
+// Stop capturing after this long without user activity: the session idle
+// timeout, so a forgotten tab cannot keep a session alive (every replay send
+// reads the session id, which rotates once it expired).
+export const DEFAULT_STOP_AFTER_IDLE_MS = DEFAULT_IDLE_TIMEOUT_MS;
+// Go dormant this much before stopAfterIdleMs (at most 10% of it), so the
+// final chunk is still sent under the live session and never rotates it.
+const DORMANT_LEAD_MS = 60_000;
 // Soft cap per chunk (UTF-8 bytes of the payload JSON). PostHog flushes at
 // 0.9 MB; we stay lower because the payload travels JSON-escaped inside the
 // /track body (every `"` becomes `\"`) and the server must keep each message
@@ -75,6 +83,12 @@ export type ReplayCoreOptions = {
    */
   fullSnapshotIntervalMs?: number;
   idleThresholdMs?: number;
+  /**
+   * Session idle timeout the recording must stay inside. With no activity
+   * for (just under) this long the recorder goes dormant: flush, then drop
+   * everything until the user is back. 0 disables dormancy.
+   */
+  stopAfterIdleMs?: number;
   maxEventsPerChunk?: number;
   maxPayloadBytes?: number;
   maxEventBytes?: number;
@@ -104,6 +118,8 @@ export class ReplayRecorderCore {
   private readonly flushIntervalMs: number;
   private readonly fullSnapshotIntervalMs: number;
   private readonly idleThresholdMs: number;
+  private readonly stopAfterIdleMs: number;
+  private readonly dormantAfterMs: number;
   private readonly maxEventsPerChunk: number;
   private readonly maxPayloadBytes: number;
   private readonly maxEventBytes: number;
@@ -116,12 +132,17 @@ export class ReplayRecorderCore {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private fullSnapshotTimer: ReturnType<typeof setInterval> | null = null;
 
-  // Idle state. We start "active". lastActivityMs tracks the last real user
-  // interaction. Unlike PostHog, idle never drops events: users watch a video
-  // render or a chat answer stream for minutes without touching anything,
-  // and that is exactly what the replay must show. Idle only pauses the
-  // periodic full snapshots.
+  // Two levels of "no user activity", tracked from lastActivityMs (the last
+  // real user interaction). We start active.
+  //   idle (idleThresholdMs, default 5 min): only pauses the periodic full
+  //     snapshots. Every event is still recorded: users watch a video render
+  //     or a chat answer stream for minutes without touching anything, and
+  //     that is exactly what the replay must show.
+  //   dormant (stopAfterIdleMs, default the 30 min session timeout): flush,
+  //     then drop everything until the user is back. This is PostHog's idle
+  //     (which drops after 5 min), with a window as long as the session.
   private isIdle = false;
+  private isDormant = false;
   private lastActivityMs: number;
   private lastActivityNotifyMs = Number.NEGATIVE_INFINITY;
   // Timestamp of the last FullSnapshot buffered (the last seek checkpoint).
@@ -137,6 +158,11 @@ export class ReplayRecorderCore {
     this.fullSnapshotIntervalMs =
       options.fullSnapshotIntervalMs ?? DEFAULT_FULL_SNAPSHOT_INTERVAL_MS;
     this.idleThresholdMs = options.idleThresholdMs ?? DEFAULT_IDLE_THRESHOLD_MS;
+    this.stopAfterIdleMs =
+      options.stopAfterIdleMs ?? DEFAULT_STOP_AFTER_IDLE_MS;
+    this.dormantAfterMs =
+      this.stopAfterIdleMs -
+      Math.min(DORMANT_LEAD_MS, this.stopAfterIdleMs / 10);
     this.maxEventsPerChunk =
       options.maxEventsPerChunk ?? DEFAULT_MAX_EVENTS_PER_CHUNK;
     this.maxPayloadBytes = options.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES;
@@ -149,6 +175,8 @@ export class ReplayRecorderCore {
   /** Start the flush and full snapshot timers. */
   start(): void {
     if (this.stopped || this.flushTimer) return;
+    // flush() also checks dormancy, so a static page (no events at all)
+    // still goes dormant on time.
     this.flushTimer = setInterval(() => this.flush(), this.flushIntervalMs);
     this.scheduleFullSnapshot();
   }
@@ -171,6 +199,10 @@ export class ReplayRecorderCore {
     return this.isIdle;
   }
 
+  get dormant(): boolean {
+    return this.isDormant;
+  }
+
   /** rrweb emit handler. */
   handleEvent(event: eventWithTime): void {
     if (this.stopped) return;
@@ -182,14 +214,19 @@ export class ReplayRecorderCore {
       // stops this recorder and starts a fresh one (which takes its own
       // FullSnapshot). Nothing more to do here.
       if (this.stopped) return;
-      if (this.isIdle) this.wake();
-    } else if (
-      !this.isIdle &&
-      event.timestamp - this.lastActivityMs > this.idleThresholdMs
-    ) {
-      // No real interaction for idleThresholdMs: pause periodic snapshots.
-      // The event itself is still recorded below, like everything else.
-      this.goIdle();
+      if (this.isDormant) this.wakeFromDormancy();
+      else if (this.isIdle) this.wake();
+    } else {
+      // Dormant: drop it (no buffering, no sends, no session reads).
+      if (this.enterDormancyIfDue(event.timestamp)) return;
+      if (
+        !this.isIdle &&
+        event.timestamp - this.lastActivityMs > this.idleThresholdMs
+      ) {
+        // No real interaction for idleThresholdMs: pause periodic snapshots.
+        // The event itself is still recorded below, like everything else.
+        this.goIdle();
+      }
     }
 
     this.add(event);
@@ -210,15 +247,22 @@ export class ReplayRecorderCore {
     // for a mouse move. A tab that never went idle has its timer running
     // already, and a snapshot per tab switch would only add bytes (PostHog
     // takes none on visibility at all).
-    if (!this.isIdle) return;
+    if (!this.isIdle && !this.isDormant) return;
     const now = this.now();
     this.lastActivityMs = now;
     this.notifyActivity(now);
     if (this.stopped) return;
-    this.wake();
+    if (this.isDormant) this.wakeFromDormancy();
+    else this.wake();
   }
 
+  /** Send the buffer as a chunk, unless the recorder is (now) dormant. */
   flush(): void {
+    if (this.enterDormancyIfDue(this.now())) return;
+    this.sendBuffer();
+  }
+
+  private sendBuffer(): void {
     if (this.buffer.length === 0) return;
 
     // Detach the buffer BEFORE sending: sendChunk can synchronously rotate
@@ -313,7 +357,7 @@ export class ReplayRecorderCore {
       // _captureSnapshotBuffered): never let this event push the chunk over
       // the cap, so a chunk is only big when it is one huge event.
       const overflows = this.bufferBytes + 1 + bytes > this.maxPayloadBytes;
-      if (startsSnapshot || overflows) this.flush();
+      if (startsSnapshot || overflows) this.sendBuffer();
     }
 
     this.bufferBytes += (this.buffer.length > 0 ? 1 : 0) + bytes;
@@ -337,7 +381,7 @@ export class ReplayRecorderCore {
     ) {
       // Already at the cap (a single huge event): nothing can join it, so
       // ship it now instead of holding it until the next tick.
-      this.flush();
+      this.sendBuffer();
     }
   }
 
@@ -351,6 +395,48 @@ export class ReplayRecorderCore {
     this.isIdle = true;
     // Don't take full snapshots while idle. Events keep flowing as normal.
     this.clearFullSnapshotTimer();
+  }
+
+  /**
+   * Enter the dormant state once no user activity for dormantAfterMs.
+   * Returns true while dormant. Checked on every non-interactive event and
+   * on every flush (the flush timer covers pages that emit nothing).
+   */
+  private enterDormancyIfDue(at: number): boolean {
+    if (this.isDormant) return true;
+    if (
+      !this.stopAfterIdleMs ||
+      at - this.lastActivityMs < this.dormantAfterMs
+    ) {
+      return false;
+    }
+    // Normally we get here in the lead window before the session expires,
+    // and the last chunk is sent. Detected late (timers in a hidden tab can
+    // run a minute behind), the session may already have expired, and
+    // sending would rotate it and restart recording. Discard instead: at
+    // most one flush interval of idle churn.
+    const sessionMayHaveExpired =
+      at - this.lastActivityMs >=
+      this.stopAfterIdleMs - ACTIVITY_NOTIFY_THROTTLE_MS;
+    if (sessionMayHaveExpired) {
+      this.buffer = [];
+      this.bufferBytes = EMPTY_PAYLOAD_BYTES;
+    } else {
+      this.sendBuffer();
+    }
+    this.isDormant = true;
+    this.isIdle = true;
+    this.clearFullSnapshotTimer();
+    return true;
+  }
+
+  private wakeFromDormancy(): void {
+    this.isDormant = false;
+    this.isIdle = false;
+    this.scheduleFullSnapshot();
+    // Events were dropped while dormant, so the player's mirror is out of
+    // sync: always re-anchor, whatever fullSnapshotIntervalMs says.
+    this.requestFullSnapshot();
   }
 
   private wake(): void {
@@ -385,6 +471,7 @@ export class ReplayRecorderCore {
 
   private onFullSnapshotTimer(): void {
     if (this.stopped || this.isIdle) return;
+    if (this.enterDormancyIfDue(this.now())) return;
     // Idle detection otherwise needs an event to arrive. On a static page
     // nothing does, so check the clock here and skip the snapshot (PostHog
     // takes it and then drops it).

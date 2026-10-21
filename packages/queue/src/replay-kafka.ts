@@ -1,8 +1,8 @@
 /// <reference path="./lz4js.d.ts" />
-import type { IClickhouseSessionReplayChunk } from '@openpanel/db';
-import { currentTraceparent } from '@openpanel/telemetry';
 import { randomUUID } from 'node:crypto';
 import * as zlib from 'node:zlib';
+import type { IClickhouseSessionReplayChunk } from '@openpanel/db';
+import { currentTraceparent } from '@openpanel/telemetry';
 import type { Consumer, Producer } from 'kafkajs';
 import * as lz4 from 'lz4js';
 import { getKafka, isKafkaConfigured, kafkaLogger } from './kafka';

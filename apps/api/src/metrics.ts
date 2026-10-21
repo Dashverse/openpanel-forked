@@ -1,3 +1,4 @@
+import type { ReplayProduceResult } from '@openpanel/queue';
 import client from 'prom-client';
 
 // Producer-side metrics for the session-replay Kafka path. The producer runs in
@@ -37,14 +38,41 @@ export const replayKafkaPartsProducedTotal = new client.Counter({
   help: 'Transport-part messages of split session-replay chunks produced to Kafka',
 });
 
-// Compressed size of chunks dropped as oversize (over REPLAY_KAFKA_MAX_TOTAL_BYTES),
-// split by whether the chunk carries a full snapshot, to size the total cap.
-export const replayKafkaOversizeBytes = new client.Histogram({
-  name: 'replay_kafka_oversize_bytes',
-  help: 'Compressed (REPLAY_KAFKA_CODEC) size of session-replay chunks dropped as oversize',
-  labelNames: ['is_full_snapshot'] as const,
+// Compressed size of every chunk over the single-message limit, by outcome:
+// split (sent as parts) or dropped (over REPLAY_KAFKA_MAX_TOTAL_BYTES, or the
+// split is off), and whether it carries a full snapshot. Shows the size
+// distribution between 950 KB and the total cap, to tune the cap.
+export const replayKafkaOverLimitBytes = new client.Histogram({
+  name: 'replay_kafka_over_limit_bytes',
+  help: 'Compressed size of session-replay chunks over the single-message limit, by outcome (split | dropped)',
+  labelNames: ['outcome', 'is_full_snapshot'] as const,
   buckets: [
-    1_000_000, 2_000_000, 5_000_000, 10_000_000, 20_000_000, 50_000_000,
-    100_000_000,
+    1_000_000, 1_250_000, 1_500_000, 2_000_000, 2_500_000, 3_000_000, 3_500_000,
+    4_000_000, 5_000_000, 7_500_000, 10_000_000, 20_000_000, 50_000_000,
   ],
 });
+
+/** Count one produceReplayChunk result (the throw path is counted by the caller). */
+export function recordReplayProduceResult(
+  result: ReplayProduceResult,
+  isFullSnapshot: boolean,
+): void {
+  const is_full_snapshot = isFullSnapshot ? 'true' : 'false';
+  if (result.status === 'oversize') {
+    replayKafkaDroppedTotal.inc({ reason: 'oversize' });
+    replayKafkaOverLimitBytes.observe(
+      { outcome: 'dropped', is_full_snapshot },
+      result.compressedBytes,
+    );
+    return;
+  }
+  replayKafkaProducedTotal.inc();
+  if (result.parts > 1) {
+    replayKafkaChunksSplitTotal.inc();
+    replayKafkaPartsProducedTotal.inc(result.parts);
+    replayKafkaOverLimitBytes.observe(
+      { outcome: 'split', is_full_snapshot },
+      result.compressedBytes,
+    );
+  }
+}

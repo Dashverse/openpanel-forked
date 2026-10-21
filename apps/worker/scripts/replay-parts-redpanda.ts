@@ -151,6 +151,7 @@ async function main() {
         decode: q.decodeReplayValue,
         maxParts: 32,
         abandonAfterMs: 120_000,
+        now: Date.now(),
         atTail:
           Number(batch.messages[batch.messages.length - 1]!.offset) >=
           Number(batch.highWatermark) - 1,

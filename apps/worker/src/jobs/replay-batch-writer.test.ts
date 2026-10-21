@@ -193,6 +193,10 @@ describe('retry helpers', () => {
     ]);
     expect(replayRetryBackoffMs(0)).toBe(1000);
     expect(replayRetryBackoffMs(9, 5000)).toBe(5000);
+    // part-set wait: 250ms base, doubling, capped
+    expect(
+      [1, 2, 3, 4, 5, 6, 20].map((a) => replayRetryBackoffMs(a, 4000, 250)),
+    ).toEqual([250, 500, 1000, 2000, 4000, 4000, 4000]);
   });
   it('positiveIntEnv rejects NaN / non-positive', () => {
     expect(positiveIntEnv(undefined, 25)).toBe(25);

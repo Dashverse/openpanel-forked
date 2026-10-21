@@ -1,9 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { replayRetryBackoffMs } from './replay-batch-writer';
 import {
+  REPLAY_BATCH_BYTES_BUCKETS,
   type ReassembleOptions,
   type ReplayKafkaMessage,
+  nextPartsWait,
   reassembleReplayBatch,
+  replayBatchValueBytes,
 } from './replay-parts';
 
 // decode = utf8 toString, so a "compressed" value is just the line's bytes and
@@ -20,6 +24,7 @@ const opts = (o: Partial<ReassembleOptions> = {}): ReassembleOptions => ({
   decode,
   maxParts: 32,
   abandonAfterMs: 120_000,
+  now: T0 + 1_000,
   atTail: true,
   maxBytesPerPartition: 16 * 1024 * 1024,
   maxMessageBytes: 950_000,
@@ -297,6 +302,37 @@ describe('reassembleReplayBatch', () => {
     expect(r.blockedAt).toBe('1');
   });
 
+  it('drops an orphan at the partition tail once part 0 is abandonAfterMs old by the wall clock', () => {
+    const msgs = [
+      part(1, 'orphan', 0, 3, 'ABC', T0),
+      part(2, 'orphan', 1, 3, 'DEF', T0 + 10),
+    ];
+    // young: wait
+    expect(
+      reassembleReplayBatch(msgs, opts({ atTail: true, now: T0 + 119_999 }))
+        .blockedAt,
+    ).toBe('1');
+    // old, at the tail: nothing newer will ever arrive behind it
+    const r = reassembleReplayBatch(
+      msgs,
+      opts({ atTail: true, now: T0 + 120_000 }),
+    );
+    expect(r.dropped.map((d) => [d.chunkId, d.reason])).toEqual([
+      ['orphan', 'abandoned'],
+    ]);
+    expect(r.resolveThrough).toBe('2');
+    expect(r.blockedAt).toBeNull();
+  });
+
+  it('never drops by wall-clock age away from the tail (a lagging fetch can cut a set short)', () => {
+    const r = reassembleReplayBatch(
+      [part(1, 'c1', 0, 3, 'ABC', T0), legacy(2, 'a', T0 + 5)],
+      opts({ atTail: false, now: T0 + 3_600_000 }),
+    );
+    expect(r.dropped).toEqual([]);
+    expect(r.blockedAt).toBe('1');
+  });
+
   it('drops a head set as unfetchable when the batch filled the partition fetch limit away from the tail', () => {
     const msgs = [part(1, 'c1', 0, 3, 'ABC'), legacy(2, 'x'.repeat(5000))];
     const blocked = reassembleReplayBatch(
@@ -477,5 +513,49 @@ describe('reassembleReplayBatch', () => {
     const r = reassembleReplayBatch([], opts());
     expect(r.lines).toEqual([]);
     expect(r.resolveThrough).toBeNull();
+  });
+});
+
+describe('nextPartsWait (blocked-head refetch backoff)', () => {
+  const backoff = (n: number) => replayRetryBackoffMs(n, 4000, 250);
+
+  it('backs off 250ms, 500ms, 1s ... capped while the same head stays blocked', () => {
+    let state: ReturnType<typeof nextPartsWait>['state'] | undefined;
+    const waits: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      const r = nextPartsWait(state, '42', backoff);
+      state = r.state;
+      waits.push(r.waitMs);
+    }
+    expect(waits).toEqual([250, 500, 1000, 2000, 4000, 4000, 4000]);
+  });
+
+  it('restarts when the head changes', () => {
+    const a = nextPartsWait(undefined, '42', backoff);
+    const b = nextPartsWait(a.state, '42', backoff);
+    const c = nextPartsWait(b.state, '50', backoff);
+    expect([a.waitMs, b.waitMs, c.waitMs]).toEqual([250, 500, 250]);
+    expect(c.state).toEqual({ offset: '50', attempts: 1 });
+  });
+});
+
+describe('replay batch bytes', () => {
+  it('sums message value bytes', () => {
+    expect(
+      replayBatchValueBytes([
+        legacy(1, 'abc'),
+        { ...legacy(2, ''), value: null },
+        part(3, 'c', 0, 2, 'defgh'),
+      ]),
+    ).toBe(8);
+  });
+
+  it('has bucket edges at 1, 2, 4 and 5 MiB', () => {
+    const MiB = 1024 * 1024;
+    for (const edge of [1, 2, 4, 5]) {
+      expect(REPLAY_BATCH_BYTES_BUCKETS).toContain(edge * MiB);
+    }
+    const sorted = [...REPLAY_BATCH_BYTES_BUCKETS].sort((x, y) => x - y);
+    expect(REPLAY_BATCH_BYTES_BUCKETS).toEqual(sorted);
   });
 });
