@@ -1,4 +1,5 @@
 import AnimateHeight from '@/components/animate-height';
+import { NoAccess } from '@/components/auth/no-access';
 import { ButtonContainer } from '@/components/button-container';
 import { CheckboxItem } from '@/components/forms/checkbox-item';
 import { InputWithLabel, WithLabel } from '@/components/forms/input-with-label';
@@ -40,6 +41,12 @@ export const Route = createFileRoute('/_steps/onboarding/project')({
     }
   },
   loader: async ({ context, location }) => {
+    // The admin check below needs the real list, not an empty placeholder
+    await context.queryClient.prefetchQuery(
+      context.trpc.organization.list.queryOptions(undefined, {
+        staleTime: 0,
+      }),
+    );
     const search = validateSearch.safeParse(location.search);
     if (search.success && search.data.inviteId) {
       await context.queryClient.prefetchQuery(
@@ -56,9 +63,14 @@ type IForm = z.infer<typeof zOnboardingProject>;
 
 function Component() {
   const trpc = useTRPC();
-  const { data: organizations } = useQuery(
-    trpc.organization.list.queryOptions(undefined, { initialData: [] }),
+  const { data: allOrganizations = [], isLoading: isLoadingOrganizations } =
+    useQuery(trpc.organization.list.queryOptions());
+  // Projects can only be created in organizations the user administers
+  const organizations = allOrganizations.filter(
+    (organization) => organization.role === 'org:admin',
   );
+  const { data: canCreateOrganization, isLoading: isLoadingCanCreate } =
+    useQuery(trpc.onboarding.canCreateOrganization.queryOptions());
   const [, setSecret] = useClientSecret();
   const navigate = useNavigate();
   const mutation = useMutation(
@@ -119,6 +131,15 @@ function Component() {
   useEffect(() => {
     form.clearErrors();
   }, [isWebsite, isApp, isBackend]);
+
+  if (
+    organizations.length === 0 &&
+    !isLoadingOrganizations &&
+    !isLoadingCanCreate &&
+    !canCreateOrganization
+  ) {
+    return <NoAccess isMember={allOrganizations.length > 0} />;
+  }
 
   return (
     <form onSubmit={form.handleSubmit(onSubmit)}>

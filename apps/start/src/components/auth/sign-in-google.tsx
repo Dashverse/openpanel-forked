@@ -17,8 +17,8 @@ export function SignInGoogle({
     }),
   );
   const title = () => {
-    if (type === 'sign-in') return 'Sign in with Google';
-    if (type === 'sign-up') return 'Sign up with Google';
+    if (type === 'sign-in') return 'Continue with Google';
+    if (type === 'sign-up') return 'Continue with Google';
   };
   return (
     <Button
@@ -27,7 +27,7 @@ export function SignInGoogle({
       onClick={() =>
         mutation.mutate({
           provider: 'google',
-          inviteId: type === 'sign-up' ? inviteId : undefined,
+          inviteId,
         })
       }
     >

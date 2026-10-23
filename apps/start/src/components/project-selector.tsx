@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useAppParams } from '@/hooks/use-app-params';
+import { useIsOrganizationAdmin } from '@/hooks/use-is-organization-admin';
 import { useRouter } from '@tanstack/react-router';
 import { Link } from '@tanstack/react-router';
 import {
@@ -37,6 +38,7 @@ export default function ProjectSelector({
   const router = useRouter();
   const { organizationId, projectId } = useAppParams();
   const [open, setOpen] = useState(false);
+  const isAdmin = useIsOrganizationAdmin();
 
   const changeProject = (newProjectId: string) => {
     if (organizationId && projectId) {
@@ -117,17 +119,19 @@ export default function ProjectSelector({
               </Link>
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem
-            className="text-emerald-600"
-            onClick={() => {
-              pushModal('AddProject');
-            }}
-          >
-            Create new project
-            <DropdownMenuShortcut>
-              <PlusIcon size={16} />
-            </DropdownMenuShortcut>
-          </DropdownMenuItem>
+          {isAdmin && (
+            <DropdownMenuItem
+              className="text-emerald-600"
+              onClick={() => {
+                pushModal('AddProject');
+              }}
+            >
+              Create new project
+              <DropdownMenuShortcut>
+                <PlusIcon size={16} />
+              </DropdownMenuShortcut>
+            </DropdownMenuItem>
+          )}
         </DropdownMenuGroup>
         {!!organizations && (
           <>
@@ -147,13 +151,6 @@ export default function ProjectSelector({
                   )}
                 </DropdownMenuItem>
               ))}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled>
-                New organization
-                <DropdownMenuShortcut>
-                  <PlusIcon size={16} />
-                </DropdownMenuShortcut>
-              </DropdownMenuItem>
             </DropdownMenuGroup>
           </>
         )}
