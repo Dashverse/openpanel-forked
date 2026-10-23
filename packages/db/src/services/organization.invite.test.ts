@@ -3,11 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   inviteFindUnique: vi.fn(),
   inviteFindMany: vi.fn(),
-  inviteDelete: vi.fn(),
+  inviteDeleteMany: vi.fn(),
   memberFindUnique: vi.fn(),
   memberUpsert: vi.fn(),
   projectAccessFindMany: vi.fn(),
-  projectAccessCreate: vi.fn(),
+  projectAccessCreateMany: vi.fn(),
+  transaction: vi.fn(),
 }));
 
 vi.mock('../prisma-client', () => {
@@ -15,15 +16,21 @@ vi.mock('../prisma-client', () => {
     invite: {
       findUnique: mocks.inviteFindUnique,
       findMany: mocks.inviteFindMany,
-      delete: mocks.inviteDelete,
+      deleteMany: mocks.inviteDeleteMany,
     },
     member: { findUnique: mocks.memberFindUnique, upsert: mocks.memberUpsert },
     projectAccess: {
       findMany: mocks.projectAccessFindMany,
-      create: mocks.projectAccessCreate,
+      createMany: mocks.projectAccessCreateMany,
     },
   };
-  return { db: { ...client, $primary: () => client } };
+  // Interactive transaction: run the callback against the same client
+  mocks.transaction.mockImplementation((fn: (tx: unknown) => unknown) =>
+    fn(client),
+  );
+  return {
+    db: { ...client, $primary: () => client, $transaction: mocks.transaction },
+  };
 });
 
 vi.mock('./access.service', () => ({
@@ -54,6 +61,8 @@ beforeEach(() => {
   mocks.memberFindUnique.mockResolvedValue(null);
   mocks.memberUpsert.mockResolvedValue({ id: 'm1' });
   mocks.projectAccessFindMany.mockResolvedValue([]);
+  mocks.inviteDeleteMany.mockResolvedValue({ count: 1 });
+  mocks.projectAccessCreateMany.mockResolvedValue({ count: 0 });
 });
 
 describe('connectUserToOrganization', () => {
@@ -70,7 +79,10 @@ describe('connectUserToOrganization', () => {
         }),
       }),
     );
-    expect(mocks.inviteDelete).toHaveBeenCalledWith({ where: { id: 'inv1' } });
+    expect(mocks.inviteDeleteMany).toHaveBeenCalledWith({
+      where: { id: 'inv1' },
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
   });
 
   it('refuses an invite addressed to someone else', async () => {
@@ -81,7 +93,7 @@ describe('connectUserToOrganization', () => {
       connectUserToOrganization({ user, inviteId: 'inv1' }),
     ).rejects.toThrow('different email address');
     expect(mocks.memberUpsert).not.toHaveBeenCalled();
-    expect(mocks.inviteDelete).not.toHaveBeenCalled();
+    expect(mocks.inviteDeleteMany).not.toHaveBeenCalled();
   });
 
   it('refuses an expired invite', async () => {
@@ -98,10 +110,35 @@ describe('connectUserToOrganization', () => {
       invite({ projectAccess: ['frameo', 'studio'] }),
     );
     await connectUserToOrganization({ user, inviteId: 'inv1' });
-    expect(mocks.projectAccessCreate).toHaveBeenCalledTimes(2);
-    expect(mocks.projectAccessCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ projectId: 'frameo', level: 'write' }),
+    expect(mocks.projectAccessCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({ projectId: 'frameo', level: 'write' }),
+        expect.objectContaining({ projectId: 'studio', level: 'write' }),
+      ],
     });
+  });
+
+  it('fails as a whole (inside the transaction) if a grant insert fails', async () => {
+    mocks.inviteFindUnique.mockResolvedValue(
+      invite({ projectAccess: ['frameo'] }),
+    );
+    mocks.projectAccessCreateMany.mockRejectedValue(new Error('db down'));
+    await expect(
+      connectUserToOrganization({ user, inviteId: 'inv1' }),
+    ).rejects.toThrow('db down');
+    // Membership, invite claim and grants all ran in the one transaction, so
+    // Postgres rolls back all of them and the invite can be redeemed again.
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    expect(mocks.memberUpsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an invite that was already used concurrently', async () => {
+    mocks.inviteFindUnique.mockResolvedValue(invite());
+    mocks.inviteDeleteMany.mockResolvedValue({ count: 0 });
+    await expect(
+      connectUserToOrganization({ user, inviteId: 'inv1' }),
+    ).rejects.toThrow('Invite already used');
+    expect(mocks.memberUpsert).not.toHaveBeenCalled();
   });
 
   it('never narrows an existing member who already sees every project', async () => {
@@ -111,8 +148,8 @@ describe('connectUserToOrganization', () => {
       invite({ projectAccess: ['frameo'] }),
     );
     await connectUserToOrganization({ user, inviteId: 'inv1' });
-    expect(mocks.projectAccessCreate).not.toHaveBeenCalled();
-    expect(mocks.inviteDelete).toHaveBeenCalled();
+    expect(mocks.projectAccessCreateMany).not.toHaveBeenCalled();
+    expect(mocks.inviteDeleteMany).toHaveBeenCalled();
   });
 
   it('adds only missing grants to an existing restricted member', async () => {
@@ -122,9 +159,8 @@ describe('connectUserToOrganization', () => {
       invite({ projectAccess: ['frameo', 'studio'] }),
     );
     await connectUserToOrganization({ user, inviteId: 'inv1' });
-    expect(mocks.projectAccessCreate).toHaveBeenCalledTimes(1);
-    expect(mocks.projectAccessCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({ projectId: 'studio' }),
+    expect(mocks.projectAccessCreateMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ projectId: 'studio' })],
     });
   });
 });

@@ -10,6 +10,9 @@ import {
   hashPassword,
   invalidateSession,
   isEmailDomainAllowed,
+  isGithubLoginEnabled,
+  isPasswordLoginEnabled,
+  isPasswordSignUpEnabled,
   setSessionTokenCookie,
   validateSessionToken,
   verifyPasswordHash,
@@ -41,6 +44,14 @@ import {
 
 const zProvider = z.enum(['email', 'google', 'github']);
 
+function assertPasswordLoginEnabled() {
+  if (!isPasswordLoginEnabled()) {
+    throw TRPCAccessError(
+      'Password sign-in is turned off. Continue with Google instead.',
+    );
+  }
+}
+
 function assertEmailDomainAllowed(email: string) {
   if (!isEmailDomainAllowed(email)) {
     throw TRPCAccessError(
@@ -66,6 +77,15 @@ async function redeemInvite(
 }
 
 export const authRouter = createTRPCRouter({
+  // Which sign-in methods the login and invite pages should offer
+  providers: publicProcedure.query(() => {
+    return {
+      google: !!process.env.GOOGLE_CLIENT_ID,
+      github: isGithubLoginEnabled(),
+      password: isPasswordLoginEnabled(),
+      passwordSignUp: isPasswordSignUpEnabled(),
+    };
+  }),
   signOut: publicProcedure.mutation(async ({ ctx }) => {
     deleteSessionTokenCookie(ctx.setCookie);
     if (ctx.session?.session?.id) {
@@ -79,6 +99,10 @@ export const authRouter = createTRPCRouter({
       // once we know who they are. Checking here would also block returning
       // users, since a sign-in and a sign-up look the same at this point.
       const { provider } = input;
+
+      if (provider === 'github' && !isGithubLoginEnabled()) {
+        throw TRPCAccessError('GitHub sign-in is not available');
+      }
 
       if (input.inviteId) {
         ctx.setCookie('inviteId', input.inviteId, {
@@ -126,6 +150,11 @@ export const authRouter = createTRPCRouter({
   signUpEmail: publicProcedure
     .input(zSignUpEmail)
     .mutation(async ({ input, ctx }) => {
+      if (!isPasswordSignUpEnabled()) {
+        throw TRPCAccessError(
+          'Accounts are created by signing in with Google from your invite.',
+        );
+      }
       assertEmailDomainAllowed(input.email);
 
       const isRegistrationAllowed = await getIsRegistrationAllowed({
@@ -198,6 +227,7 @@ export const authRouter = createTRPCRouter({
     )
     .input(zSignInEmail)
     .mutation(async ({ input, ctx }) => {
+      assertPasswordLoginEnabled();
       const provider = 'email';
       const password = input.password.trim();
 
@@ -253,6 +283,7 @@ export const authRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ input, ctx }) => {
+      assertPasswordLoginEnabled();
       const { token, password } = input;
 
       const resetPassword = await db.resetPassword.findUnique({
@@ -292,6 +323,7 @@ export const authRouter = createTRPCRouter({
     )
     .input(zRequestResetPassword)
     .mutation(async ({ input, ctx }) => {
+      assertPasswordLoginEnabled();
       const user = await getUserAccount({
         email: input.email,
         provider: 'email',

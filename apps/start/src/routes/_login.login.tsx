@@ -3,7 +3,9 @@ import { SignInEmailForm } from '@/components/auth/sign-in-email-form';
 import { SignInGoogle } from '@/components/auth/sign-in-google';
 import { LogoSquare } from '@/components/logo';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { useTRPC } from '@/integrations/trpc/react';
 import { PAGE_TITLES, createTitle } from '@/utils/title';
+import { useQuery } from '@tanstack/react-query';
 import { createFileRoute, redirect } from '@tanstack/react-router';
 import { AlertCircle } from 'lucide-react';
 import { z } from 'zod';
@@ -25,6 +27,8 @@ export const Route = createFileRoute('/_login/login')({
 
 function LoginPage() {
   const { error, correlationId, inviteId } = Route.useSearch();
+  const trpc = useTRPC();
+  const { data: providers } = useQuery(trpc.auth.providers.queryOptions());
 
   return (
     <div className="col gap-8 w-full text-left">
@@ -59,8 +63,12 @@ function LoginPage() {
       <div className="space-y-4">
         <SignInGoogle type="sign-in" inviteId={inviteId} />
       </div>
-      <Or />
-      <SignInEmailForm inviteId={inviteId} />
+      {providers?.password && (
+        <>
+          <Or />
+          <SignInEmailForm inviteId={inviteId} />
+        </>
+      )}
     </div>
   );
 }

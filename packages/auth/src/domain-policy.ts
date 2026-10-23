@@ -106,3 +106,47 @@ export function parseGoogleIdentity(
     lastName: typeof data.family_name === 'string' ? data.family_name : '',
   };
 }
+
+/**
+ * Whether email/password sign-in, sign-up and reset are available.
+ *
+ * With a Google Workspace allow-list configured everyone allowed in has a
+ * Google account, so passwords are off: one less way in to guess at.
+ * ALLOW_PASSWORD_LOGIN=true turns them back on (break-glass if Google sign-in
+ * is unavailable); without an allow-list (local dev, self-hosting) they stay
+ * on so an install without Google OAuth still works.
+ */
+export function isPasswordLoginEnabled(env: Env = process.env as Env): boolean {
+  if (
+    env.ALLOW_PASSWORD_LOGIN !== undefined &&
+    env.ALLOW_PASSWORD_LOGIN !== ''
+  ) {
+    return env.ALLOW_PASSWORD_LOGIN === 'true';
+  }
+  return getAllowedEmailDomains(env).length === 0;
+}
+
+/**
+ * Whether new accounts may be created with a password.
+ *
+ * Never with a Workspace allow-list: a password sign-up trusts a typed email,
+ * so whoever holds an invite link could create the invitee's account with
+ * their own password, and Google would later link into it. The
+ * ALLOW_PASSWORD_LOGIN break-glass only restores sign-in for existing users.
+ */
+export function isPasswordSignUpEnabled(
+  env: Env = process.env as Env,
+): boolean {
+  return (
+    getAllowedEmailDomains(env).length === 0 && isPasswordLoginEnabled(env)
+  );
+}
+
+/**
+ * GitHub sign-in proves nothing about Workspace membership, and a GitHub
+ * email stays verified after someone leaves the company, so it is unavailable
+ * whenever a Workspace allow-list is configured.
+ */
+export function isGithubLoginEnabled(env: Env = process.env as Env): boolean {
+  return getAllowedEmailDomains(env).length === 0 && !!env.GITHUB_CLIENT_ID;
+}

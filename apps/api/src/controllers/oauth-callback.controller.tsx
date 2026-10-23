@@ -10,6 +10,7 @@ import {
   github,
   google,
   isEmailDomainAllowed,
+  isGithubLoginEnabled,
   parseGoogleIdentity,
   setSessionTokenCookie,
 } from '@openpanel/auth';
@@ -430,7 +431,8 @@ export async function githubCallback(req: FastifyRequest, reply: FastifyReply) {
     const inviteId = req.cookies.inviteId;
     const tokens = await github.validateAuthorizationCode(code);
     const githubUser = await fetchGithubUser(tokens.accessToken());
-    if (!isEmailDomainAllowed(githubUser.email)) {
+    // Belt and braces: signInOAuth already refuses GitHub with an allow-list
+    if (!isGithubLoginEnabled() || !isEmailDomainAllowed(githubUser.email)) {
       throw new LogError(
         `Sign in with your ${describeAllowedDomains()} Google account`,
       );

@@ -46,6 +46,7 @@ export const Route = createFileRoute('/_public/onboarding')({
 function Component() {
   const { inviteId } = Route.useSearch();
   const trpc = useTRPC();
+  const { data: providers } = useQuery(trpc.auth.providers.queryOptions());
   const { data: invite } = useQuery(
     trpc.organization.getInvite.queryOptions(
       {
@@ -105,13 +106,17 @@ function Component() {
         <div className="space-y-6">
           <SignInGoogle type="sign-up" inviteId={inviteId} />
 
-          <Or className="my-6" />
+          {providers?.passwordSignUp && (
+            <>
+              <Or className="my-6" />
 
-          <div className="flex items-center gap-2 font-semibold mb-4 text-lg">
-            <MailIcon className="size-4" />
-            Or create a password
-          </div>
-          <SignUpEmailForm inviteId={inviteId} />
+              <div className="flex items-center gap-2 font-semibold mb-4 text-lg">
+                <MailIcon className="size-4" />
+                Or create a password
+              </div>
+              <SignUpEmailForm inviteId={inviteId} />
+            </>
+          )}
         </div>
       )}
     </div>

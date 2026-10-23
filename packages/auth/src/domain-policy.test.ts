@@ -3,6 +3,9 @@ import {
   DomainPolicyError,
   getEmailDomain,
   isEmailDomainAllowed,
+  isGithubLoginEnabled,
+  isPasswordLoginEnabled,
+  isPasswordSignUpEnabled,
   parseAllowedDomains,
   parseGoogleIdentity,
 } from './domain-policy';
@@ -130,5 +133,66 @@ describe('parseGoogleIdentity', () => {
       parseGoogleIdentity(claims({ email: 'x@gmail.com', hd: undefined }), [])
         .email,
     ).toBe('x@gmail.com');
+  });
+});
+
+describe('isPasswordLoginEnabled', () => {
+  it('is off when a Workspace allow-list is configured', () => {
+    expect(
+      isPasswordLoginEnabled({ GOOGLE_ALLOWED_DOMAIN: 'dashverse.ai' }),
+    ).toBe(false);
+  });
+
+  it('can be switched back on as a break-glass', () => {
+    expect(
+      isPasswordLoginEnabled({
+        GOOGLE_ALLOWED_DOMAIN: 'dashverse.ai',
+        ALLOW_PASSWORD_LOGIN: 'true',
+      }),
+    ).toBe(true);
+  });
+
+  it('stays on without an allow-list (local dev, self-hosting)', () => {
+    expect(isPasswordLoginEnabled({})).toBe(true);
+  });
+
+  it('can be switched off explicitly without an allow-list', () => {
+    expect(isPasswordLoginEnabled({ ALLOW_PASSWORD_LOGIN: 'false' })).toBe(
+      false,
+    );
+  });
+});
+
+describe('isPasswordSignUpEnabled', () => {
+  it('is off with an allow-list, even with the sign-in break-glass on', () => {
+    expect(
+      isPasswordSignUpEnabled({
+        GOOGLE_ALLOWED_DOMAIN: 'dashverse.ai',
+        ALLOW_PASSWORD_LOGIN: 'true',
+      }),
+    ).toBe(false);
+  });
+
+  it('follows password sign-in without an allow-list', () => {
+    expect(isPasswordSignUpEnabled({})).toBe(true);
+    expect(isPasswordSignUpEnabled({ ALLOW_PASSWORD_LOGIN: 'false' })).toBe(
+      false,
+    );
+  });
+});
+
+describe('isGithubLoginEnabled', () => {
+  it('is off with an allow-list even when GitHub is configured', () => {
+    expect(
+      isGithubLoginEnabled({
+        GOOGLE_ALLOWED_DOMAIN: 'dashverse.ai',
+        GITHUB_CLIENT_ID: 'gh',
+      }),
+    ).toBe(false);
+  });
+
+  it('needs a GitHub client id without an allow-list', () => {
+    expect(isGithubLoginEnabled({})).toBe(false);
+    expect(isGithubLoginEnabled({ GITHUB_CLIENT_ID: 'gh' })).toBe(true);
   });
 });
