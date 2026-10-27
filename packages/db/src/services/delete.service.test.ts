@@ -8,14 +8,23 @@ vi.mock('../clickhouse/client', async (importOriginal) => {
     TABLE_NAMES: real.TABLE_NAMES,
     // Plain names (non-clustered) so assertions can match table names directly.
     getReplicatedTableName: (table: string) => table,
-    ch: { command: (args: { query: string }) => commandMock(args) },
+    ch: {
+      command: (args: {
+        query: string;
+        clickhouse_settings?: Record<string, string>;
+      }) => commandMock(args),
+    },
   };
 });
 
 vi.mock('../prisma-client', () => ({ db: {} }));
 
-const { deleteFromClickhouse, CLICKHOUSE_PROJECT_TABLES, isUnknownTableError } =
-  await import('./delete.service');
+const {
+  deleteFromClickhouse,
+  CLICKHOUSE_PROJECT_TABLES,
+  isUnknownTableError,
+  isProjectDeletionDue,
+} = await import('./delete.service');
 
 class FakeClickHouseError extends Error {
   constructor(
@@ -83,17 +92,64 @@ describe('deleteFromClickhouse', () => {
     expect(commandMock).toHaveBeenCalledTimes(CLICKHOUSE_PROJECT_TABLES.length);
   });
 
-  it('rethrows any other error and stops', async () => {
-    const boom = new FakeClickHouseError('Memory limit exceeded', '241');
+  it('uses ALTER TABLE … DELETE for event_property_values_mv (has a projection)', async () => {
+    commandMock.mockResolvedValue(undefined);
+
+    await deleteFromClickhouse(['p1']);
+
+    const entry = CLICKHOUSE_PROJECT_TABLES.find(
+      (t) => t.table === 'event_property_values_mv',
+    );
+    expect(entry?.mutation).toBe('alter');
+    const query = commandMock.mock.calls
+      .map(([args]) => args.query as string)
+      .find((q) => q.includes(' event_property_values_mv '));
+    expect(query).toMatch(/^ALTER TABLE event_property_values_mv DELETE WHERE/);
+  });
+
+  it('submits every delete async (no sync wait on the server)', async () => {
+    commandMock.mockResolvedValue(undefined);
+
+    await deleteFromClickhouse(['p1']);
+
+    for (const [args] of commandMock.mock.calls) {
+      if (args.query.startsWith('ALTER TABLE')) {
+        expect(args.clickhouse_settings).toEqual({ mutations_sync: '0' });
+      } else {
+        expect(args.clickhouse_settings).toEqual({
+          lightweight_deletes_sync: '0',
+        });
+      }
+    }
+  });
+
+  it('tries every table, then throws one AggregateError naming the failed ones', async () => {
+    const boomProfiles = new FakeClickHouseError(
+      'Memory limit exceeded',
+      '241',
+    );
+    const boomDau = new FakeClickHouseError('Timeout exceeded', '159');
     commandMock.mockImplementation(async ({ query }: { query: string }) => {
-      if (query.includes(' profiles ')) throw boom;
+      if (query.includes(' profiles ')) throw boomProfiles;
+      if (query.includes(' dau_mv ')) throw boomDau;
+      if (query.includes(' sessions ')) {
+        throw new FakeClickHouseError('missing', '60', 'UNKNOWN_TABLE');
+      }
     });
 
-    await expect(deleteFromClickhouse(['p1'])).rejects.toBe(boom);
-    const idx = CLICKHOUSE_PROJECT_TABLES.findIndex(
-      (t) => t.table === 'profiles',
+    const error = await deleteFromClickhouse(['p1']).then(
+      () => undefined,
+      (e: unknown) => e,
     );
-    expect(commandMock).toHaveBeenCalledTimes(idx + 1);
+
+    // Every table was still attempted after the first failure.
+    expect(commandMock).toHaveBeenCalledTimes(CLICKHOUSE_PROJECT_TABLES.length);
+    expect(error).toBeInstanceOf(AggregateError);
+    const agg = error as AggregateError;
+    expect(agg.errors).toEqual([boomProfiles, boomDau]);
+    expect(agg.message).toContain('2 table(s): profiles, dau_mv');
+    // The missing table only warns, it is not reported as a failure.
+    expect(agg.message).not.toContain('sessions');
   });
 
   it('does nothing for an empty project list', async () => {
@@ -113,5 +169,24 @@ describe('isUnknownTableError', () => {
     );
     expect(isUnknownTableError(new Error('socket hang up'))).toBe(false);
     expect(isUnknownTableError(undefined)).toBe(false);
+  });
+});
+
+describe('isProjectDeletionDue', () => {
+  const now = new Date('2026-10-27T12:00:00Z');
+
+  it('is due once deleteAt is now or in the past', () => {
+    expect(isProjectDeletionDue(now, now)).toBe(true);
+    expect(isProjectDeletionDue(new Date('2026-10-27T11:00:00Z'), now)).toBe(
+      true,
+    );
+  });
+
+  it('is not due before deleteAt, or when no deletion is scheduled', () => {
+    expect(isProjectDeletionDue(new Date('2026-10-27T12:00:01Z'), now)).toBe(
+      false,
+    );
+    expect(isProjectDeletionDue(null, now)).toBe(false);
+    expect(isProjectDeletionDue(undefined, now)).toBe(false);
   });
 });

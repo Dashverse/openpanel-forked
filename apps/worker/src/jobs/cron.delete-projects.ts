@@ -26,6 +26,11 @@ export async function jobdeleteProjects(job: Job<CronQueuePayload>) {
   // past) are kept and this hourly cron retries the whole delete next run.
   // deleteFromClickhouse is idempotent, so re-running it is safe. Deleting the
   // Postgres rows first would orphan the ClickHouse data permanently.
+  // The ClickHouse deletes are async: when this resolves every mutation has
+  // been accepted and queued server-side (durable, applied in the background),
+  // so it is safe to drop the Postgres rows right after. cancelDeletion refuses
+  // once deleteAt has passed, so a Postgres failure here can't hand back an
+  // emptied project.
   await deleteFromClickhouse(projectIds);
 
   await deleteProjects(projectIds);
