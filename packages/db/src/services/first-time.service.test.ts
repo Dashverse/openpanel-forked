@@ -133,10 +133,10 @@ describe('buildFirstTimeSubquery', () => {
       eventName: 'signup',
       startDate: '2024-01-01',
       endDate: '2024-01-31',
-      table: 'events_v2',
+      table: 'events_custom',
       alias: 'x',
     });
-    expect(sql).toContain('FROM events_v2 AS x');
+    expect(sql).toContain('FROM events_custom AS x');
     expect(sql).toContain('argMinIf(x.profile_id, created_at,');
   });
 });

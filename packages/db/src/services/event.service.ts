@@ -13,7 +13,6 @@ import {
   chQuery,
   convertClickhouseDateToJs,
   formatClickhouseDate,
-  getEventsTableForRange,
 } from '../clickhouse/client';
 import { type Query, clix } from '../clickhouse/query-builder';
 import type { EventMeta, Prisma } from '../prisma-client';
@@ -486,19 +485,14 @@ export async function getEventList(options: GetEventListOptions) {
   } = options;
   const { sb, getSql, join } = createSqlBuilder();
 
-  // Route reads to events_v2 (name-first ORDER BY) — parity with `events` within
-  // the retained TTL window, but a `profile_id` / `name IN (...)` lookup prunes to
-  // a fraction of the rows (measured 13x fewer for name+profile). Explicit ranges
-  // predating EVENTS_V2_MIN_DATE fall back to `events`; cursor-window reads anchor
-  // at "now" so they always resolve to events_v2.
-  const routeStartDate = startDate
-    ? formatClickhouseDate(startDate)
-    : formatClickhouseDate(new Date());
-  sb.from = `${getEventsTableForRange(routeStartDate)} e`;
+  // `events` has a name-first ORDER BY, so a `profile_id` / `name IN (...)`
+  // lookup prunes to a fraction of the rows (measured 13x fewer for
+  // name+profile).
+  sb.from = `${TABLE_NAMES.events} e`;
 
   const MAX_DATE_INTERVAL_IN_DAYS = 365;
   // When searching a *specific* event (name filter, not the "*" wildcard), the
-  // name+profile pruning on events_v2 makes a single full-range scan cheap — so
+  // name+profile pruning on `events` makes a single full-range scan cheap — so
   // skip the 0.5d expanding-window retries, which otherwise re-scan the whole
   // project once per doubling step to reach an event that fired weeks ago.
   const hasSpecificEventFilter =
@@ -725,11 +719,7 @@ export async function getEventsCount({
   endDate,
 }: Omit<GetEventListOptions, 'cursor' | 'take'>) {
   const { sb, getSql, join } = createSqlBuilder();
-  // Match getEventList: read from events_v2 for the same sort-key pruning.
-  const routeStartDate = startDate
-    ? formatClickhouseDate(startDate)
-    : formatClickhouseDate(new Date());
-  sb.from = `${getEventsTableForRange(routeStartDate)} e`;
+  sb.from = `${TABLE_NAMES.events} e`;
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   if (profileIds && profileIds.length > 0) {
     sb.where.profileId = `profile_id IN (${join(

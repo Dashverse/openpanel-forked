@@ -37,8 +37,8 @@ import {
  *  - "person" = the canonical person (resolvedPersonIdSql) so an anon device's
  *    first event and the same user's post-login events collapse to one subject.
  *    dict on -> dictGet (no join); dict off -> inline profile_aliases join.
- *  - Reads the v1 `events` table for the historical `min` (events_v2 is
- *    incomplete before its cutoff and cannot serve an all-time min).
+ *  - Reads the full `events` table for the historical `min` (all-time, not
+ *    just the chart range).
  *
  * The output is a set of `(winner_pid, first_in_range)` pairs — the raw
  * profile_id and timestamp of each surviving person's global-first matching
@@ -76,7 +76,7 @@ export function buildFirstTimeSubquery({
    * events table via the `alias` (default `e`) or unqualified column names.
    */
   filterConditions?: string[];
-  /** Historical table for the all-time min. Defaults to v1 `events`. */
+  /** Historical table for the all-time min. Defaults to `events`. */
   table?: string;
   /** Alias for the events table inside the subquery (default `e`). */
   alias?: string;

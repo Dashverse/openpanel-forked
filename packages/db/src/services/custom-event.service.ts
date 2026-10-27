@@ -1,6 +1,6 @@
 import sqlstring from 'sqlstring';
 import type { ICustomEventDefinition } from '@openpanel/validation';
-import { getEventsTableForRange } from '../clickhouse/client';
+import { TABLE_NAMES } from '../clickhouse/client';
 import { db } from '../prisma-client';
 import { getEventFiltersWhereClause, getMaterializedColumns } from './chart.service';
 
@@ -40,7 +40,7 @@ function buildCustomEventSourceQuery(
   sourceEvent: { name: string; filters?: any[] },
   baseWhere: string[], // Additional WHERE conditions from outer query
   materializedColumnsSelect: string, // Materialized columns to include
-  dataSource: string, // Source table (events or events_v2, routed by caller)
+  dataSource: string, // Source table (always `events`)
 ): string {
   const whereClauses = [
     `project_id = ${sqlstring.escape(projectId)}`,
@@ -99,14 +99,12 @@ export async function expandCustomEventToSQL(
   },
   baseWhere: string[] = [],
   selectColumns?: string[],
-  startDate?: string,
 ): Promise<string> {
   const definition = customEvent.definition;
 
-  // Route the underlying event scan to events_v2 when the range qualifies
-  // (name-first key prunes `name IN (...)` hard — the biggest win for custom
-  // events). Falls back to `events` when startDate is undefined / routing is off.
-  const dataSource = getEventsTableForRange(startDate);
+  // `events` has a name-first sort key, so `name IN (...)` prunes hard — the
+  // biggest win for custom events.
+  const dataSource = TABLE_NAMES.events;
 
   // Get materialized column names to explicitly include in SELECT
   // (SELECT * doesn't include materialized columns in CTEs)

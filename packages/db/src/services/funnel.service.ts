@@ -9,7 +9,6 @@ import sqlstring from 'sqlstring';
 import { ch, chMcp, formatClickhouseDate } from '../clickhouse/client';
 import {
   TABLE_NAMES,
-  getEventsTableForRange,
   resolvedPersonIdSql,
   aliasResolutionNeedsCte,
 } from '../clickhouse/client';
@@ -59,11 +58,10 @@ export class FunnelService {
 
     const hasCustomEvents = customEventsChecks.some((ce) => ce !== null);
 
-    // If no custom events, use regular events table (routed to events_v2 when the
-    // range is inside its complete window).
+    // If no custom events, use regular events table.
     if (!hasCustomEvents) {
       return {
-        fromClause: getEventsTableForRange(startDate),
+        fromClause: TABLE_NAMES.events,
         withClauses: [],
         needsNameFilter: true,
       };
@@ -105,7 +103,6 @@ export class FunnelService {
         } as any,
         baseWhere,
         selectColumns,
-        startDate,
       );
 
       withClauses.push({ name: cteName, query: sql });
@@ -898,7 +895,7 @@ export class FunnelService {
       funnelQuery.with(
         'filtered_profiles',
         `SELECT DISTINCT profile_id
-         FROM ${getEventsTableForRange(startDate)}
+         FROM ${TABLE_NAMES.events}
          WHERE project_id = ${sqlstring.escape(projectId)}
            AND name IN (${funnelNamesIn})
            AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
@@ -1123,7 +1120,7 @@ export class FunnelService {
         WITH
         ${ttcAliasCte}first_step_events AS (
           SELECT ${ttcGid} AS gid, min(created_at) AS first_ts
-          FROM ${getEventsTableForRange(startDate)}${ttcAliasJoin}
+          FROM ${TABLE_NAMES.events}${ttcAliasJoin}
           PREWHERE project_id = ${sqlstring.escape(projectId)}
             AND name = ${sqlstring.escape(firstEvent.name)}
             AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
@@ -1132,7 +1129,7 @@ export class FunnelService {
         ),
         last_step_events AS (
           SELECT ${ttcGid} AS gid, min(created_at) AS last_ts
-          FROM ${getEventsTableForRange(startDate)}${ttcAliasJoin}
+          FROM ${TABLE_NAMES.events}${ttcAliasJoin}
           PREWHERE project_id = ${sqlstring.escape(projectId)}
             AND name = ${sqlstring.escape(lastEventItem.name)}
             AND created_at >= toDateTime('${formatClickhouseDate(startDate)}')
@@ -1246,20 +1243,15 @@ export class FunnelService {
       throw new Error('stepIndex is out of range for this funnel');
     }
 
-    // events_v2 has no window_id column (it predates the column); when the
-    // range routes there the replay simply opens on its default tab.
-    const hasWindowColumn =
-      getEventsTableForRange(input.startDate) !== TABLE_NAMES.events_v2;
-
     const { funnelQuery, breakdowns, group, startDate, endDate } =
       await this.prepareFunnelQuery(input, {
-        extraSourceColumns: hasWindowColumn ? ['window_id'] : [],
+        extraSourceColumns: ['window_id'],
         extraSelects: ({ stepConditions, fromClause, group }) => {
           const cond = stepConditions[stepIndex]!;
           const at = `${fromClause}.created_at`;
           return [
             `argMaxIf(${fromClause}.session_id, ${at}, ${cond}) AS step_session`,
-            `argMaxIf(${hasWindowColumn ? `${fromClause}.window_id` : "''"}, ${at}, ${cond}) AS step_window`,
+            `argMaxIf(${fromClause}.window_id, ${at}, ${cond}) AS step_window`,
             `maxIf(${at}, ${cond}) AS step_at`,
             // Session-grouped funnels key on session_id, so carry the person
             // separately. Profile-grouped funnels ARE the (resolved) person.
