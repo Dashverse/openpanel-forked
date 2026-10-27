@@ -1,14 +1,27 @@
 import { LogError } from '@/utils/errors';
 import {
   Arctic,
+  DomainPolicyError,
+  type GoogleIdentity,
   type OAuth2Tokens,
   createSession,
+  describeAllowedDomains,
   generateSessionToken,
   github,
   google,
+  isEmailDomainAllowed,
+  isGithubLoginEnabled,
+  parseGoogleIdentity,
   setSessionTokenCookie,
 } from '@openpanel/auth';
-import { type Account, connectUserToOrganization, db } from '@openpanel/db';
+import {
+  type Account,
+  type User,
+  claimPendingInvitesForUser,
+  connectUserToOrganization,
+  db,
+  getIsRegistrationAllowed,
+} from '@openpanel/db';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
@@ -48,15 +61,58 @@ interface OAuthUser {
 }
 
 // Shared utility functions
+const NO_INVITE_MESSAGE =
+  'You need an invite to access OpenPanel. Ask an admin to invite you.';
+
+/**
+ * Best-effort: join the organizations this user was invited to. A broken or
+ * expired invite must never block an otherwise valid sign-in.
+ */
+async function redeemInvites({
+  user,
+  inviteId,
+  claimByEmail,
+  reply,
+}: {
+  user: User;
+  inviteId: string | undefined | null;
+  claimByEmail: boolean;
+  reply: FastifyReply;
+}) {
+  if (inviteId) {
+    try {
+      await connectUserToOrganization({ user, inviteId });
+    } catch (error) {
+      reply.log.warn(
+        { error, inviteId, userId: user.id },
+        'could not redeem invite from link',
+      );
+    }
+    reply.clearCookie('inviteId');
+  }
+
+  if (claimByEmail) {
+    const { failed } = await claimPendingInvitesForUser(user);
+    for (const { inviteId, error } of failed) {
+      reply.log.warn(
+        { error, inviteId, userId: user.id },
+        'could not redeem pending invite',
+      );
+    }
+  }
+}
+
 async function handleExistingUser({
   account,
   oauthUser,
   providerName,
+  inviteId,
   reply,
 }: {
   account: Account;
   oauthUser: OAuthUser;
   providerName: Provider;
+  inviteId: string | undefined | null;
   reply: FastifyReply;
 }) {
   const sessionToken = generateSessionToken();
@@ -70,6 +126,13 @@ async function handleExistingUser({
       email: oauthUser.email,
     },
   });
+
+  if (inviteId) {
+    const user = await db.user.findUniqueOrThrow({
+      where: { id: account.userId },
+    });
+    await redeemInvites({ user, inviteId, claimByEmail: false, reply });
+  }
 
   setSessionTokenCookie(
     (...args) => reply.setCookie(...args),
@@ -107,6 +170,19 @@ async function handleNewUser({
     );
   }
 
+  // Enforced here rather than before the IdP redirect: this is the first point
+  // where we know the person is new, so returning users are never caught by
+  // it. No profile data in the log payload, the person is not a user.
+  // GitHub only hands us a verified primary email (getGithubEmail)
+  if (
+    !(await getIsRegistrationAllowed({
+      inviteId,
+      verifiedEmail: oauthUser.email,
+    }))
+  ) {
+    throw new LogError(NO_INVITE_MESSAGE, { providerName, inviteId });
+  }
+
   const user = await db.user.create({
     data: {
       email: oauthUser.email,
@@ -121,17 +197,7 @@ async function handleNewUser({
     },
   });
 
-  if (inviteId) {
-    try {
-      await connectUserToOrganization({ user, inviteId });
-    } catch (error) {
-      reply.log.error('error connecting user to organization', {
-        error,
-        inviteId,
-        user,
-      });
-    }
-  }
+  await redeemInvites({ user, inviteId, claimByEmail: false, reply });
 
   const sessionToken = generateSessionToken();
   const session = await createSession(sessionToken, user.id);
@@ -181,35 +247,127 @@ async function fetchGithubUser(accessToken: string): Promise<OAuthUser> {
   };
 }
 
-async function fetchGoogleUser(tokens: OAuth2Tokens): Promise<OAuthUser> {
-  const claims = Arctic.decodeIdToken(tokens.idToken());
+function getGoogleIdentity(tokens: OAuth2Tokens): GoogleIdentity {
+  try {
+    return parseGoogleIdentity(Arctic.decodeIdToken(tokens.idToken()));
+  } catch (error) {
+    if (error instanceof DomainPolicyError) {
+      throw new LogError(error.message);
+    }
+    throw error;
+  }
+}
 
-  const claimsSchema = z.object({
-    sub: z.string(),
-    email: z.string(),
-    email_verified: z.boolean(),
-    given_name: z.string().optional(),
-    family_name: z.string().optional(),
+function isUniqueConstraintError(error: unknown) {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'P2002'
+  );
+}
+
+/**
+ * Find or create the user behind a verified Google identity.
+ *
+ * 1. An account already bound to this Google id.
+ * 2. A legacy Google/OAuth account matched by email, which gets bound now.
+ * 3. An existing user with this email (e.g. an email/password account): link
+ *    Google to it. Safe because Google verified the address and, with an
+ *    allow-list configured, that it belongs to our Workspace.
+ * 4. A brand-new user, only when registration is allowed for them.
+ */
+async function resolveGoogleUser(
+  identity: GoogleIdentity,
+  inviteId: string | undefined | null,
+): Promise<User> {
+  const account = await db.account.findFirst({
+    where: {
+      OR: [
+        { provider: 'google', providerId: identity.id },
+        {
+          provider: 'google',
+          providerId: null,
+          user: { email: { equals: identity.email, mode: 'insensitive' } },
+        },
+        {
+          provider: 'oauth',
+          user: { email: { equals: identity.email, mode: 'insensitive' } },
+        },
+      ],
+    },
+    // Prefer the account already bound to this exact Google id
+    orderBy: { providerId: { sort: 'asc', nulls: 'last' } },
+    include: { user: true },
   });
 
-  const claimsResult = claimsSchema.safeParse(claims);
-  if (!claimsResult.success) {
-    throw new LogError('Error fetching Google user', {
-      error: claimsResult.error,
-      claims,
+  if (account) {
+    await db.account.update({
+      where: { id: account.id },
+      data: {
+        provider: 'google',
+        providerId: identity.id,
+        email: identity.email,
+      },
+    });
+    return account.user;
+  }
+
+  const existingUser = await db.user.findFirst({
+    where: { email: { equals: identity.email, mode: 'insensitive' } },
+  });
+
+  if (existingUser) {
+    try {
+      await db.account.create({
+        data: {
+          userId: existingUser.id,
+          provider: 'google',
+          providerId: identity.id,
+          email: identity.email,
+        },
+      });
+    } catch (error) {
+      // A concurrent sign-in linked it first
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+    }
+    return existingUser;
+  }
+
+  const isRegistrationAllowed = await getIsRegistrationAllowed({
+    inviteId,
+    verifiedEmail: identity.email,
+  });
+  if (!isRegistrationAllowed) {
+    throw new LogError(NO_INVITE_MESSAGE, { providerName: 'google', inviteId });
+  }
+
+  try {
+    return await db.user.create({
+      data: {
+        email: identity.email,
+        firstName: identity.firstName,
+        lastName: identity.lastName,
+        accounts: {
+          create: {
+            provider: 'google',
+            providerId: identity.id,
+            email: identity.email,
+          },
+        },
+      },
+    });
+  } catch (error) {
+    // A concurrent first sign-in created the user first
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+    return db.user.findFirstOrThrow({
+      where: { email: { equals: identity.email, mode: 'insensitive' } },
     });
   }
-
-  if (!claimsResult.data.email_verified) {
-    throw new LogError('Email not verified with Google');
-  }
-
-  return {
-    id: claimsResult.data.sub,
-    email: claimsResult.data.email,
-    firstName: claimsResult.data.given_name || '',
-    lastName: claimsResult.data.family_name || '',
-  };
 }
 
 interface ValidatedOAuthQuery {
@@ -273,6 +431,12 @@ export async function githubCallback(req: FastifyRequest, reply: FastifyReply) {
     const inviteId = req.cookies.inviteId;
     const tokens = await github.validateAuthorizationCode(code);
     const githubUser = await fetchGithubUser(tokens.accessToken());
+    // Belt and braces: signInOAuth already refuses GitHub with an allow-list
+    if (!isGithubLoginEnabled() || !isEmailDomainAllowed(githubUser.email)) {
+      throw new LogError(
+        `Sign in with your ${describeAllowedDomains()} Google account`,
+      );
+    }
     const account = await db.account.findFirst({
       where: {
         OR: [
@@ -292,6 +456,7 @@ export async function githubCallback(req: FastifyRequest, reply: FastifyReply) {
         account,
         oauthUser: githubUser,
         providerName: 'github',
+        inviteId,
         reply,
       });
     }
@@ -313,38 +478,27 @@ export async function googleCallback(req: FastifyRequest, reply: FastifyReply) {
     const { code } = await validateOAuthCallback(req, 'google');
     const inviteId = req.cookies.inviteId;
     const codeVerifier = req.cookies.google_code_verifier!;
-    const tokens = await google.validateAuthorizationCode(code, codeVerifier);
-    const googleUser = await fetchGoogleUser(tokens);
-    const existingUser = await db.account.findFirst({
-      where: {
-        OR: [
-          // To keep
-          { provider: 'google', providerId: googleUser.id },
-          // During migration
-          { provider: 'google', providerId: null, email: googleUser.email },
-          { provider: 'oauth', user: { email: googleUser.email } },
-        ],
-      },
-    });
-
     reply.clearCookie('google_code_verifier');
     reply.clearCookie('google_oauth_state');
 
-    if (existingUser) {
-      return await handleExistingUser({
-        account: existingUser,
-        oauthUser: googleUser,
-        providerName: 'google',
-        reply,
-      });
-    }
+    const tokens = await google.validateAuthorizationCode(code, codeVerifier);
+    const identity = getGoogleIdentity(tokens);
+    const user = await resolveGoogleUser(identity, inviteId);
 
-    return await handleNewUser({
-      oauthUser: googleUser,
-      providerName: 'google',
-      inviteId,
-      reply,
-    });
+    // Google verified this email, so pending invites addressed to it can be
+    // redeemed without the person ever clicking the invite link.
+    await redeemInvites({ user, inviteId, claimByEmail: true, reply });
+
+    const sessionToken = generateSessionToken();
+    const session = await createSession(sessionToken, user.id);
+    setSessionTokenCookie(
+      (...args) => reply.setCookie(...args),
+      sessionToken,
+      session.expiresAt,
+    );
+    return reply.redirect(
+      process.env.DASHBOARD_URL || process.env.NEXT_PUBLIC_DASHBOARD_URL!,
+    );
   } catch (error) {
     req.log.error(error);
     return redirectWithError(reply, error);

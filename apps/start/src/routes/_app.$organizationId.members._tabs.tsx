@@ -1,5 +1,6 @@
 import { PageHeader } from '@/components/page-header';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useIsOrganizationAdmin } from '@/hooks/use-is-organization-admin';
 import { usePageTabs } from '@/hooks/use-page-tabs';
 import { PAGE_TITLES, createOrganizationTitle } from '@/utils/title';
 import { Outlet, createFileRoute, useRouter } from '@tanstack/react-router';
@@ -19,9 +20,11 @@ export const Route = createFileRoute('/_app/$organizationId/members/_tabs')({
 
 function Component() {
   const router = useRouter();
+  const isAdmin = useIsOrganizationAdmin();
   const { activeTab, tabs } = usePageTabs([
     { id: 'members', label: 'Members' },
-    { id: 'invitations', label: 'Invitations' },
+    // Pending invites hold redeemable links, so only admins see them
+    ...(isAdmin ? [{ id: 'invitations', label: 'Invitations' }] : []),
   ]);
 
   const handleTabChange = (tabId: string) => {

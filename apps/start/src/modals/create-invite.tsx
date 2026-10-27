@@ -74,16 +74,19 @@ export default function CreateInvite() {
             {mutation.data.type === 'is_member' ? (
               <>
                 <p>
-                  Since the user already has an account we have added him/her to
-                  your organization. This means you will not see this user in
-                  the list of invites.
+                  This person already has an account, so they have been added to
+                  your organization right away and will not appear in the list
+                  of invites.
                 </p>
-                <p>We have also notified the user by email about this.</p>
+                <p>
+                  They will see the organization the next time they sign in.
+                </p>
               </>
             ) : (
               <p>
-                We have sent an email with instructions to join the
-                organization.
+                We have sent an email with a link to join. They can also just
+                sign in with Google using this email address within the next 14
+                days and they will be added automatically.
               </p>
             )}
             <div className="row gap-4 mt-8">
@@ -102,8 +105,8 @@ export default function CreateInvite() {
             <div>
               <SheetTitle>Invite a user</SheetTitle>
               <SheetDescription>
-                Invite users to your organization. They will recieve an email
-                will instructions.
+                Invite a colleague using their work email. They join by signing
+                in with Google; the invite is valid for 14 days.
               </SheetDescription>
             </div>
           </SheetHeader>
@@ -115,7 +118,7 @@ export default function CreateInvite() {
               className="w-full max-w-sm"
               label="Email"
               error={formState.errors.email?.message}
-              placeholder="Who do you want to invite?"
+              placeholder="name@company.com"
               {...register('email')}
             />
             <div>
@@ -158,7 +161,10 @@ export default function CreateInvite() {
                     value={field.value}
                     onChange={field.onChange}
                     items={projects.map((item) => ({
-                      label: item.name,
+                      label:
+                        item.name === item.id
+                          ? item.name
+                          : `${item.name} (${item.id})`,
                       value: item.id,
                     }))}
                   />

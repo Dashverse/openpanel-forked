@@ -5,6 +5,7 @@ import {
   encodeBase32LowerCaseNoPadding,
   encodeHexLowerCase,
 } from '@oslojs/encoding';
+import { isEmailDomainAllowed } from './domain-policy';
 
 export function generateSessionToken(): string {
   const bytes = new Uint8Array(20);
@@ -91,6 +92,13 @@ export async function validateSessionToken(
     return EMPTY_SESSION;
   }
   const { user, ...session } = result;
+  // Sessions minted before the domain allow-list existed (or for a domain
+  // removed from it since) stop working instead of living out their 30 days.
+  if (!isEmailDomainAllowed(user.email)) {
+    // deleteMany: parallel requests with the same cookie all land here
+    await db.session.deleteMany({ where: { id: sessionId } });
+    return EMPTY_SESSION;
+  }
   if (Date.now() >= session.expiresAt.getTime()) {
     await db.session.delete({ where: { id: sessionId } });
     return EMPTY_SESSION;

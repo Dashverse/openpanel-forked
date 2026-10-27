@@ -8,15 +8,32 @@ import {
   db,
   getClientByIdCached,
   getId,
+  getProjectById,
   getProjectByIdCached,
   getProjectWithClients,
-  getProjectsByOrganizationId,
+  getProjects,
 } from '@openpanel/db';
 import { zOnboardingProject, zProject } from '@openpanel/validation';
 import { addHours } from 'date-fns';
-import { getProjectAccess } from '../access';
+import { getOrganizationAccess, getProjectAccess } from '../access';
 import { TRPCAccessError, TRPCBadRequestError } from '../errors';
 import { createTRPCRouter, protectedProcedure } from '../trpc';
+
+async function assertOrganizationAdminForProject(
+  userId: string,
+  projectId: string,
+) {
+  const project = await getProjectById(projectId);
+  const access = project?.organizationId
+    ? await getOrganizationAccess({
+        userId,
+        organizationId: project.organizationId,
+      })
+    : null;
+  if (access?.role !== 'org:admin') {
+    throw TRPCAccessError('Only organization admins can delete projects');
+  }
+}
 
 export const projectRouter = createTRPCRouter({
   getProjectWithClients: protectedProcedure
@@ -44,9 +61,11 @@ export const projectRouter = createTRPCRouter({
         organizationId: z.string().nullable(),
       }),
     )
-    .query(async ({ input: { organizationId } }) => {
+    .query(async ({ input: { organizationId }, ctx }) => {
       if (organizationId === null) return [];
-      return getProjectsByOrganizationId(organizationId);
+      // Only projects this user can open: none outside their organizations,
+      // and only the granted ones when their access is project-restricted.
+      return getProjects({ organizationId, userId: ctx.session.userId });
     }),
 
   update: protectedProcedure
@@ -104,9 +123,17 @@ export const projectRouter = createTRPCRouter({
     }),
   create: protectedProcedure
     .input(zOnboardingProject)
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       if (!input.organizationId) {
         throw TRPCBadRequestError('Organization is required');
+      }
+
+      const access = await getOrganizationAccess({
+        userId: ctx.session.userId,
+        organizationId: input.organizationId,
+      });
+      if (access?.role !== 'org:admin') {
+        throw TRPCAccessError('Only organization admins can create projects');
       }
 
       const secret = `sec_${crypto.randomBytes(10).toString('hex')}`;
@@ -165,6 +192,11 @@ export const projectRouter = createTRPCRouter({
         throw TRPCAccessError('You do not have access to this project');
       }
 
+      await assertOrganizationAdminForProject(
+        ctx.session.userId,
+        input.projectId,
+      );
+
       await db.project.update({
         where: {
           id: input.projectId,
@@ -191,6 +223,11 @@ export const projectRouter = createTRPCRouter({
       if (!access) {
         throw TRPCAccessError('You do not have access to this project');
       }
+
+      await assertOrganizationAdminForProject(
+        ctx.session.userId,
+        input.projectId,
+      );
 
       await db.project.update({
         where: {
