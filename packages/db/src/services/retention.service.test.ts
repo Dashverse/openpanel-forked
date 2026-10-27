@@ -106,6 +106,45 @@ describe('buildRetentionQuery', () => {
     expect(lastEvent).toContain("AND (os = 'iOS')");
   });
 
+  it('refuses match any + a profile filter on either event (would undercount)', () => {
+    const email = f('profile.email', ['@gmail'], 'contains');
+    expect(() =>
+      buildRetentionQuery({
+        ...base,
+        firstEventFilters: [f('country', ['US']), email],
+        firstEventFilterOperator: 'or',
+      }),
+    ).toThrow(/"Match any" can't be combined with a profile filter/);
+    expect(() =>
+      buildRetentionQuery({
+        ...base,
+        secondEventFilters: [f('country', ['US']), f('has_profile', ['true'])],
+        secondEventFilterOperator: 'or',
+      }),
+    ).toThrow(/Match any/);
+  });
+
+  it('allows a profile filter with match all, or match any on the other event', () => {
+    const email = f('profile.email', ['@gmail'], 'contains');
+    expect(() =>
+      buildRetentionQuery({
+        ...base,
+        firstEventFilters: [f('country', ['US']), email],
+        firstEventFilterOperator: 'and',
+        secondEventFilters: [f('country', ['US']), f('os', ['iOS'])],
+        secondEventFilterOperator: 'or',
+      }),
+    ).not.toThrow();
+    // A single filter has nothing to OR with, so dropping it can't narrow.
+    expect(() =>
+      buildRetentionQuery({
+        ...base,
+        firstEventFilters: [email],
+        firstEventFilterOperator: 'or',
+      }),
+    ).not.toThrow();
+  });
+
   it('criteria on_or_after => cumulative (>=), on => exact (=)', () => {
     expect(
       buildRetentionQuery({ ...base, criteria: 'on_or_after' }).sql,

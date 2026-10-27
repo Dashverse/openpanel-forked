@@ -91,6 +91,16 @@ describe('assertFirstTimeMatchAnySupported', () => {
     ).not.toThrow();
   });
 
+  it('allows a lone profile filter (nothing to OR with)', () => {
+    expect(() =>
+      assertFirstTimeMatchAnySupported({
+        name: 'signup',
+        filterOperator: 'or',
+        filters: [email],
+      }),
+    ).not.toThrow();
+  });
+
   it('ignores report/dashboard profile filters (always ANDed)', () => {
     expect(() =>
       assertFirstTimeMatchAnySupported({

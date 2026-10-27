@@ -17,7 +17,10 @@ import {
   getEventsTableForRange,
   resolvedPersonIdSql,
 } from '../clickhouse/client';
-import { getEventFiltersWhereClause } from './chart.service';
+import {
+  getEventFiltersWhereClause,
+  matchAnyDropsFilter,
+} from './chart.service';
 
 type IGetWeekRetentionInput = {
   projectId: string;
@@ -285,16 +288,26 @@ export function buildRetentionQuery(input: RetentionQueryInput): {
   // and cohort filters are dropped here (the event WHERE can't resolve them);
   // mirrors the safe pattern in funnel.service.ts. When a side has no filters its
   // fragment is '' so that side's SQL stays byte-identical to the no-filter case.
+  //
+  // Under "match any" a dropped profile filter would be one less OR term, which
+  // narrows the result to the other filters (an undercount), so that
+  // combination is refused instead.
+  const isProfileFilter = (f: IChartEventFilter) =>
+    f.name.startsWith('profile.') || f.name === 'has_profile';
   const toFilterSql = (
     filters: IChartEventFilter[] | undefined,
     filterOperator?: 'and' | 'or',
   ) => {
+    if (matchAnyDropsFilter(filterOperator, filters, isProfileFilter)) {
+      throw new Error(
+        `"Match any" can't be combined with a profile filter in retention. Switch to "Match all" or remove the profile filter.`,
+      );
+    }
     const conditions = Object.values(
       getEventFiltersWhereClause(
         (filters ?? []).filter(
           (f) =>
-            !f.name.startsWith('profile.') &&
-            f.name !== 'has_profile' &&
+            !isProfileFilter(f) &&
             f.operator !== 'inCohort' &&
             f.operator !== 'notInCohort',
         ),

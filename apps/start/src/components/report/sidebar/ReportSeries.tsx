@@ -189,7 +189,11 @@ function SortableSeries({
             (isSelectManyEvents) the event name is stored in filters[0], so hide
             that entry and show only the property filters. */}
         {chartEvent && (
-          <FiltersList event={chartEvent} hideNameFilter={isSelectManyEvents} />
+          <FiltersList
+            event={chartEvent}
+            hideNameFilter={isSelectManyEvents}
+            isRetention={isSelectManyEvents}
+          />
         )}
 
         {/* Aggregate-by row: the property selector sits inline with the

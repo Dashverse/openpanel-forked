@@ -1432,6 +1432,26 @@ async function setupCustomEventCTE(
 }
 
 /**
+ * True when "match any" is in effect (2+ of the event's own property filters
+ * get ORed, see getEventFiltersWhereClause) and a query path drops one of them
+ * (`isDropped`) before building the OR. Dropping a term from an OR narrows the
+ * result to the remaining terms, a silent undercount, so callers refuse it.
+ * Cohort and report/dashboard (isGlobal) filters never join the OR.
+ */
+export function matchAnyDropsFilter(
+  filterOperator: 'and' | 'or' | undefined,
+  filters: (IChartEventFilter & { isGlobal?: boolean })[] | undefined,
+  isDropped: (filter: IChartEventFilter) => boolean,
+) {
+  if (filterOperator !== 'or') return false;
+  const ored = (filters ?? []).filter(
+    (f) =>
+      !f.isGlobal && f.operator !== 'inCohort' && f.operator !== 'notInCohort',
+  );
+  return ored.length >= 2 && ored.some(isDropped);
+}
+
+/**
  * The first-time subquery only sees event-property filters (profile.* filters
  * reference a join it doesn't have). Under "match any", a row can qualify
  * through a profile.* filter alone, and the first-time leg would silently drop
@@ -1444,9 +1464,8 @@ export function assertFirstTimeMatchAnySupported(event: {
   filters?: (IChartEventFilter & { isGlobal?: boolean })[];
 }) {
   if (
-    event.filterOperator === 'or' &&
-    (event.filters ?? []).some(
-      (f) => !f.isGlobal && f.name.startsWith('profile.'),
+    matchAnyDropsFilter(event.filterOperator, event.filters, (f) =>
+      f.name.startsWith('profile.'),
     )
   ) {
     throw new Error(

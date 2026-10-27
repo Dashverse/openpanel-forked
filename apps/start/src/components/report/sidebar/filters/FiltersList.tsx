@@ -15,11 +15,17 @@ interface ReportEventFiltersProps {
    * is hidden so only real property filters (added via "Add filter") render.
    */
   hideNameFilter?: boolean;
+  /**
+   * Retention drops profile filters from its event queries, so "match any"
+   * with a profile filter is refused by the server there.
+   */
+  isRetention?: boolean;
 }
 
 export function FiltersList({
   event,
   hideNameFilter,
+  isRetention,
 }: ReportEventFiltersProps) {
   const dispatch = useDispatch();
   const filters = hideNameFilter
@@ -34,13 +40,19 @@ export function FiltersList({
   const propertyFilterCount = filters.filter(
     (f) => f.operator !== 'inCohort' && f.operator !== 'notInCohort',
   ).length;
-  // The server refuses "match any" + first-time + a profile.* filter (it would
-  // undercount), so only offer "match any" when it can run. Keep it listed if
-  // it's already selected so the user can switch back.
+  // The server refuses "match any" with a profile filter where its query path
+  // drops that filter (first time: profile.*; retention: profile.* and
+  // has_profile), because the OR would undercount. Only offer "match any" when
+  // it can run. Keep it listed if it's already selected so the user can switch
+  // back.
   const matchAnyBlocked =
-    !!event.firstTime &&
+    (isRetention || !!event.firstTime) &&
     event.filterOperator !== 'or' &&
-    filters.some((f) => f.name.startsWith('profile.'));
+    filters.some(
+      (f) =>
+        f.name.startsWith('profile.') ||
+        (isRetention && f.name === 'has_profile'),
+    );
 
   return (
     <div className="flex flex-col gap-1">
@@ -57,7 +69,9 @@ export function FiltersList({
           ]}
           label={
             matchAnyBlocked
-              ? '"Match any" is off with First time + a profile filter'
+              ? isRetention
+                ? '"Match any" is off with a profile filter in retention'
+                : '"Match any" is off with First time + a profile filter'
               : undefined
           }
         >
