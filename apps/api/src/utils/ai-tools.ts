@@ -460,7 +460,7 @@ export function getAllEventNames({
     execute: async () => {
       return getCache(`top-event-names:${projectId}`, 60 * 10, async () => {
         const events = await clix(ch)
-          .select<IClickhouseEvent>(['name', 'count() as count'])
+          .select<IClickhouseEvent>(['name', 'sum(event_count) as count'])
           .from(TABLE_NAMES.event_names_mv)
           .where('project_id', '=', projectId)
           .groupBy(['name'])

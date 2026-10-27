@@ -2123,10 +2123,18 @@ export function getChartPrevStartEndDate({
 }
 
 /**
- * All distinct event names for a project. Cached in Redis for 1h because the
- * distinct-name scan over `distinct_event_names_mv` is ~2s / hundreds of
- * millions of rows (the MV isn't pre-deduplicated) — far too slow to run on
- * every query. Paid once per project per hour, then instant.
+ * All distinct event names for a project.
+ *
+ * Prod only: on prod `distinct_event_names_mv` was rebuilt by hand on
+ * 2026-09-16 as an AggregatingMergeTree with ORDER BY (project_id, name) and
+ * `last_seen` / `event_count` as SimpleAggregateFunction(max / sum) columns, so
+ * it holds ~1 row per name once merged and this read is cheap; the 1h Redis
+ * cache just saves a ClickHouse round-trip on every MCP funnel / conversion
+ * validation.
+ *
+ * Fresh installs still get the old shape from 3-init-ch.ts (keyed by
+ * (project_id, name, created_at), rows that rarely merge) until a schema-sync
+ * migration lands. `sum(event_count)` is correct on both shapes.
  */
 const getProjectEventNamesCached = cacheable(
   async function getProjectEventNames(projectId: string): Promise<string[]> {
