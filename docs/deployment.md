@@ -270,8 +270,6 @@ pnpm migrate:deploy   # Prod: deploy (runs in api container on startup via sh -c
 - `clickhouse-config.xml`: logger, keep_alive, cluster macros, listen address
 - `clickhouse-user-config.xml`: disable query logging (too verbose)
 
-**Gotcha:** ClickHouse 25.10+ requires `CLICKHOUSE_SETTINGS_REMOVE_CONVERT_ANY_JOIN=true` in .env or it rejects certain joins (.cursorrules enforces custom query builder at `packages/db/src/clickhouse/query-builder.ts`).
-
 ### Redis
 
 - **Local dev:** redis:7.2.5-alpine (docker-compose.yml)
@@ -345,17 +343,15 @@ Enforces typecheck + tests before push. Override with `SKIP_HOOKS=1 git push`.
 
 2. **NITRO=1 required locally:** Without it, Vite tries to load Cloudflare plugin in local dev (fails). See apps/start/vite.config.ts:19.
 
-3. **ClickHouse 25.10+ requires setting:** Add `CLICKHOUSE_SETTINGS_REMOVE_CONVERT_ANY_JOIN=true` to .env or ClickHouse rejects certain SQL joins. (.cursorrules enforces using the custom query builder to mitigate.)
+3. **Dragonfly vs Redis:** Local docker-compose includes Dragonfly (op-df, port 6380) for distributed cache testing, alongside Redis. Apps only use Redis (6379); Dragonfly is optional.
 
-4. **Dragonfly vs Redis:** Local docker-compose includes Dragonfly (op-df, port 6380) for distributed cache testing, alongside Redis. Apps only use Redis (6379); Dragonfly is optional.
+4. **Caddy reverse proxy in self-hosting:** Listens on 80/443; routes /api/* to api:3000, /* to dashboard:3000. Requires valid domain for HTTPS cert (self-signed "tls internal" for localhost:443).
 
-5. **Caddy reverse proxy in self-hosting:** Listens on 80/443; routes /api/* to api:3000, /* to dashboard:3000. Requires valid domain for HTTPS cert (self-signed "tls internal" for localhost:443).
+5. **Worker health checks timeout:** Worker starts with 10s health check interval; if slow to boot, may report unhealthy. Increase `retries` in docker-compose.yml if needed.
 
-6. **Worker health checks timeout:** Worker starts with 10s health check interval; if slow to boot, may report unhealthy. Increase `retries` in docker-compose.yml if needed.
+6. **Database migrations on API start:** Docker-compose api service runs `CI=true pnpm -r run migrate:deploy` before `pnpm start`. This can slow startup; watch logs via `docker compose logs op-api`.
 
-7. **Database migrations on API start:** Docker-compose api service runs `CI=true pnpm -r run migrate:deploy` before `pnpm start`. This can slow startup; watch logs via `docker compose logs op-api`.
-
-8. **Coolify vs docker-compose:** Coolify's coolify.yml uses service templates + env vars. Postgres version differs (16 vs 14), as does ClickHouse (24.3.2 vs 25.10.2). Test images before deploying.
+7. **Coolify vs docker-compose:** Coolify's coolify.yml uses service templates + env vars. Postgres version differs (16 vs 14), as does ClickHouse (24.3.2 vs 25.10.2). Test images before deploying.
 
 ## Unverified / TODO
 

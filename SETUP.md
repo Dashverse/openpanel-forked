@@ -20,7 +20,6 @@ REDIS_URL="rediss://:<password>@<dev-redis-host>:6380?ssl_cert_reqs=required"
 DATABASE_URL="postgresql://<user>:<pass>@<dev-postgres-host>:5432/openpanel?sslmode=require"
 DATABASE_URL_DIRECT="<same as DATABASE_URL>"
 CLICKHOUSE_URL="https://<user>:<pass>@<dev-clickhouse-host>:<port>"
-CLICKHOUSE_SETTINGS_REMOVE_CONVERT_ANY_JOIN="true"
 SELF_HOSTED="true"
 VITE_SELF_HOSTED="true"
 NITRO="1"
@@ -67,5 +66,4 @@ To also deploy to prod, include `#d2p-openpanel` in the merge commit message.
 ## Notes
 
 - `NITRO=1` is required in `.env` to skip the Cloudflare plugin during local dev
-- The `CLICKHOUSE_SETTINGS_REMOVE_CONVERT_ANY_JOIN=true` flag is needed for newer ClickHouse versions
 - Redis warnings about eviction policy and version are non-blocking
