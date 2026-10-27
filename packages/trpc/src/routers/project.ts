@@ -12,6 +12,7 @@ import {
   getProjectByIdCached,
   getProjectWithClients,
   getProjects,
+  isProjectDeletionDue,
 } from '@openpanel/db';
 import { zOnboardingProject, zProject } from '@openpanel/validation';
 import { addHours } from 'date-fns';
@@ -34,6 +35,9 @@ async function assertOrganizationAdminForProject(
     throw TRPCAccessError('Only organization admins can delete projects');
   }
 }
+
+const PROJECT_DELETION_IN_PROGRESS =
+  'This project is already being deleted and the deletion can no longer be cancelled.';
 
 export const projectRouter = createTRPCRouter({
   getProjectWithClients: protectedProcedure
@@ -229,14 +233,31 @@ export const projectRouter = createTRPCRouter({
         input.projectId,
       );
 
-      await db.project.update({
+      // Once deleteAt has passed, the delete-projects cron may already have
+      // wiped the project's ClickHouse data (it deletes ClickHouse before
+      // Postgres). Cancelling then would hand back an empty project, so refuse.
+      const project = await db.project.findUnique({
+        where: { id: input.projectId },
+        select: { deleteAt: true },
+      });
+      if (project && isProjectDeletionDue(project.deleteAt)) {
+        throw TRPCBadRequestError(PROJECT_DELETION_IN_PROGRESS);
+      }
+
+      // Guard the write too, so a cancel racing the deleteAt boundary can't
+      // slip in between the check above and the update.
+      const { count } = await db.project.updateMany({
         where: {
           id: input.projectId,
+          OR: [{ deleteAt: null }, { deleteAt: { gt: new Date() } }],
         },
         data: {
           deleteAt: null,
         },
       });
+      if (project && count === 0) {
+        throw TRPCBadRequestError(PROJECT_DELETION_IN_PROGRESS);
+      }
 
       return true;
     }),

@@ -167,10 +167,11 @@ export function buildEventCriteriaQuery(
     `;
   }
 
-  // NAME-ONLY criteria ("did X", any N×) → raw events. cohort_events_mv is
-  // anon-excluded; raw events is exact for any frequency, anon-inclusive, and
-  // fast here (name is an effective sort-key prefix via the proj_funnel
-  // projection). Uses created_at + plain count() — no event_date/countMerge.
+  // NAME-ONLY criteria ("did X", any N×) → raw events (the former
+  // anon-excluding cohort_events_mv has been dropped). Raw events is exact for
+  // any frequency, anon-inclusive, and fast here (name is an effective
+  // sort-key prefix via the proj_funnel projection). Uses created_at + plain
+  // count() — no event_date/countMerge.
   if (frequency) {
     const frequencyOp = getFrequencyOperator(frequency);
 
