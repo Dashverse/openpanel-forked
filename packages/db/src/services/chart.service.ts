@@ -824,11 +824,6 @@ export async function getChartSql({
     with: addCte,
   } = createSqlBuilder();
 
-  // createSqlBuilder()'s default `from` is `events e`; set it explicitly so the
-  // main FROM matches the breakdown CTEs below. The custom-event and distinct
-  // paths reassign sb.from later, so this only sets the regular events path.
-  sb.from = `${TABLE_NAMES.events} e`;
-
   // Create CTEs for all cohorts (used by main query only)
   // NOTE: ClickHouse allows CTEs to be referenced in the main query's JOINs,
   // but NOT in other CTEs' JOINs. For CTEs that need cohort data, we inline subqueries.
@@ -1358,8 +1353,6 @@ async function setupCustomEventCTE(
   const customEventSQL = await expandCustomEventToSQL(
     { ...customEvent, projectId },
     baseWhere,
-    undefined,
-    startDate,
   );
 
   addCte('custom_event_data', customEventSQL);

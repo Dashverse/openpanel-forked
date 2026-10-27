@@ -99,7 +99,6 @@ export async function expandCustomEventToSQL(
   },
   baseWhere: string[] = [],
   selectColumns?: string[],
-  startDate?: string,
 ): Promise<string> {
   const definition = customEvent.definition;
 

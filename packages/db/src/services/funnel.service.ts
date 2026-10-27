@@ -103,7 +103,6 @@ export class FunnelService {
         } as any,
         baseWhere,
         selectColumns,
-        startDate,
       );
 
       withClauses.push({ name: cteName, query: sql });
