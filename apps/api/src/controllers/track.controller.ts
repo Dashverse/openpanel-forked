@@ -3,8 +3,8 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { assocPath, pathOr, pick } from 'ramda';
 
 import {
+  recordReplayProduceResult,
   replayKafkaDroppedTotal,
-  replayKafkaProducedTotal,
 } from '@/metrics';
 import { HttpError } from '@/utils/errors';
 import { buildEventJobId } from '@/utils/event-job-id';
@@ -13,6 +13,7 @@ import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
 import {
   getProfileById,
   getSalts,
+  normalizeReplayChunkFields,
   replayBuffer,
   sessionBuffer,
   upsertAlias,
@@ -455,24 +456,30 @@ async function handleReplay({
     });
   }
 
+  // Reject a chunk whose fields the storage can't order or parse: downstream
+  // a bad started_at would fail the Kafka batch on every redelivery.
+  const checked = normalizeReplayChunkFields(
+    payload as unknown as Record<string, unknown>,
+  );
+  if (!checked.ok) {
+    throw new HttpError(`invalid replay chunk: ${checked.error}`, {
+      status: 400,
+    });
+  }
   const chunk = {
     project_id: projectId,
     session_id: sessionId,
     // Empty string for older SDKs — CH column defaults to '' so the raw
     // JSONEachRow passthrough stays valid.
-    window_id: payload.window_id ?? '',
-    chunk_index: payload.chunk_index,
-    started_at: payload.started_at,
-    ended_at: payload.ended_at,
-    events_count: payload.events_count,
-    is_full_snapshot: payload.is_full_snapshot,
-    payload: payload.payload,
+    window_id: typeof payload.window_id === 'string' ? payload.window_id : '',
+    ...checked.fields,
   };
 
   // Redis-free Kafka path, flag-gated per project (REPLAY_KAFKA_PROJECT_IDS).
-  // A produce failure throws → /track errors → the SDK retries; an oversize
-  // chunk (>1MB after LZ4, usually a fat full snapshot) is dropped + counted,
-  // not shipped. Not-yet-flagged projects stay on the legacy Redis buffer.
+  // A produce failure throws → /track errors → the SDK retries; a chunk over
+  // 1MB compressed (usually a fat full snapshot) is sent as transport parts,
+  // and only one over REPLAY_KAFKA_MAX_TOTAL_BYTES is dropped + counted, not
+  // shipped. Not-yet-flagged projects stay on the legacy Redis buffer.
   if (shouldUseReplayKafka(projectId)) {
     // Partition key = sessionId so a session's chunks stay ordered on one
     // partition. (deviceId would work too, but for replay it's always just the
@@ -481,11 +488,7 @@ async function handleReplay({
     // simpler, better-distributed key and skips the getSalts()/hash work.)
     try {
       const result = await produceReplayChunk(chunk, sessionId);
-      if (result === 'oversize') {
-        replayKafkaDroppedTotal.inc({ reason: 'oversize' });
-      } else {
-        replayKafkaProducedTotal.inc();
-      }
+      recordReplayProduceResult(result, Boolean(chunk.is_full_snapshot));
     } catch (err) {
       // Separate admission-cap backpressure (the SDK retries → not a confirmed
       // drop) from a genuine produce failure, so dropped_total stays a

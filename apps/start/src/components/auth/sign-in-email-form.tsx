@@ -13,7 +13,7 @@ import { Button } from '../ui/button';
 const validator = zSignInEmail;
 type IForm = z.infer<typeof validator>;
 
-export function SignInEmailForm() {
+export function SignInEmailForm({ inviteId }: { inviteId?: string }) {
   const trpc = useTRPC();
   const mutation = useMutation(
     trpc.auth.signInEmail.mutationOptions({
@@ -36,6 +36,7 @@ export function SignInEmailForm() {
   const onSubmit: SubmitHandler<IForm> = (values) => {
     mutation.mutate({
       ...values,
+      inviteId,
     });
   };
 

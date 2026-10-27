@@ -1,6 +1,7 @@
 import { useReplayContext } from '@/components/sessions/replay/replay-context';
 import type { ReplayPlayerInstance } from '@/components/sessions/replay/replay-context';
 import { cn } from '@/utils/cn';
+import { Loader2Icon } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import 'rrweb-player/dist/style.css';
@@ -76,9 +77,15 @@ export function ReplayPlayer({
   const {
     onPlayerReady,
     onPlayerDestroy,
+    onPlayerFinish,
     setCurrentTime,
     setIsPlaying,
     refreshDuration,
+    play,
+    pause,
+    isBuffering,
+    bufferError,
+    retryLoad,
   } = useReplayContext();
   const [importError, setImportError] = useState(false);
 
@@ -96,6 +103,7 @@ export function ReplayPlayer({
     let mounted = true;
     let player: ReplayPlayerInstance | null = null;
     let handleVisibilityChange: (() => void) | null = null;
+    let timeRaf: number | null = null;
 
     const aspectRatio = recordedDimensions
       ? recordedDimensions.width / recordedDimensions.height
@@ -134,32 +142,58 @@ export function ReplayPlayer({
         // Track play state from replayer (getMetaData() does not expose isPlaying)
         let playingState = false;
 
-        // Wire rrweb's built-in event emitter — no RAF loop needed.
+        // Wire rrweb's built-in event emitter.
         // Note: rrweb-player does NOT emit ui-update-duration; duration is
         // read from getMetaData() on init and after each addEvent batch.
-        player.addEventListener('ui-update-current-time', (e) => {
-          const t = e.payload as number;
+        let lastTime = Number.NaN;
+        const emitTime = (t: number) => {
+          if (t === lastTime) return;
+          lastTime = t;
           setCurrentTime(t);
+        };
+        player.addEventListener('ui-update-current-time', (e) => {
+          emitTime(e.payload as number);
         });
+
+        // rrweb-player's own time loop stops for good once the playhead
+        // reaches the end of the events loaded at that moment, even if more
+        // are appended and playback carries on - with progressive loading the
+        // time readout (and the buffer-ahead loop it drives) would freeze. Poll
+        // the replayer ourselves while playing; emitTime dedupes the two.
+        const pollTime = () => {
+          timeRaf = null;
+          if (!mounted || !player || !playingState) return;
+          emitTime(player.getReplayer().getCurrentTime());
+          timeRaf = requestAnimationFrame(pollTime);
+        };
 
         player.addEventListener('ui-update-player-state', (e) => {
           const playing = e.payload === 'playing';
           playingState = playing;
           setIsPlaying(playing);
+          if (playing && timeRaf === null) {
+            timeRaf = requestAnimationFrame(pollTime);
+          }
         });
+
+        // rrweb's 'finish' fires when the playhead passes the last LOADED
+        // event - with progressive loading that's usually a buffer boundary,
+        // not the end of the recording. The context tells the two apart.
+        player.addEventListener('finish', () => onPlayerFinish());
 
         // Pause on tab hide; resume on show (prevents timer drift).
         // getMetaData() does not expose isPlaying, so we use playingState
-        // kept in sync by ui-update-player-state above.
+        // kept in sync by ui-update-player-state above. Goes through the
+        // context so the replayer baseline stays tracked.
         let wasPlaying = false;
         handleVisibilityChange = () => {
           if (!player) return;
           if (document.hidden) {
             wasPlaying = playingState;
-            if (wasPlaying) player.pause();
+            if (wasPlaying) pause();
           } else {
             if (wasPlaying) {
-              player.play();
+              play();
               wasPlaying = false;
             }
           }
@@ -243,6 +277,7 @@ export function ReplayPlayer({
 
     return () => {
       mounted = false;
+      if (timeRaf !== null) cancelAnimationFrame(timeRaf);
       for (const t of fullscreenResizeTimers) clearTimeout(t);
       resizeObserver?.disconnect();
       window.removeEventListener('resize', onWindowResize);
@@ -259,7 +294,7 @@ export function ReplayPlayer({
       playerRef.current = null;
       onPlayerDestroy();
     };
-  }, [events, recordedDimensions, reservedBottomPx, fill, onPlayerReady, onPlayerDestroy, setCurrentTime, setIsPlaying, refreshDuration]);
+  }, [events, recordedDimensions, reservedBottomPx, fill, onPlayerReady, onPlayerDestroy, onPlayerFinish, setCurrentTime, setIsPlaying, refreshDuration, play, pause]);
 
   // Toggle skip-inactive live without recreating the player. rrweb-player is
   // a Svelte component — $set updates the reactive prop, which internally
@@ -286,6 +321,34 @@ export function ReplayPlayer({
       style={!fill && boxHeight ? { height: `${boxHeight}px` } : undefined}
     >
       <div ref={containerRef} className="flex items-center justify-center" />
+      {isBuffering && bufferError && (
+        <div
+          role="alert"
+          className="absolute inset-0 z-10 flex items-center justify-center"
+        >
+          <span className="flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white shadow">
+            {bufferError}
+            <button
+              type="button"
+              onClick={retryLoad}
+              className="rounded-full bg-white/15 px-2 py-0.5 font-medium hover:bg-white/25"
+            >
+              Retry
+            </button>
+          </span>
+        </div>
+      )}
+      {isBuffering && !bufferError && (
+        <div
+          role="status"
+          className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"
+        >
+          <span className="flex items-center gap-2 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white shadow">
+            <Loader2Icon className="size-3.5 animate-spin" />
+            Buffering…
+          </span>
+        </div>
+      )}
     </div>
   );
 }

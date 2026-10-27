@@ -94,6 +94,7 @@
     "embla-carousel-react": "8.0.0-rc22",
     "flag-icons": "^7.1.0",
     "framer-motion": "^11.0.28",
+    "fzstd": "0.1.1",
     "hamburger-react": "^2.5.0",
     "input-otp": "^1.2.4",
     "javascript-time-ago": "^2.5.9",

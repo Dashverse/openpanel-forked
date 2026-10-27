@@ -46,7 +46,7 @@ export function ReplayTimeline({
     isReady,
     seek,
     subscribeToCurrentTime,
-    loadedUpToMs,
+    loadedRanges,
     isBuffering,
   } = useReplayContext();
   // currentTime as React state is only needed for keyboard seeks (low frequency).
@@ -198,10 +198,19 @@ export function ReplayTimeline({
     0,
     Math.min(100, (toDisplayMs(currentTimeRef.current) / displayDuration) * 100),
   );
-  const bufferedPct = Math.max(
-    0,
-    Math.min(100, (toDisplayMs(loadedUpToMs) / displayDuration) * 100),
-  );
+  // Loading is progressive and can have holes (after a far seek), so draw each
+  // loaded span rather than one bar from 0.
+  const toPct = (wallOffsetMs: number) =>
+    Math.max(
+      0,
+      Math.min(100, (toDisplayMs(wallOffsetMs) / displayDuration) * 100),
+    );
+  const bufferedSpans = loadedRanges
+    .map((r) => {
+      const left = toPct(r.startMs);
+      return { left, width: Math.max(0, toPct(r.endMs) - left) };
+    })
+    .filter((s) => s.width > 0);
 
   const scrubber = (
         <div className={cn('relative', studio ? 'w-full' : 'col gap-4 flex-1 px-2')}>
@@ -243,12 +252,15 @@ export function ReplayTimeline({
             }}
           >
             <div className="replay-track-bg bg-muted relative h-1.5 w-full overflow-hidden rounded-full">
-              {/* Buffered region — YouTube-style lighter bar showing how far chunks have loaded */}
-              <div
-                className="bg-primary/30 absolute left-0 top-0 h-full rounded-full"
-                style={{ width: `${bufferedPct}%` }}
-                aria-hidden
-              />
+              {/* Buffered regions - YouTube-style lighter bars showing which parts have loaded */}
+              {bufferedSpans.map((s) => (
+                <div
+                  key={s.left}
+                  className="bg-primary/30 absolute top-0 h-full rounded-full"
+                  style={{ left: `${s.left}%`, width: `${s.width}%` }}
+                  aria-hidden
+                />
+              ))}
               <div
                 ref={progressBarRef}
                 className="bg-primary relative h-full rounded-full"

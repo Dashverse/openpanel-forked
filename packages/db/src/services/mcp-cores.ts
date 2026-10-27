@@ -5,6 +5,7 @@ import { executeChart } from '../engine';
 import { assertEventNamesExist } from './chart.service';
 import { getEventList } from './event.service';
 import { getProfileById } from './profile.service';
+import { isReplayBlocksServingEnabled } from './replay-block-reader';
 import { getSessionList } from './session.service';
 
 /**
@@ -264,7 +265,22 @@ export async function getSessionReplayCore(input: {
         WHERE project_id = ${esc(input.projectId)} AND session_id = ${esc(input.sessionId)}`,
       format: 'JSONEachRow',
     });
-    const has = Number((await res.json<{ c: string }>())[0]?.c ?? 0) > 0;
+    let has = Number((await res.json<{ c: string }>())[0]?.c ?? 0) > 0;
+    // Blocks-served project: a Blob-only session has refs but no CH chunks.
+    // Best-effort (the read-only MCP user may lack the grant) - never fails
+    // the tool, just keeps the chunks-only answer.
+    if (!has && isReplayBlocksServingEnabled(input.projectId)) {
+      try {
+        const blocks = await chMcp.query({
+          query: `SELECT count() AS c FROM ${TABLE_NAMES.session_replay_blocks}
+            WHERE project_id = ${esc(input.projectId)} AND session_id = ${esc(input.sessionId)}`,
+          format: 'JSONEachRow',
+        });
+        has = Number((await blocks.json<{ c: string }>())[0]?.c ?? 0) > 0;
+      } catch {
+        // keep `has` from the chunks table
+      }
+    }
     return has
       ? {
           sessionId: input.sessionId,

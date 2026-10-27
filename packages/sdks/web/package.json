@@ -4,7 +4,8 @@
   "module": "index.ts",
   "scripts": {
     "build": "rm -rf dist && tsup",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@openpanel/sdk": "workspace:*",

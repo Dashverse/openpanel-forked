@@ -60,7 +60,10 @@ export default function EditMember(member: EditMemberProps) {
           placeholder="Restrict access to projects"
           value={access}
           onChange={(newAccess) => setAccess(newAccess as string[])}
-          items={projects.map((p) => ({ label: p.name, value: p.id }))}
+          items={projects.map((p) => ({
+            label: p.name === p.id ? p.name : `${p.name} (${p.id})`,
+            value: p.id,
+          }))}
         />
 
         <ButtonContainer>

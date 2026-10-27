@@ -8,6 +8,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { useAppParams } from '@/hooks/use-app-params';
+import { useIsOrganizationAdmin } from '@/hooks/use-is-organization-admin';
 import { pushModal } from '@/modals';
 import type { RouterOutputs } from '@/trpc/client';
 import { cn } from '@/utils/cn';
@@ -108,6 +109,7 @@ export default function SidebarOrganizationMenu({
 
 export function ActionCTAButton() {
   const navigate = useNavigate();
+  const isAdmin = useIsOrganizationAdmin();
 
   const ACTIONS = [
     {
@@ -140,6 +142,11 @@ export function ActionCTAButton() {
 
     return () => clearInterval(interval);
   }, []);
+
+  // Creating projects, inviting people and integrations are admin actions
+  if (!isAdmin) {
+    return null;
+  }
 
   return (
     <div className="mb-4">

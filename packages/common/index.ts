@@ -13,3 +13,4 @@ export * from './server/get-client-ip';
 
 export * from './src/compare-overall';
 export * from './src/dashboard-layout';
+export * from './src/replay-frames';

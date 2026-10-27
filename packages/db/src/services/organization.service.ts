@@ -27,12 +27,26 @@ export async function getOrganizations(userId: string | null) {
         },
       },
     },
+    include: {
+      members: {
+        where: {
+          userId,
+        },
+        select: {
+          role: true,
+        },
+        take: 1,
+      },
+    },
     orderBy: {
       createdAt: 'desc',
     },
   });
 
-  return organizations;
+  return organizations.map(({ members, ...organization }) => ({
+    ...organization,
+    role: members[0]?.role ?? null,
+  }));
 }
 
 export function getOrganizationById(slug: string) {
@@ -159,42 +173,142 @@ export async function connectUserToOrganization({
     throw new Error('Invite expired');
   }
 
-  const member = await db.member.create({
-    data: {
-      organizationId: invite.organizationId,
-      userId: user.id,
-      role: invite.role,
-      email: user.email,
-      invitedById: invite.createdById,
-    },
+  // The invite id travels in a URL, so it is not proof of identity on its own:
+  // only the person it was addressed to may redeem it.
+  if (invite.email.toLowerCase() !== user.email.toLowerCase()) {
+    throw new Error('This invite was sent to a different email address');
+  }
+
+  // One transaction: a failure part-way (e.g. a grant insert) must not leave
+  // a project-restricted invitee as a member with no grants, which would mean
+  // access to every project, and the invite must survive so a retry can finish.
+  const member = await db.$transaction(async (tx) => {
+    // Claim the invite first. A concurrent redemption blocks on this row and
+    // then finds nothing to delete, so only one of them goes on to grant.
+    const claimed = await tx.invite.deleteMany({ where: { id: inviteId } });
+    if (claimed.count === 0) {
+      throw new Error('Invite already used');
+    }
+
+    const existingMember = await tx.member.findUnique({
+      where: {
+        organizationId_userId: {
+          organizationId: invite.organizationId,
+          userId: user.id,
+        },
+      },
+    });
+
+    // An existing membership keeps its role.
+    const member = await tx.member.upsert({
+      where: {
+        organizationId_userId: {
+          organizationId: invite.organizationId,
+          userId: user.id,
+        },
+      },
+      update: {},
+      create: {
+        organizationId: invite.organizationId,
+        userId: user.id,
+        role: invite.role,
+        email: user.email,
+        invitedById: invite.createdById,
+      },
+    });
+
+    if (invite.projectAccess.length > 0) {
+      const currentGrants = await tx.projectAccess.findMany({
+        where: {
+          userId: user.id,
+          organizationId: invite.organizationId,
+        },
+      });
+
+      // No grants on an existing member means they already see every
+      // project; adding grants now would silently narrow their access.
+      const alreadyUnrestricted =
+        !!existingMember && currentGrants.length === 0;
+
+      if (!alreadyUnrestricted) {
+        const granted = new Set(currentGrants.map((grant) => grant.projectId));
+        const missing = invite.projectAccess.filter(
+          (projectId) => !granted.has(projectId),
+        );
+        if (missing.length > 0) {
+          await tx.projectAccess.createMany({
+            data: missing.map((projectId) => ({
+              projectId,
+              userId: user.id,
+              organizationId: invite.organizationId,
+              level: 'write' as const,
+            })),
+          });
+        }
+      }
+    }
+
+    return member;
   });
 
+  // Caches are cleared only once the access rows are committed
   await getOrganizationAccess.clear({
     userId: user.id,
     organizationId: invite.organizationId,
   });
-
-  if (invite.projectAccess.length > 0) {
-    for (const projectId of invite.projectAccess) {
-      await getProjectAccess.clear({ userId: user.id, projectId });
-      await db.projectAccess.create({
-        data: {
-          projectId,
-          userId: user.id,
-          organizationId: invite.organizationId,
-          level: 'write',
-        },
-      });
-    }
+  for (const projectId of invite.projectAccess) {
+    await getProjectAccess.clear({ userId: user.id, projectId });
   }
 
-  await db.invite.delete({
+  return member;
+}
+
+/**
+ * Redeem every unexpired invite addressed to this user's email.
+ *
+ * Only call this for an email the identity provider has verified (Google);
+ * a self-typed email/password address proves nothing about ownership.
+ */
+export async function claimPendingInvitesForUser(user: User) {
+  const invites = await db.$primary().invite.findMany({
     where: {
-      id: inviteId,
+      email: {
+        equals: user.email,
+        mode: 'insensitive',
+      },
+      expiresAt: {
+        gt: new Date(),
+      },
     },
   });
 
-  return member;
+  const claimed: string[] = [];
+  const failed: { inviteId: string; error: unknown }[] = [];
+  for (const invite of invites) {
+    try {
+      await connectUserToOrganization({ user, inviteId: invite.id });
+      claimed.push(invite.organizationId);
+    } catch (error) {
+      failed.push({ inviteId: invite.id, error });
+    }
+  }
+
+  return { claimed, failed };
+}
+
+export async function hasPendingInvite(email: string) {
+  const count = await db.$primary().invite.count({
+    where: {
+      email: {
+        equals: email,
+        mode: 'insensitive',
+      },
+      expiresAt: {
+        gt: new Date(),
+      },
+    },
+  });
+  return count > 0;
 }
 
 /**

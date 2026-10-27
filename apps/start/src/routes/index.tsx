@@ -1,3 +1,4 @@
+import { NoAccess } from '@/components/auth/no-access';
 import FullPageLoadingState from '@/components/full-page-loading-state';
 import { LogoSquare } from '@/components/logo';
 import { PageHeader } from '@/components/page-header';
@@ -33,7 +34,20 @@ export const Route = createFileRoute('/')({
       .catch(() => []);
 
     if (organizations.length === 0) {
-      throw redirect({ to: '/onboarding/project' });
+      // Only an empty install may create its first organization; everyone
+      // else without an organization has simply not been invited yet.
+      const canCreateOrganization = await context.queryClient
+        .fetchQuery(
+          context.trpc.onboarding.canCreateOrganization.queryOptions(
+            undefined,
+            { staleTime: 0, gcTime: 0 },
+          ),
+        )
+        .catch(() => false);
+      if (canCreateOrganization) {
+        throw redirect({ to: '/onboarding/project' });
+      }
+      return;
     }
 
     if (organizations.length === 1) {
@@ -53,6 +67,19 @@ function LandingPage() {
     trpc.organization.list.queryOptions(),
   );
   const number = useNumber();
+
+  if (organizations.length === 0) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center">
+        <div className="max-w-xl w-full mx-auto px-4 col gap-6">
+          <LogoSquare className="w-full max-w-16" />
+          <div className="border bg-background rounded-lg shadow-sm">
+            <NoAccess isMember={false} />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center">
