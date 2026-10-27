@@ -1,5 +1,9 @@
+import { Button } from '@/components/ui/button';
+import { DropdownMenuComposed } from '@/components/ui/dropdown-menu';
+import { useDispatch } from '@/redux';
 import type { IChartEvent } from '@openpanel/validation';
 
+import { changeEvent } from '../../reportSlice';
 import { CohortFilterItem } from './CohortFilterItem';
 import { FilterItem } from './FilterItem';
 
@@ -11,12 +15,19 @@ interface ReportEventFiltersProps {
    * is hidden so only real property filters (added via "Add filter") render.
    */
   hideNameFilter?: boolean;
+  /**
+   * Retention drops profile filters from its event queries, so "match any"
+   * with a profile filter is refused by the server there.
+   */
+  isRetention?: boolean;
 }
 
 export function FiltersList({
   event,
   hideNameFilter,
+  isRetention,
 }: ReportEventFiltersProps) {
+  const dispatch = useDispatch();
   const filters = hideNameFilter
     ? event.filters.filter((f) => f.name !== 'name')
     : event.filters;
@@ -25,21 +36,69 @@ export function FiltersList({
     return null;
   }
 
+  // Match all / any only combines property filters; cohort filters always apply.
+  const propertyFilterCount = filters.filter(
+    (f) => f.operator !== 'inCohort' && f.operator !== 'notInCohort',
+  ).length;
+  // The server refuses "match any" with a profile filter where its query path
+  // drops that filter (first time: profile.*; retention: profile.* and
+  // has_profile), because the OR would undercount. Only offer "match any" when
+  // it can run. Keep it listed if it's already selected so the user can switch
+  // back.
+  const matchAnyBlocked =
+    (isRetention || !!event.firstTime) &&
+    event.filterOperator !== 'or' &&
+    filters.some(
+      (f) =>
+        f.name.startsWith('profile.') ||
+        (isRetention && f.name === 'has_profile'),
+    );
+
   return (
-    <div className="flex flex-col divide-y overflow-hidden rounded-md border">
-      {filters.map((filter) => {
-        // Use CohortFilterItem for cohort filters
-        const isCohortFilter =
-          filter.operator === 'inCohort' || filter.operator === 'notInCohort';
+    <div className="flex flex-col gap-1">
+      {propertyFilterCount >= 2 && (
+        <DropdownMenuComposed
+          onChange={(filterOperator) =>
+            dispatch(changeEvent({ ...event, type: 'event', filterOperator }))
+          }
+          items={[
+            { value: 'and' as const, label: 'Match all filters' },
+            ...(matchAnyBlocked
+              ? []
+              : [{ value: 'or' as const, label: 'Match any filter' }]),
+          ]}
+          label={
+            matchAnyBlocked
+              ? isRetention
+                ? '"Match any" is off with a profile filter in retention'
+                : '"Match any" is off with First time + a profile filter'
+              : undefined
+          }
+        >
+          <Button
+            variant="ghost"
+            size="sm"
+            className="self-start text-muted-foreground"
+          >
+            {event.filterOperator === 'or' ? 'Match any' : 'Match all'}
+          </Button>
+        </DropdownMenuComposed>
+      )}
+      <div className="flex flex-col divide-y overflow-hidden rounded-md border">
+        {filters.map((filter) => {
+          // Use CohortFilterItem for cohort filters
+          const isCohortFilter =
+            filter.operator === 'inCohort' || filter.operator === 'notInCohort';
 
-        if (isCohortFilter) {
-          return (
-            <CohortFilterItem key={filter.id} filter={filter} event={event} />
-          );
-        }
+          if (isCohortFilter) {
+            return (
+              <CohortFilterItem key={filter.id} filter={filter} event={event} />
+            );
+          }
 
-        return <FilterItem key={filter.id} filter={filter} event={event} />;
-      })}
+          return <FilterItem key={filter.id} filter={filter} event={event} />;
+        })}
+      </div>
     </div>
   );
 }

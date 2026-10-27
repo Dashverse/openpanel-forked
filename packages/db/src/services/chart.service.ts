@@ -580,7 +580,11 @@ function getPerUserChartSql({
     effectiveAggregation === 'distinct_count';
 
   // WHERE clause (event filters + project + name + date range)
-  const where = getEventFiltersWhereClause(event.filters ?? [], projectId);
+  const where = getEventFiltersWhereClause(
+    event.filters ?? [],
+    projectId,
+    event.filterOperator,
+  );
   where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   if (event.name !== '*') {
     where.eventName = `name = ${sqlstring.escape(event.name)}`;
@@ -588,6 +592,7 @@ function getPerUserChartSql({
   // First-time-for-user: restrict the per-user CTE (which scans the events table
   // aliased `e`) to each canonical person's global-first matching occurrence.
   if (isFirstTime(event) && event.name !== '*') {
+    assertFirstTimeMatchAnySupported(event);
     const firstTimeFilterConditions = Object.values(
       getEventFiltersWhereClause(
         (event.filters ?? []).filter(
@@ -597,6 +602,7 @@ function getPerUserChartSql({
             f.operator !== 'notInCohort',
         ),
         projectId,
+        event.filterOperator,
       ),
     );
     const firstTimeSubquery = buildFirstTimeSubquery({
@@ -874,7 +880,11 @@ export async function getChartSql({
   });
 
   // Common setup
-  sb.where = getEventFiltersWhereClause(event.filters, projectId);
+  sb.where = getEventFiltersWhereClause(
+    event.filters,
+    projectId,
+    event.filterOperator,
+  );
   sb.where.projectId = `project_id = ${sqlstring.escape(projectId)}`;
   sb.select.label_0 =
     event.name !== '*'
@@ -914,6 +924,7 @@ export async function getChartSql({
     event.segment !== 'one_event_per_user';
   let firstTimeSubquery = '';
   if (firstTimeActive) {
+    assertFirstTimeMatchAnySupported(event);
     const firstTimeFilterConditions = Object.values(
       getEventFiltersWhereClause(
         (event.filters ?? []).filter(
@@ -923,6 +934,7 @@ export async function getChartSql({
             f.operator !== 'notInCohort',
         ),
         projectId,
+        event.filterOperator,
       ),
     );
     firstTimeSubquery = buildFirstTimeSubquery({
@@ -1419,9 +1431,54 @@ async function setupCustomEventCTE(
   sb.from = 'custom_event_data e';
 }
 
+/**
+ * True when "match any" is in effect (2+ of the event's own property filters
+ * get ORed, see getEventFiltersWhereClause) and a query path drops one of them
+ * (`isDropped`) before building the OR. Dropping a term from an OR narrows the
+ * result to the remaining terms, a silent undercount, so callers refuse it.
+ * Cohort and report/dashboard (isGlobal) filters never join the OR.
+ */
+export function matchAnyDropsFilter(
+  filterOperator: 'and' | 'or' | undefined,
+  filters: (IChartEventFilter & { isGlobal?: boolean })[] | undefined,
+  isDropped: (filter: IChartEventFilter) => boolean,
+) {
+  if (filterOperator !== 'or') return false;
+  const ored = (filters ?? []).filter(
+    (f) =>
+      !f.isGlobal && f.operator !== 'inCohort' && f.operator !== 'notInCohort',
+  );
+  return ored.length >= 2 && ored.some(isDropped);
+}
+
+/**
+ * The first-time subquery only sees event-property filters (profile.* filters
+ * reference a join it doesn't have). Under "match any", a row can qualify
+ * through a profile.* filter alone, and the first-time leg would silently drop
+ * it — an undercount. Refuse that combination instead of returning a wrong
+ * number. Call from inside each first-time branch.
+ */
+export function assertFirstTimeMatchAnySupported(event: {
+  name: string;
+  filterOperator?: 'and' | 'or';
+  filters?: (IChartEventFilter & { isGlobal?: boolean })[];
+}) {
+  if (
+    matchAnyDropsFilter(event.filterOperator, event.filters, (f) =>
+      f.name.startsWith('profile.'),
+    )
+  ) {
+    throw new Error(
+      `"Match any" can't be combined with "First time" when "${event.name}" has a profile filter. Switch to "Match all" or remove the profile filter.`,
+    );
+  }
+}
+
 export function getEventFiltersWhereClause(
-  filters: IChartEventFilter[],
+  // `isGlobal` marks report/dashboard filters merged into an event's own list.
+  filters: (IChartEventFilter & { isGlobal?: boolean })[],
   projectId?: string,
+  filterOperator: 'and' | 'or' = 'and',
 ) {
   const where: Record<string, string> = {};
   filters.forEach((filter, index) => {
@@ -1820,6 +1877,25 @@ export function getEventFiltersWhereClause(
       }
     }
   });
+
+  // "Match any": OR the event's own property filters into one clause. Cohort
+  // filters (conversion also applies them via JOINs) and merged report/dashboard
+  // filters always stay required (ANDed).
+  if (filterOperator === 'or') {
+    const ids = Object.keys(where).filter((id) => {
+      const f = filters[Number(id.slice(1))];
+      return (
+        f &&
+        !f.isGlobal &&
+        f.operator !== 'inCohort' &&
+        f.operator !== 'notInCohort'
+      );
+    });
+    if (ids.length >= 2) {
+      where.f_or = `(${ids.map((id) => where[id]).join(' OR ')})`;
+      for (const id of ids) delete where[id];
+    }
+  }
 
   return where;
 }
