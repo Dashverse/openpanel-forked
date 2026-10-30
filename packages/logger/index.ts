@@ -8,6 +8,35 @@ export type ILogger = winston.Logger;
 const logLevel = process.env.LOG_LEVEL ?? 'info';
 const silent = process.env.LOG_SILENT === 'true';
 
+// Pino's fatal/trace on top of syslog's levels, so pino-style callers (Fastify
+// is given this logger) find every method they expect.
+const levels: Record<string, number> = Object.assign(
+  { fatal: 0, warn: 4, trace: 7 },
+  winston.config.syslog.levels,
+);
+// syslog/npm colours don't cover fatal/trace, and colorize throws on a level
+// without a colour; the throw escaped as an uncaught exception and restarted
+// the API.
+winston.addColors({ fatal: 'red', trace: 'gray' });
+
+// triple-beam's LEVEL symbol, which colorize reads.
+const LEVEL = Symbol.for('level');
+
+/**
+ * Give every entry a level this logger knows before colorize sees it: an entry
+ * written without one (e.g. `logger.log({ message })` from a library) has no
+ * LEVEL and would also make colorize throw.
+ */
+const normalizeLevel = winston.format((info) => {
+  const record = info as Record<string | symbol, unknown>;
+  const current = record[LEVEL] ?? info.level;
+  const level =
+    typeof current === 'string' && current in levels ? current : 'info';
+  record[LEVEL] = level;
+  info.level = level;
+  return info;
+});
+
 export function createLogger({ name }: { name: string }): ILogger {
   const service = [process.env.LOG_PREFIX, name, process.env.NODE_ENV ?? 'dev']
     .filter(Boolean)
@@ -85,6 +114,7 @@ export function createLogger({ name }: { name: string }): ILogger {
   } else {
     transports.push(new winston.transports.Console());
     format = winston.format.combine(
+      normalizeLevel(),
       errorFormatter(),
       redactSensitiveInfo(),
       winston.format.colorize({
@@ -105,11 +135,7 @@ export function createLogger({ name }: { name: string }): ILogger {
     format,
     transports,
     silent,
-    // Add ISO levels of logging from PINO
-    levels: Object.assign(
-      { fatal: 0, warn: 4, trace: 7 },
-      winston.config.syslog.levels,
-    ),
+    levels,
   });
 
   return logger;

@@ -1,11 +1,18 @@
 /// <reference path="./lz4js.d.ts" />
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { promisify } from 'node:util';
 import * as zlib from 'node:zlib';
 import type { IClickhouseSessionReplayChunk } from '@openpanel/db';
 import { currentTraceparent } from '@openpanel/telemetry';
-import type { Consumer, Producer } from 'kafkajs';
+import type { Consumer, Kafka, Producer } from 'kafkajs';
 import * as lz4 from 'lz4js';
-import { getKafka, isKafkaConfigured, kafkaLogger } from './kafka';
+import {
+  createKafkaClient,
+  getKafka,
+  isKafkaConfigured,
+  kafkaLogger,
+} from './kafka';
 import {
   REPLAY_CHUNK_ID_HEADER,
   REPLAY_KAFKA_MAX_PARTS,
@@ -226,6 +233,32 @@ export const encodeReplayLine = (
       })
     : compressReplayLine(line);
 
+const zstdCompressAsync =
+  typeof zlib.zstdCompress === 'function' ? promisify(zlib.zstdCompress) : null;
+
+/**
+ * `encodeReplayLine` for the /track path: zstd runs on the libuv threadpool so
+ * a multi-MB chunk does not stall the event loop (and every other request and
+ * Kafka timer on the pod). lz4js is pure JS and stays synchronous.
+ */
+export const encodeReplayLineAsync = async (
+  line: string,
+  codec: ReplayCodec = REPLAY_KAFKA_CODEC,
+): Promise<Buffer> => {
+  if (codec !== 'zstd' || !zstdCompressAsync) {
+    return encodeReplayLine(line, codec);
+  }
+  const input = Buffer.from(line, 'utf8');
+  // The streaming encoder only writes the frame's content size when told it up
+  // front; with it the output is byte-identical to encodeReplayLine.
+  // pledgedSrcSize is a Node zstd option missing from this @types/node.
+  const options: zlib.ZstdOptions & { pledgedSrcSize: number } = {
+    pledgedSrcSize: input.length,
+    params: { [zlib.constants.ZSTD_c_compressionLevel]: ZSTD_LEVEL },
+  };
+  return zstdCompressAsync(input, options);
+};
+
 /** Codec from a value's frame magic: zstd 28 B5 2F FD, LZ4 04 22 4D 18. */
 export const detectReplayCodec = (value: Uint8Array): ReplayCodec | null => {
   if (value.length < 4) return null;
@@ -272,14 +305,61 @@ export const decodeReplayValue = (
 };
 
 // ─── producer (bounded, replay-only) ────────────────────────────────────────
+// Event Hubs' Kafka endpoint wants a request timeout of at least 20 s (it may
+// hold a request that long) and closes connections idle for ~240 s, so metadata
+// must refresh well inside that or the next refresh is written to a socket the
+// service already dropped. The consumers keep the fail-fast client defaults.
+const REPLAY_KAFKA_REQUEST_TIMEOUT_MS = Number.parseInt(
+  process.env.REPLAY_KAFKA_REQUEST_TIMEOUT_MS || '30000',
+  10,
+);
+const REPLAY_KAFKA_METADATA_MAX_AGE_MS = Number.parseInt(
+  process.env.REPLAY_KAFKA_METADATA_MAX_AGE_MS || '180000',
+  10,
+);
+// How long /track waits on a send before answering 503 (the SDK retries, and
+// the load balancer usually lands the retry on another pod). The send itself
+// keeps going and still holds its admission slot until it settles.
+const REPLAY_KAFKA_PRODUCE_WAIT_MS = Number.parseInt(
+  process.env.REPLAY_KAFKA_PRODUCE_WAIT_MS || '5000',
+  10,
+);
+// Rebuild the producer after this many send failures within the window: a
+// kafkajs client whose connection the service dropped keeps timing out on it
+// until the process restarts. 0 disables.
+const REPLAY_KAFKA_RESET_AFTER_FAILURES = Number.parseInt(
+  process.env.REPLAY_KAFKA_RESET_AFTER_FAILURES || '5',
+  10,
+);
+const REPLAY_KAFKA_RESET_WINDOW_MS = 30_000;
+
+/** Emits `'reset'` when the replay producer is rebuilt (for metrics). */
+export const replayProducerEvents = new EventEmitter();
+
+let replayKafka: Kafka | null = null;
 let producer: Producer | null = null;
 let producerConnect: Promise<void> | null = null;
+let recentFailures: number[] = [];
+let lastResetAt = 0;
+// Sends /track stopped waiting for that have not settled yet.
+let detachedSends = 0;
+
+const getReplayKafka = (): Kafka => {
+  if (!replayKafka) {
+    replayKafka = createKafkaClient({
+      clientId: `${process.env.KAFKA_CLIENT_ID || 'openpanel'}-replay`,
+      requestTimeout: REPLAY_KAFKA_REQUEST_TIMEOUT_MS,
+    });
+  }
+  return replayKafka;
+};
 
 const getReplayProducer = async (): Promise<Producer> => {
   if (!producer) {
-    producer = getKafka().producer({
+    producer = getReplayKafka().producer({
       allowAutoTopicCreation: false,
       idempotent: false,
+      metadataMaxAge: REPLAY_KAFKA_METADATA_MAX_AGE_MS,
       // Bound concurrent in-flight sends so a slow broker backpressures the
       // (low-rate) /track path instead of piling up in memory.
       maxInFlightRequests: REPLAY_KAFKA_MAX_INFLIGHT,
@@ -295,6 +375,94 @@ const getReplayProducer = async (): Promise<Producer> => {
   }
   await producerConnect;
   return producer;
+};
+
+const resetReplayProducer = (failures: number): void => {
+  const stale = producer;
+  producer = null;
+  producerConnect = null;
+  recentFailures = [];
+  lastResetAt = Date.now();
+  kafkaLogger.warn('replay producer rebuilt after repeated send failures', {
+    failures,
+  });
+  replayProducerEvents.emit('reset');
+  stale?.disconnect().catch((err) => {
+    kafkaLogger.warn('stale replay producer disconnect failed', { err });
+  });
+};
+
+const recordSendFailure = (): void => {
+  if (REPLAY_KAFKA_RESET_AFTER_FAILURES <= 0) {
+    return;
+  }
+  const now = Date.now();
+  recentFailures = recentFailures.filter(
+    (at) => now - at < REPLAY_KAFKA_RESET_WINDOW_MS,
+  );
+  recentFailures.push(now);
+  const cooledDown = now - lastResetAt >= REPLAY_KAFKA_RESET_WINDOW_MS;
+  if (
+    recentFailures.length >= REPLAY_KAFKA_RESET_AFTER_FAILURES &&
+    cooledDown
+  ) {
+    resetReplayProducer(recentFailures.length);
+  }
+};
+
+/** Thrown when a send outlives REPLAY_KAFKA_PRODUCE_WAIT_MS. */
+export class ReplayProduceTimeoutError extends Error {
+  constructor(waitMs: number) {
+    super(`replay produce timed out after ${waitMs}ms`);
+    this.name = 'ReplayProduceTimeoutError';
+  }
+}
+
+/**
+ * Run one producer send with a bounded wait, counting failures toward the
+ * producer rebuild. A send that times out here may still complete later; the
+ * SDK retry then stores the chunk twice, which the replay reader dedupes.
+ */
+const sendWithin = async (send: () => Promise<unknown>): Promise<void> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pending = send();
+  // A send that loses the race below may still reject later; unhandled, that
+  // rejection would reach the process-level handler, which shuts the API down.
+  pending.catch(() => undefined);
+  try {
+    if (REPLAY_KAFKA_PRODUCE_WAIT_MS <= 0) {
+      await pending;
+    } else {
+      await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new ReplayProduceTimeoutError(REPLAY_KAFKA_PRODUCE_WAIT_MS),
+              ),
+            REPLAY_KAFKA_PRODUCE_WAIT_MS,
+          );
+        }),
+      ]);
+    }
+    recentFailures = [];
+  } catch (err) {
+    if (err instanceof ReplayProduceTimeoutError) {
+      // Keep counting the abandoned send against the admission cap until it
+      // settles, so a stalled broker cannot pile up unbounded background sends.
+      detachedSends++;
+      pending
+        .finally(() => {
+          detachedSends--;
+        })
+        .catch(() => undefined);
+    }
+    recordSendFailure();
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 export type ReplayProduceStatus = 'produced' | 'oversize';
@@ -322,18 +490,19 @@ export const produceReplayChunk = async (
 ): Promise<ReplayProduceResult> => {
   // Reject before spending CPU on serialize+compress when too many chunks are
   // already in flight (bounds retained fat payloads under a broker stall).
+  const occupied = inFlightProduces + detachedSends;
   if (
     REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES > 0 &&
-    inFlightProduces >= REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES
+    occupied >= REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES
   ) {
     throw new Error(
-      `replay produce backpressure: ${inFlightProduces} in-flight >= cap ${REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES}`,
+      `replay produce backpressure: ${occupied} in-flight >= cap ${REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES}`,
     );
   }
   inFlightProduces++;
   try {
     const line = JSON.stringify(chunk);
-    const value = encodeReplayLine(line);
+    const value = await encodeReplayLineAsync(line);
     const compressedBytes = value.length;
     const headers: Record<string, string> = {
       'content-encoding': REPLAY_KAFKA_CODEC,
@@ -344,10 +513,12 @@ export const produceReplayChunk = async (
     }
 
     if (compressedBytes <= REPLAY_KAFKA_MAX_BYTES) {
-      const p = await getReplayProducer();
-      await p.send({
-        topic: KAFKA_REPLAY_TOPIC,
-        messages: [{ key, value, headers }],
+      await sendWithin(async () => {
+        const p = await getReplayProducer();
+        await p.send({
+          topic: KAFKA_REPLAY_TOPIC,
+          messages: [{ key, value, headers }],
+        });
       });
       return { status: 'produced', compressedBytes, parts: 1 };
     }
@@ -401,7 +572,6 @@ const sendReplayParts = async (
   key: string,
   baseHeaders: Record<string, string>,
 ): Promise<void> => {
-  const p = await getReplayProducer();
   const chunkId = randomUUID();
   const started = Date.now();
   for (let i = 0; i < parts.length; i++) {
@@ -410,20 +580,23 @@ const sendReplayParts = async (
         `replay parts produce deadline exceeded: ${i}/${parts.length} parts sent in ${Date.now() - started}ms`,
       );
     }
-    await p.send({
-      topic: KAFKA_REPLAY_TOPIC,
-      messages: [
-        {
-          key,
-          value: parts[i]!,
-          headers: {
-            ...baseHeaders,
-            [REPLAY_CHUNK_ID_HEADER]: chunkId,
-            [REPLAY_PART_HEADER]: String(i),
-            [REPLAY_PARTS_HEADER]: String(parts.length),
+    await sendWithin(async () => {
+      const p = await getReplayProducer();
+      await p.send({
+        topic: KAFKA_REPLAY_TOPIC,
+        messages: [
+          {
+            key,
+            value: parts[i]!,
+            headers: {
+              ...baseHeaders,
+              [REPLAY_CHUNK_ID_HEADER]: chunkId,
+              [REPLAY_PART_HEADER]: String(i),
+              [REPLAY_PARTS_HEADER]: String(parts.length),
+            },
           },
-        },
-      ],
+        ],
+      });
     });
   }
 };
@@ -467,5 +640,7 @@ export const disconnectReplayKafka = async (): Promise<void> => {
   replayConsumers.clear();
   producer = null;
   producerConnect = null;
+  replayKafka = null;
+  recentFailures = [];
   await Promise.all(tasks);
 };

@@ -8,14 +8,25 @@ const sendMock = vi.fn(async (payload: any) => {
   sent.push(payload);
 });
 const connectMock = vi.fn(async () => undefined);
+const disconnectMock = vi.fn(async () => undefined);
+const producerMock = vi.fn((_options?: unknown) => ({
+  connect: connectMock,
+  send: sendMock,
+  disconnect: disconnectMock,
+}));
+const createKafkaClientMock = vi.fn((_overrides?: unknown) => ({
+  producer: producerMock,
+  consumer: () => ({}),
+}));
 
 vi.mock('./kafka', () => ({
   isKafkaConfigured: () => true,
   kafkaLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   getKafka: () => ({
-    producer: () => ({ connect: connectMock, send: sendMock }),
+    producer: producerMock,
     consumer: () => ({}),
   }),
+  createKafkaClient: createKafkaClientMock,
 }));
 
 // Telemetry's currentTraceparent is fine to run for real (returns undefined with
@@ -74,6 +85,9 @@ beforeEach(() => {
     sent.push(payload);
   });
   connectMock.mockClear();
+  disconnectMock.mockClear();
+  producerMock.mockClear();
+  createKafkaClientMock.mockClear();
   vi.resetModules();
 });
 
@@ -101,6 +115,17 @@ describe('compressReplayLine / decompressReplayLine', () => {
     // real rrweb JSON compresses well — sanity check it actually shrank
     expect(value.length).toBeLessThan(Buffer.byteLength(line, 'utf8'));
     expect(decompressReplayLine(value)).toBe(line);
+  });
+});
+
+describe('encodeReplayLineAsync', () => {
+  it('produces the same zstd bytes as the sync encoder, round-trippable', async () => {
+    const { encodeReplayLine, encodeReplayLineAsync, decodeReplayValue } =
+      await import('./replay-kafka');
+    const line = JSON.stringify(makeChunk(rrwebPayload(200_000)));
+    const asyncValue = await encodeReplayLineAsync(line, 'zstd');
+    expect(Buffer.compare(asyncValue, encodeReplayLine(line, 'zstd'))).toBe(0);
+    expect(decodeReplayValue(asyncValue, 'zstd')).toBe(line);
   });
 });
 
@@ -263,6 +288,122 @@ describe('produceReplayChunk', () => {
     await expect(
       produceReplayChunk(makeChunk(rrwebPayload(1_000)) as any, 'device_xyz'),
     ).rejects.toThrow('broker down');
+  });
+
+  it('uses its own client with an Event Hubs-sized request timeout and short metadata age', async () => {
+    const { produceReplayChunk } = await import('./replay-kafka');
+    await produceReplayChunk(makeChunk(rrwebPayload(1_000)) as any, 'sess');
+    expect(createKafkaClientMock).toHaveBeenCalledWith(
+      expect.objectContaining({ requestTimeout: 30_000 }),
+    );
+    expect(producerMock).toHaveBeenCalledWith(
+      expect.objectContaining({ metadataMaxAge: 180_000 }),
+    );
+  });
+
+  it('stops waiting after REPLAY_KAFKA_PRODUCE_WAIT_MS with a ReplayProduceTimeoutError', async () => {
+    vi.stubEnv('REPLAY_KAFKA_PRODUCE_WAIT_MS', '20');
+    sendMock.mockImplementation(() => new Promise(() => undefined));
+    const { produceReplayChunk, ReplayProduceTimeoutError } = await import(
+      './replay-kafka'
+    );
+    await expect(
+      produceReplayChunk(makeChunk(rrwebPayload(1_000)) as any, 'sess'),
+    ).rejects.toBeInstanceOf(ReplayProduceTimeoutError);
+  });
+
+  it('keeps a timed-out send on the admission cap until it settles', async () => {
+    vi.stubEnv('REPLAY_KAFKA_PRODUCE_WAIT_MS', '20');
+    vi.stubEnv('REPLAY_KAFKA_MAX_CONCURRENT_PRODUCES', '1');
+    vi.stubEnv('REPLAY_KAFKA_RESET_AFTER_FAILURES', '0');
+    let finish!: () => void;
+    sendMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const chunk = () => makeChunk(rrwebPayload(1_000)) as any;
+
+    await expect(produceReplayChunk(chunk(), 'sess')).rejects.toThrow(
+      /timed out/,
+    );
+    await expect(produceReplayChunk(chunk(), 'sess')).rejects.toThrow(
+      /backpressure/,
+    );
+    finish();
+    await new Promise((r) => setTimeout(r, 0));
+    await expect(produceReplayChunk(chunk(), 'sess')).resolves.toMatchObject({
+      status: 'produced',
+    });
+  });
+
+  it('swallows a late rejection of a send it stopped waiting for', async () => {
+    vi.stubEnv('REPLAY_KAFKA_PRODUCE_WAIT_MS', '20');
+    let fail!: (err: Error) => void;
+    sendMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const { produceReplayChunk } = await import('./replay-kafka');
+      await expect(
+        produceReplayChunk(makeChunk(rrwebPayload(1_000)) as any, 'sess'),
+      ).rejects.toThrow(/timed out/);
+      fail(new Error('late broker error'));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('rebuilds the producer after repeated send failures and recovers', async () => {
+    vi.stubEnv('REPLAY_KAFKA_RESET_AFTER_FAILURES', '3');
+    sendMock.mockRejectedValue(new Error('Request Metadata timed out'));
+    const { produceReplayChunk, replayProducerEvents } = await import(
+      './replay-kafka'
+    );
+    const resets = vi.fn();
+    replayProducerEvents.on('reset', resets);
+    const chunk = () => makeChunk(rrwebPayload(1_000)) as any;
+
+    for (let i = 0; i < 3; i++) {
+      await expect(produceReplayChunk(chunk(), 'sess')).rejects.toThrow();
+    }
+    expect(resets).toHaveBeenCalledTimes(1);
+    expect(disconnectMock).toHaveBeenCalledTimes(1);
+    expect(producerMock).toHaveBeenCalledTimes(1);
+
+    sendMock.mockReset();
+    sendMock.mockImplementation(async (payload: any) => {
+      sent.push(payload);
+    });
+    await expect(produceReplayChunk(chunk(), 'sess')).resolves.toMatchObject({
+      status: 'produced',
+    });
+    expect(producerMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not rebuild again inside the cooldown window', async () => {
+    vi.stubEnv('REPLAY_KAFKA_RESET_AFTER_FAILURES', '2');
+    sendMock.mockRejectedValue(new Error('Request Metadata timed out'));
+    const { produceReplayChunk, replayProducerEvents } = await import(
+      './replay-kafka'
+    );
+    const resets = vi.fn();
+    replayProducerEvents.on('reset', resets);
+    for (let i = 0; i < 6; i++) {
+      await expect(
+        produceReplayChunk(makeChunk(rrwebPayload(1_000)) as any, 'sess'),
+      ).rejects.toThrow();
+    }
+    expect(resets).toHaveBeenCalledTimes(1);
   });
 
   it('rejects with backpressure once in-flight produces reach the cap', async () => {
