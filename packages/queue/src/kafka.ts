@@ -122,32 +122,45 @@ export const shouldUseKafka = (projectId: string): boolean => {
   return kafkaProjectIdAllowList.has(projectId);
 };
 
-let kafka: Kafka | null = null;
-export const getKafka = (): Kafka => {
+const buildKafkaConfig = (
+  overrides: Partial<KafkaConfig> = {},
+): KafkaConfig => {
   if (!isKafkaConfigured()) {
     throw new Error(
       'KAFKA_BROKERS env var is not set; cannot create Kafka client',
     );
   }
+  const sasl = buildSasl();
+  return {
+    clientId: process.env.KAFKA_CLIENT_ID || 'openpanel',
+    brokers: KAFKA_BROKERS,
+    logLevel: logLevel.WARN,
+    requestTimeout: KAFKA_REQUEST_TIMEOUT_MS,
+    connectionTimeout: KAFKA_CONNECTION_TIMEOUT_MS,
+    // Default ssl on when SASL is present (managed brokers require TLS);
+    // explicit KAFKA_SSL=true/false overrides.
+    ssl: process.env.KAFKA_SSL
+      ? process.env.KAFKA_SSL === 'true'
+      : Boolean(sasl),
+    sasl,
+    ...overrides,
+  };
+};
+
+let kafka: Kafka | null = null;
+export const getKafka = (): Kafka => {
   if (!kafka) {
-    const sasl = buildSasl();
-    const config: KafkaConfig = {
-      clientId: process.env.KAFKA_CLIENT_ID || 'openpanel',
-      brokers: KAFKA_BROKERS,
-      logLevel: logLevel.WARN,
-      requestTimeout: KAFKA_REQUEST_TIMEOUT_MS,
-      connectionTimeout: KAFKA_CONNECTION_TIMEOUT_MS,
-      // Default ssl on when SASL is present (managed brokers require TLS);
-      // explicit KAFKA_SSL=true/false overrides.
-      ssl: process.env.KAFKA_SSL
-        ? process.env.KAFKA_SSL === 'true'
-        : Boolean(sasl),
-      sasl,
-    };
-    kafka = new Kafka(config);
+    kafka = new Kafka(buildKafkaConfig());
   }
   return kafka;
 };
+
+/**
+ * A separate client with its own settings, for a caller whose needs differ from
+ * the consumers' fail-fast defaults (the replay producer on the API).
+ */
+export const createKafkaClient = (overrides: Partial<KafkaConfig>): Kafka =>
+  new Kafka(buildKafkaConfig(overrides));
 
 // Produce one event to the events topic via the Azure Event Hubs buffered
 // producer (auto-batches → no per-request round-trip, no mif=1 pile-up / OOM).
