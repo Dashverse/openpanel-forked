@@ -390,6 +390,48 @@ describe('produceReplayChunk', () => {
     expect(producerMock).toHaveBeenCalledTimes(2);
   });
 
+  it('never hands out a stale or missing producer when a rebuild lands during connect', async () => {
+    vi.stubEnv('REPLAY_KAFKA_PRODUCE_WAIT_MS', '20');
+    vi.stubEnv('REPLAY_KAFKA_RESET_AFTER_FAILURES', '1');
+    let failFirstConnect!: (err: Error) => void;
+    connectMock.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((_, reject) => {
+          failFirstConnect = reject;
+        }),
+    );
+    let finishSecondConnect!: () => void;
+    connectMock.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          finishSecondConnect = () => resolve(undefined);
+        }),
+    );
+    const { produceReplayChunk } = await import('./replay-kafka');
+    const chunk = () => makeChunk(rrwebPayload(1_000)) as any;
+
+    // First send times out while connecting; that failure rebuilds the producer.
+    await expect(produceReplayChunk(chunk(), 'sess')).rejects.toThrow(
+      /timed out/,
+    );
+    // The next send starts the replacement's connect, then the stale connect
+    // fails: it must not clear the replacement's connect promise.
+    const second = produceReplayChunk(chunk(), 'sess');
+    await new Promise((r) => setTimeout(r, 0));
+    failFirstConnect(new Error('stale connect failed'));
+    await new Promise((r) => setTimeout(r, 0));
+    finishSecondConnect();
+
+    await expect(second).resolves.toMatchObject({ status: 'produced' });
+    // A later send reuses the connected replacement instead of connecting
+    // again because the stale failure wiped its connect promise.
+    await expect(produceReplayChunk(chunk(), 'sess')).resolves.toMatchObject({
+      status: 'produced',
+    });
+    expect(producerMock).toHaveBeenCalledTimes(2);
+    expect(connectMock).toHaveBeenCalledTimes(2);
+  });
+
   it('does not rebuild again inside the cooldown window', async () => {
     vi.stubEnv('REPLAY_KAFKA_RESET_AFTER_FAILURES', '2');
     sendMock.mockRejectedValue(new Error('Request Metadata timed out'));

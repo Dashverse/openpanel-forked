@@ -30,8 +30,12 @@ const LEVEL = Symbol.for('level');
 const normalizeLevel = winston.format((info) => {
   const record = info as Record<string | symbol, unknown>;
   const current = record[LEVEL] ?? info.level;
+  // hasOwn, not `in`: `constructor` or `toString` as a level would pass `in`
+  // and still have no colour.
   const level =
-    typeof current === 'string' && current in levels ? current : 'info';
+    typeof current === 'string' && Object.hasOwn(levels, current)
+      ? current
+      : 'info';
   record[LEVEL] = level;
   info.level = level;
   return info;

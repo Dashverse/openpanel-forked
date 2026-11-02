@@ -18,6 +18,15 @@ describe('createLogger', () => {
     ).not.toThrow();
   });
 
+  it('logs an entry whose level is an inherited object key', () => {
+    expect(() =>
+      logger.log({
+        level: 'constructor',
+        message: 'odd level',
+      } as unknown as winston.LogEntry),
+    ).not.toThrow();
+  });
+
   it('still logs the ordinary levels', () => {
     expect(() => {
       logger.error('error entry', { error: new Error('boom') });

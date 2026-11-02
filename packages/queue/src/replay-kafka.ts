@@ -354,27 +354,38 @@ const getReplayKafka = (): Kafka => {
   return replayKafka;
 };
 
+// A rebuild can happen while a connect() is still pending, so each caller
+// checks that the producer it waited on is still the current one, and only
+// the current connect may clear the shared connect promise.
 const getReplayProducer = async (): Promise<Producer> => {
-  if (!producer) {
-    producer = getReplayKafka().producer({
-      allowAutoTopicCreation: false,
-      idempotent: false,
-      metadataMaxAge: REPLAY_KAFKA_METADATA_MAX_AGE_MS,
-      // Bound concurrent in-flight sends so a slow broker backpressures the
-      // (low-rate) /track path instead of piling up in memory.
-      maxInFlightRequests: REPLAY_KAFKA_MAX_INFLIGHT,
-      retry: { retries: REPLAY_KAFKA_PRODUCER_RETRIES },
-    });
+  for (;;) {
+    if (!producer) {
+      producer = getReplayKafka().producer({
+        allowAutoTopicCreation: false,
+        idempotent: false,
+        metadataMaxAge: REPLAY_KAFKA_METADATA_MAX_AGE_MS,
+        // Bound concurrent in-flight sends so a slow broker backpressures the
+        // (low-rate) /track path instead of piling up in memory.
+        maxInFlightRequests: REPLAY_KAFKA_MAX_INFLIGHT,
+        retry: { retries: REPLAY_KAFKA_PRODUCER_RETRIES },
+      });
+    }
+    const current = producer;
+    if (!producerConnect) {
+      const connecting: Promise<void> = current.connect().catch((err) => {
+        // Allow a reconnect attempt on the next call rather than latching failed.
+        if (producerConnect === connecting) {
+          producerConnect = null;
+        }
+        throw err;
+      });
+      producerConnect = connecting;
+    }
+    await producerConnect;
+    if (producer === current) {
+      return current;
+    }
   }
-  if (!producerConnect) {
-    producerConnect = producer.connect().catch((err) => {
-      // Allow a reconnect attempt on the next call rather than latching failed.
-      producerConnect = null;
-      throw err;
-    });
-  }
-  await producerConnect;
-  return producer;
 };
 
 const resetReplayProducer = (failures: number): void => {
