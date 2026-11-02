@@ -26,6 +26,7 @@ import {
   getQueueName,
   produceIncomingEvent,
   produceReplayChunk,
+  ReplayProduceTimeoutError,
   shouldUseKafka,
   shouldUseReplayKafka,
 } from '@openpanel/queue';
@@ -494,11 +495,18 @@ async function handleReplay({
       // drop) from a genuine produce failure, so dropped_total stays a
       // trustworthy loss signal (there is no Redis fallback on this path).
       const reason =
-        err instanceof Error && err.message.includes('backpressure')
-          ? 'backpressure'
-          : 'produce_failed';
+        err instanceof ReplayProduceTimeoutError
+          ? 'timeout'
+          : err instanceof Error && err.message.includes('backpressure')
+            ? 'backpressure'
+            : 'produce_failed';
       replayKafkaDroppedTotal.inc({ reason });
-      throw err; // surface to /track → SDK retry (no Redis fallback)
+      // 503, not 500: the send failed or outlived REPLAY_KAFKA_PRODUCE_WAIT_MS,
+      // and the SDK retry usually reaches a pod whose producer is healthy.
+      throw new HttpError('replay chunk could not be queued, retry', {
+        status: 503,
+        error: err,
+      });
     }
     return;
   }

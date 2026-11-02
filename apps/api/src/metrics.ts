@@ -1,4 +1,7 @@
-import type { ReplayProduceResult } from '@openpanel/queue';
+import {
+  type ReplayProduceResult,
+  replayProducerEvents,
+} from '@openpanel/queue';
 import client from 'prom-client';
 
 // Producer-side metrics for the session-replay Kafka path. The producer runs in
@@ -24,6 +27,15 @@ replayKafkaDroppedTotal.inc({ reason: 'produce_failed' }, 0);
 // `backpressure` = admission-cap rejection; the SDK retries, so it is NOT a
 // confirmed drop — kept separate from produce_failed so the loss signal is clean.
 replayKafkaDroppedTotal.inc({ reason: 'backpressure' }, 0);
+// `timeout` = the send outlived REPLAY_KAFKA_PRODUCE_WAIT_MS; the SDK retries
+// and the send may still land, so like backpressure it is not a confirmed drop.
+replayKafkaDroppedTotal.inc({ reason: 'timeout' }, 0);
+
+export const replayKafkaProducerResetsTotal = new client.Counter({
+  name: 'replay_kafka_producer_resets_total',
+  help: 'Times the replay Kafka producer was rebuilt after repeated send failures',
+});
+replayProducerEvents.on('reset', () => replayKafkaProducerResetsTotal.inc());
 
 // Chunks whose compressed value is over the per-message limit (REPLAY_KAFKA_MAX_BYTES)
 // are sent as several transport parts (one message each) and joined back by
