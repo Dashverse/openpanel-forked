@@ -20,6 +20,7 @@
  * range-GET only the blocks a page needs (adjacent ranges in the same blob are
  * coalesced into one GET, one zstd frame is decoded per ref).
  */
+import { createLogger } from '@openpanel/logger';
 import sqlstring from 'sqlstring';
 import {
   decompressReplayBlock,
@@ -736,6 +737,8 @@ export async function loadReplayChunksFromBlocks(
   return found;
 }
 
+const replayReaderLogger = createLogger({ name: 'replay-block-reader' });
+
 // `chunk_keys` exists only after migration 26. Probe once (re-probe a missing
 // column every few minutes) so the reader works before and after the DDL.
 let chunkKeysColumn: { present: boolean; at: number } | null = null;
@@ -755,9 +758,25 @@ export async function replayBlocksHaveChunkKeys(): Promise<boolean> {
         WHERE database = currentDatabase()
           AND table = ${sqlstring.escape(TABLE_NAMES.session_replay_blocks)}
           AND name = 'chunk_keys'`,
+      // Prod's CLICKHOUSE_SETTINGS set use_query_cache=1 globally, and the query
+      // cache refuses this probe twice over: `currentDatabase()` is
+      // non-deterministic (704) and `system.columns` is a system table (719).
+      // Either is raised as ExceptionBeforeStart, so the probe never ran, every
+      // call concluded the column was absent, and the readers below silently
+      // dropped `chunk_keys` for the 12 days after migration 26 landed. A
+      // one-row existence probe is not worth caching, so opt out of the cache
+      // entirely rather than chasing each handling setting.
+      { use_query_cache: 0 },
     );
     chunkKeysColumn = { present: Number(rows[0]?.c ?? 0) > 0, at: Date.now() };
-  } catch {
+  } catch (error) {
+    // Never silent: this probe gates the chunk-key read path, and its only
+    // previous symptom was a ClickHouse error-count alert that named the store
+    // rather than the probe.
+    replayReaderLogger.error('chunk_keys probe failed; assuming absent', {
+      table: TABLE_NAMES.session_replay_blocks,
+      error,
+    });
     chunkKeysColumn = { present: false, at: Date.now() };
   }
   return chunkKeysColumn.present;
