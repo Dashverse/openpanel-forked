@@ -257,7 +257,14 @@ function addBlock(chunks: Chunk[], blockIndex: number, createdIso: string) {
     first_ms: String(Math.min(...chunks.map((c) => ms(c.started_at)))),
     // As the writer does: a block's events_count is its chunks' sum.
     events_count: String(chunks.reduce((n, c) => n + c.events_count, 0)),
-    chunk_keys: chunks.map((c) => replayChunkKeyOf(JSON.parse(toLine(c)))),
+    // As the reader selects it: toJSONString(chunk_keys), Int64s quoted.
+    chunk_keys_json: JSON.stringify(
+      chunks.map((c) =>
+        replayChunkKeyOf(JSON.parse(toLine(c))).map((v, i) =>
+          i === 1 || i === 2 ? String(v) : v,
+        ),
+      ),
+    ),
   });
 }
 
