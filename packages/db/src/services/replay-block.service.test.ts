@@ -29,7 +29,11 @@ vi.mock('../clickhouse/client', () => ({
   ch: { insert: (args: any) => insertMock(args) },
 }));
 
-const { writeSessionReplayBlocks } = await import('./replay-block.service');
+const {
+  writeSessionReplayBlocks,
+  replayBlockRefsInsertSettings,
+  parseRefsAsyncInsertTimeoutMs,
+} = await import('./replay-block.service');
 const { decompressReplayBlock } = await import('../blob/replay-blocks');
 
 const chunk = (
@@ -206,6 +210,65 @@ describe('writeSessionReplayBlocks', () => {
       insertMock.mock.calls[0]![0].clickhouse_settings
         .input_format_skip_unknown_fields,
     ).toBe(1);
+  });
+
+  it('ref inserts use a fixed async-insert flush window (default 2 s)', async () => {
+    await writeSessionReplayBlocks([
+      { line: chunk('A', 0, '2026-10-01 10:00:00.000'), offset: 1 },
+    ]);
+    expect(insertMock.mock.calls[0]![0].clickhouse_settings).toMatchObject({
+      async_insert: 1,
+      wait_for_async_insert: 1,
+      async_insert_use_adaptive_busy_timeout: 0,
+      async_insert_busy_timeout_max_ms: 2000,
+    });
+    // 0 falls back to ClickHouse's adaptive default
+    const off = replayBlockRefsInsertSettings(0);
+    expect(off).not.toHaveProperty('async_insert_busy_timeout_max_ms');
+    expect(off).not.toHaveProperty('async_insert_use_adaptive_busy_timeout');
+    expect(off.wait_for_async_insert).toBe(1);
+  });
+
+  it('ref inserts carry identical settings (incl. a fixed log_comment) so CH can coalesce them', async () => {
+    await writeSessionReplayBlocks([
+      { line: chunk('A', 0, '2026-10-01 10:00:00.000'), offset: 1 },
+    ]);
+    await writeSessionReplayBlocks([
+      { line: chunk('B', 0, '2026-10-01 10:00:05.000'), offset: 2 },
+    ]);
+    const [first, second] = insertMock.mock.calls.map(
+      (c) => c[0].clickhouse_settings,
+    );
+    expect(first).toEqual(second);
+    // an explicit log_comment, so the client wrapper's per-request one
+    // (trace_id/span_id) does not split every insert into its own bucket
+    expect(typeof first.log_comment).toBe('string');
+    const comment = JSON.parse(first.log_comment);
+    expect(comment).not.toHaveProperty('trace_id');
+    expect(comment).not.toHaveProperty('span_id');
+    expect(comment).not.toHaveProperty('user_id');
+  });
+
+  it('clamps REPLAY_BLOCKS_ASYNC_INSERT_TIMEOUT_MS to [200, 10000] ms and warns', () => {
+    const warn = vi.fn();
+    expect(parseRefsAsyncInsertTimeoutMs(undefined, warn)).toBe(2000);
+    expect(parseRefsAsyncInsertTimeoutMs('', warn)).toBe(2000);
+    expect(parseRefsAsyncInsertTimeoutMs('0', warn)).toBe(0); // adaptive
+    expect(parseRefsAsyncInsertTimeoutMs('1500', warn)).toBe(1500);
+    expect(parseRefsAsyncInsertTimeoutMs('200', warn)).toBe(200);
+    expect(parseRefsAsyncInsertTimeoutMs('10000', warn)).toBe(10_000);
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(parseRefsAsyncInsertTimeoutMs('2', warn)).toBe(200);
+    expect(parseRefsAsyncInsertTimeoutMs('20000', warn)).toBe(10_000);
+    expect(warn).toHaveBeenCalledTimes(2);
+
+    // not a whole number of ms (a typo like "2s"): default, not a 2 ms window
+    warn.mockClear();
+    expect(parseRefsAsyncInsertTimeoutMs('2s', warn)).toBe(2000);
+    expect(parseRefsAsyncInsertTimeoutMs('-5', warn)).toBe(2000);
+    expect(parseRefsAsyncInsertTimeoutMs('abc', warn)).toBe(2000);
+    expect(warn).toHaveBeenCalledTimes(3);
   });
 
   it('propagates an append failure (caller decides) and inserts no refs', async () => {
