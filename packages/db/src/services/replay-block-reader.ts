@@ -793,13 +793,29 @@ type RefRow = {
   last_ms?: string | number;
   events_count?: string | number;
   size_bytes?: string | number;
-  chunk_keys?: [
-    number | string,
-    number | string,
-    number | string,
-    number | string,
-  ][];
+  /** `toJSONString(chunk_keys)`, e.g. `[[0,"1793821811204","1793821811235",1]]`. */
+  chunk_keys_json?: string;
 };
+
+/**
+ * Parse `toJSONString(chunk_keys)`. Int64 elements arrive quoted, so every
+ * element goes through Number().
+ */
+function parseChunkKeys(json: string | undefined): ReplayBlockChunkKey[] {
+  if (!json) {
+    return [];
+  }
+  const keys = JSON.parse(json) as unknown;
+  if (!Array.isArray(keys)) {
+    return [];
+  }
+  return keys.map((key) => {
+    const [c, s, e, f] = (
+      Array.isArray(key) ? key : Object.values(key as object)
+    ) as unknown[];
+    return [Number(c), Number(s), Number(e), Number(f)] as ReplayBlockChunkKey;
+  });
+}
 
 /** Every block ref of a session (ORDER BY prefix lookup; no FINAL needed). */
 export async function fetchReplayBlockRefs(
@@ -818,7 +834,12 @@ export async function fetchReplayBlockRefs(
             toString(toUnixTimestamp64Milli(last_started_at)) AS last_ms,
             toString(events_count) AS events_count,
             toString(size_bytes) AS size_bytes
-            ${withKeys ? ', chunk_keys' : ''}
+            ${
+              // As JSON text, like the toString() columns above: chQuery
+              // parseFloat()s every column whose type mentions Int, which
+              // turns Array(Tuple(UInt32, Int64, ...)) into one number.
+              withKeys ? ', toJSONString(chunk_keys) AS chunk_keys_json' : ''
+            }
      FROM ${TABLE_NAMES.session_replay_blocks}
      WHERE project_id = ${sqlstring.escape(projectId)}
        AND session_id = ${sqlstring.escape(sessionId)}
@@ -840,10 +861,7 @@ export async function fetchReplayBlockRefs(
       eventsCount: Number(r.events_count) || 0,
       sizeBytes:
         Number(r.size_bytes) || Number(r.byte_end) - Number(r.byte_start),
-      chunkKeys: (r.chunk_keys ?? []).map(
-        ([c, s, e, f]) =>
-          [Number(c), Number(s), Number(e), Number(f)] as ReplayBlockChunkKey,
-      ),
+      chunkKeys: parseChunkKeys(r.chunk_keys_json),
     }))
     .filter((r) => r.blobPath && r.byteEnd > r.byteStart);
 }
